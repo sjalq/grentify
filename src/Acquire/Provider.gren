@@ -1,0 +1,180 @@
+module Acquire.Provider exposing
+    ( Permissions
+    , Options
+    , AcquiredPackage
+    , acquire
+    , acquireCoordinate
+    , acquireLocalPath
+    )
+
+{-| Top-level acquisition API for the porting orchestrator.
+
+Existing filesystem inputs win over registry-coordinate parsing. This makes
+`author/project` usable as either an explicitly present local directory or an
+Elm package name without adding a platform-specific path heuristic.
+-}
+
+import Acquire.Coordinate as Coordinate exposing (Coordinate)
+import Acquire.Registry as Registry
+import Acquire.Source as Source exposing (Provenance, SourceFile)
+import ChildProcess
+import Elm.Manifest exposing (Manifest)
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import HttpClient
+import Node
+import Port.Error as PortError exposing (Error)
+import System.File
+import Task exposing (Task)
+
+
+type alias Permissions =
+    { fileSystem : FileSystem.Permission
+    , childProcess : ChildProcess.Permission
+    , http : HttpClient.Permission
+    }
+
+
+type alias Options =
+    { platform : Node.Platform
+    , workingDirectory : Path
+    , cacheDirectory : Path
+    , offline : Bool
+    }
+
+
+type alias AcquiredPackage =
+    { manifest : Manifest
+    , packageRoot : Path
+    , sourceDirectory : Path
+    , sources : Array SourceFile
+    , provenance : Provenance
+    }
+
+
+acquire : Permissions -> Options -> String -> Task Error AcquiredPackage
+acquire permissions options input =
+    let
+        candidate =
+            System.File.resolve options.platform options.workingDirectory input
+    in
+    System.File.exists permissions.fileSystem candidate
+        |> Task.andThen
+            (\candidateExists ->
+                if candidateExists then
+                    localRoot permissions.fileSystem candidate
+                        |> Task.andThen (acquireLocalPath permissions options)
+
+                else
+                    when Coordinate.parse input is
+                        Ok coordinate ->
+                            acquireCoordinate permissions options coordinate
+
+                        Err coordinateError ->
+                            Task.fail <|
+                                PortError.create "INVALID_PACKAGE_INPUT"
+                                    ("'"
+                                        ++ input
+                                        ++ "' is not an existing local package path or a valid Elm registry coordinate. "
+                                        ++ Coordinate.errorToString coordinateError
+                                    )
+            )
+
+
+acquireLocalPath : Permissions -> Options -> Path -> Task Error AcquiredPackage
+acquireLocalPath permissions _ packageRoot =
+    Source.acquireLocal permissions.fileSystem packageRoot
+        |> Task.map
+            (\acquired ->
+                { manifest = acquired.manifest
+                , packageRoot = acquired.tree.packageRoot
+                , sourceDirectory = acquired.tree.sourceDirectory
+                , sources = acquired.tree.files
+                , provenance = acquired.tree.provenance
+                }
+            )
+
+
+acquireCoordinate : Permissions -> Options -> Coordinate -> Task Error AcquiredPackage
+acquireCoordinate permissions options coordinate =
+    let
+        registryPermissions =
+            { fileSystem = permissions.fileSystem
+            , http = permissions.http
+            }
+
+        registryOptions =
+            { cacheDirectory = options.cacheDirectory
+            , offline = options.offline
+            }
+
+        sourcePermissions =
+            { fileSystem = permissions.fileSystem
+            , childProcess = permissions.childProcess
+            }
+
+        sourceOptions =
+            { platform = options.platform
+            , cacheDirectory = options.cacheDirectory
+            , offline = options.offline
+            }
+    in
+    Registry.resolveVersion registryPermissions registryOptions coordinate
+        |> Task.andThen
+            (\version ->
+                Registry.loadManifest registryPermissions registryOptions (Coordinate.packageName coordinate) version
+            )
+        |> Task.andThen
+            (\manifest ->
+                Source.acquireRegistry sourcePermissions sourceOptions manifest
+                    |> Task.map
+                        (\tree ->
+                            { manifest = manifest
+                            , packageRoot = tree.packageRoot
+                            , sourceDirectory = tree.sourceDirectory
+                            , sources = tree.files
+                            , provenance = tree.provenance
+                            }
+                        )
+            )
+
+
+localRoot : FileSystem.Permission -> Path -> Task Error Path
+localRoot permission candidate =
+    FileSystem.metadata permission { resolveLink = True } candidate
+        |> Task.mapError
+            (\fileError ->
+                PortError.create "LOCAL_PACKAGE_STAT_FAILED"
+                    ("Could not inspect local package input "
+                        ++ Path.toPosixString candidate
+                        ++ ": "
+                        ++ FileSystem.errorToString fileError
+                    )
+            )
+        |> Task.andThen
+            (\metadata ->
+                when metadata.entityType is
+                    FileSystem.Directory ->
+                        Task.succeed candidate
+
+                    FileSystem.File ->
+                        if Path.filenameWithExtension candidate == "elm.json" then
+                            when Path.parentPath candidate is
+                                Just parent ->
+                                    Task.succeed parent
+
+                                Nothing ->
+                                    Task.fail <|
+                                        PortError.create "INVALID_LOCAL_PACKAGE_PATH"
+                                            "Could not determine the parent directory of the supplied elm.json."
+
+                        else
+                            Task.fail <|
+                                PortError.create "INVALID_LOCAL_PACKAGE_PATH"
+                                    "A local Elm package input must be a directory or its elm.json file."
+
+                    _ ->
+                        Task.fail <|
+                            PortError.create "INVALID_LOCAL_PACKAGE_PATH"
+                                "A local Elm package input must resolve to a regular directory or elm.json file."
+            )

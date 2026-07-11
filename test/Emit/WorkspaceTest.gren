@@ -1,0 +1,363 @@
+module Emit.WorkspaceTest exposing (tests)
+
+import Bytes exposing (Bytes)
+import Compiler.Package as CompilerPackage
+import Compiler.Platform as CompilerPlatform
+import Debug
+import Dict
+import Emit.Manifest as Manifest
+import Emit.Package as Package
+import Emit.Workspace as Workspace
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Port.Error as PortError exposing (Error)
+import System.File
+import Task exposing (Task)
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : FileSystem.Permission -> Task Never (Array TestResult)
+tests permission =
+    FileSystem.makeTempDirectory permission "elm-to-gren-workspace-test-"
+        |> Task.mapError fileError
+        |> Task.andThen
+            (\temporary ->
+                scenario permission temporary
+                    |> Task.map
+                        (\_ ->
+                            outcome
+                                "workspaces publish packages and bundles atomically after validation"
+                                True
+                                ""
+                        )
+                    |> Task.onError
+                        (\error ->
+                            Task.succeed <|
+                                outcome
+                                    "workspaces publish packages and bundles atomically after validation"
+                                    False
+                                    (PortError.toString error)
+                        )
+                    |> Task.andThen
+                        (\check ->
+                            FileSystem.remove permission { recursive = True } temporary
+                                |> Task.map (\_ -> [ check ])
+                                |> Task.onError (\_ -> Task.succeed [ check ])
+                        )
+            )
+        |> Task.onError
+            (\error ->
+                Task.succeed
+                    [ outcome
+                        "workspaces publish packages and bundles atomically after validation"
+                        False
+                        (PortError.toString error)
+                    ]
+            )
+
+
+scenario : FileSystem.Permission -> Path -> Task Error {}
+scenario permission temporary =
+    let
+        firstOutput =
+            inDirectory "first" temporary
+
+        secondOutput =
+            inDirectory "second" temporary
+
+        firstOptions =
+            options firstOutput temporary "value = 1\n" (validateStaging permission "value = 1\n")
+
+        rejectedOptions =
+            options firstOutput temporary "value = 2\n"
+                (\_ -> Task.fail (PortError.create "EXPECTED_REJECTION" "Rejected by the test callback."))
+
+        replacementOptions =
+            options firstOutput temporary "value = 2\n" (validateStaging permission "value = 2\n")
+
+        duplicateOptions =
+            options secondOutput temporary "value = 2\n" (validateStaging permission "value = 2\n")
+    in
+    Workspace.emit { fileSystem = permission } firstOptions
+        |> Task.andThen (\_ -> verifyPublished permission firstOutput "value = 1\n")
+        |> Task.andThen (\_ -> expectRejected (Workspace.emit { fileSystem = permission } rejectedOptions))
+        |> Task.andThen (\_ -> expectSource permission firstOutput "value = 1\n")
+        |> Task.andThen (\_ -> Workspace.emit { fileSystem = permission } replacementOptions)
+        |> Task.andThen (\_ -> verifyPublished permission firstOutput "value = 2\n")
+        |> Task.andThen (\_ -> Workspace.emit { fileSystem = permission } duplicateOptions)
+        |> Task.andThen
+            (\_ ->
+                Task.map2 (\first second -> { first = first, second = second })
+                    (readBundle permission firstOutput)
+                    (readBundle permission secondOutput)
+            )
+        |> Task.andThen
+            (\bundles ->
+                if bundles.first == bundles.second then
+                    verifyUnownedDestination permission temporary
+
+                else
+                    failure "Official compiler bundle output was not deterministic."
+            )
+
+
+options output sourceRoot source validateBeforeCommit =
+    let
+        dependency =
+            generatedPackage sourceRoot
+                { sourcePackage = "source/dependency"
+                , name = "ported/dependency"
+                , moduleName = "Dependency"
+                , source = "dependency = 42\n"
+                , dependencies = Dict.empty
+                }
+
+        dependencyDirectory =
+            Package.packageDirectoryName
+                { name = dependency.manifest.name
+                , version = dependency.manifest.version
+                }
+
+        root =
+            generatedPackage sourceRoot
+                { sourcePackage = "source/root"
+                , name = "ported/root"
+                , moduleName = "Root"
+                , source = source
+                , dependencies =
+                    Dict.singleton dependency.manifest.name
+                        (Manifest.LocalPath (".elm-to-gren/packages/" ++ dependencyDirectory))
+                }
+    in
+    { output = output
+    , rootPackage = root.manifest.name
+    , packages = [ dependency, root ]
+    , lockfile = "{\"schemaVersion\":1,\"root\":\"ported/root\"}"
+    , report = "{\"schemaVersion\":1,\"root\":\"ported/root\"}"
+    , validateBeforeCommit = validateBeforeCommit
+    }
+
+
+generatedPackage sourceRoot spec =
+    { sourcePackage = spec.sourcePackage
+    , sourceRoot = sourceRoot
+    , manifest =
+        { platform = CompilerPlatform.Common
+        , name = spec.name
+        , summary = "A generated fixture"
+        , license = "BSD-3-Clause"
+        , version = "1.0.0"
+        , exposedModules = Manifest.ExposedArray [ spec.moduleName ]
+        , grenVersion = "0.6.0 <= v < 0.7.0"
+        , dependencies = spec.dependencies
+        }
+    , modules =
+        [ { moduleName = spec.moduleName
+          , relativePath = "src/" ++ spec.moduleName ++ ".elm"
+          , source =
+                "module "
+                    ++ spec.moduleName
+                    ++ " exposing (..)\n\n"
+                    ++ spec.source
+          }
+        ]
+    }
+
+
+validateStaging : FileSystem.Permission -> String -> Path -> Task Error {}
+validateStaging permission expectedRootSource staging =
+    Task.map3
+        (\rootSource dependencyExists bundleExists ->
+            { rootSource = rootSource
+            , dependencyExists = dependencyExists
+            , bundleExists = bundleExists
+            }
+        )
+        (System.File.readText permission (inDirectory "src/Root.gren" staging))
+        (System.File.exists permission
+            (inDirectory
+                ".elm-to-gren/packages/ported_dependency__1_0_0/src/Dependency.gren"
+                staging
+            )
+        )
+        (System.File.exists permission
+            (inDirectory "gren_packages/ported_dependency__1_0_0.pkg.gz" staging)
+        )
+        |> Task.andThen
+            (\actual ->
+                if String.endsWith expectedRootSource actual.rootSource
+                    && actual.dependencyExists
+                    && actual.bundleExists
+                then
+                    Task.succeed {}
+
+                else
+                    failure ("Validation callback saw an incomplete staging tree: " ++ Debug.toString actual)
+            )
+
+
+verifyPublished : FileSystem.Permission -> Path -> String -> Task Error {}
+verifyPublished permission output expectedSource =
+    expectSource permission output expectedSource
+        |> Task.andThen
+            (\_ ->
+                System.File.readText permission (inDirectory ".elm-to-gren-workspace.json" output)
+            )
+        |> Task.andThen
+            (\marker ->
+                if String.contains "\"schemaVersion\": 1" marker then
+                    verifyMetadata permission output
+
+                else
+                    failure "The published ownership marker was missing or invalid."
+            )
+        |> Task.andThen (\_ -> loadBundle permission output)
+        |> Task.andThen
+            (\bundle ->
+                if Dict.member "Dependency" bundle.sources then
+                    Task.succeed {}
+
+                else
+                    failure "The official compiler could not read the dependency source from its bundle."
+            )
+
+
+verifyMetadata : FileSystem.Permission -> Path -> Task Error {}
+verifyMetadata permission output =
+    Task.map3
+        (\lockfile report dependencyExists ->
+            { lockfile = lockfile
+            , report = report
+            , dependencyExists = dependencyExists
+            }
+        )
+        (System.File.readText permission (inDirectory "elm-to-gren.lock.json" output))
+        (System.File.readText permission (inDirectory "elm-to-gren.report.json" output))
+        (System.File.exists permission
+            (inDirectory
+                ".elm-to-gren/packages/ported_dependency__1_0_0/src/Dependency.gren"
+                output
+            )
+        )
+        |> Task.andThen
+            (\metadata ->
+                if String.endsWith "\n" metadata.lockfile
+                    && String.endsWith "\n" metadata.report
+                    && metadata.dependencyExists
+                then
+                    Task.succeed {}
+
+                else
+                    failure ("Published workspace metadata or dependency sources were incomplete: " ++ Debug.toString metadata)
+            )
+
+
+verifyUnownedDestination : FileSystem.Permission -> Path -> Task Error {}
+verifyUnownedDestination permission temporary =
+    let
+        output =
+            inDirectory "unowned" temporary
+
+        sentinel =
+            inDirectory "sentinel.txt" output
+    in
+    System.File.writeText permission sentinel "belongs to someone else\n"
+        |> Task.andThen
+            (\_ ->
+                Workspace.emit
+                    { fileSystem = permission }
+                    (options output temporary "value = 3\n" (validateStaging permission "value = 3\n"))
+                    |> expectRejected
+            )
+        |> Task.andThen (\_ -> System.File.readText permission sentinel)
+        |> Task.andThen
+            (\contents ->
+                if contents == "belongs to someone else\n" then
+                    Task.succeed {}
+
+                else
+                    failure "Refusing an unowned destination still changed its contents."
+            )
+
+
+expectSource : FileSystem.Permission -> Path -> String -> Task Error {}
+expectSource permission output expected =
+    System.File.readText permission (inDirectory "src/Root.gren" output)
+        |> Task.andThen
+            (\source ->
+                if String.endsWith expected source then
+                    Task.succeed {}
+
+                else
+                    failure ("Unexpected published root source: " ++ source)
+            )
+
+
+expectRejected : Task Error a -> Task Error {}
+expectRejected task =
+    task
+        |> Task.map (\_ -> False)
+        |> Task.onError (\_ -> Task.succeed True)
+        |> Task.andThen
+            (\rejected ->
+                if rejected then
+                    Task.succeed {}
+
+                else
+                    failure "A failing validation callback still published the staging tree."
+            )
+
+
+loadBundle : FileSystem.Permission -> Path -> Task Error CompilerPackage.Package
+loadBundle permission output =
+    FileSystem.readFileStream permission FileSystem.Beginning (bundlePath output)
+        |> Task.mapError fileError
+        |> Task.andThen
+            (\stream ->
+                CompilerPackage.loadFromStream stream
+                    |> Task.mapError
+                        (\error ->
+                            PortError.create "TEST_FAILED"
+                                ("Compiler rejected emitted bundle: " ++ Debug.toString error)
+                        )
+            )
+
+
+readBundle : FileSystem.Permission -> Path -> Task Error Bytes
+readBundle permission output =
+    FileSystem.readFile permission (bundlePath output)
+        |> Task.mapError fileError
+
+
+bundlePath : Path -> Path
+bundlePath output =
+    inDirectory "gren_packages/ported_dependency__1_0_0.pkg.gz" output
+
+
+fileError : FileSystem.Error -> Error
+fileError error =
+    PortError.create "TEST_FAILED" (FileSystem.errorToString error)
+
+
+failure : String -> Task Error a
+failure message =
+    Task.fail (PortError.create "TEST_FAILED" message)
+
+
+inDirectory : String -> Path -> Path
+inDirectory relative directory =
+    Path.append (Path.fromPosixString relative) directory
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed details =
+    { name = name
+    , passed = passed
+    , details = details
+    }

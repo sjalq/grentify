@@ -1,0 +1,111 @@
+module Elm.ManifestTest exposing (tests)
+
+import Array exposing (Array)
+import Debug
+import Dict
+import Elm.Manifest as Manifest exposing (Error(..))
+import Elm.PackageName as PackageName
+import Elm.Semver as Semver
+import String
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ decodesAndNormalizesPackage
+    , rejectsApplications
+    , rejectsRepeatedExposedModule
+    , rejectsInvalidDependencies
+    ]
+
+
+decodesAndNormalizesPackage : TestResult
+decodesAndNormalizesPackage =
+    when Manifest.decodeString validPackage is
+        Err error ->
+            outcome "package manifests decode into normalized data" False (Manifest.errorToString error)
+
+        Ok manifest ->
+            let
+                dependency =
+                    Dict.get "elm/core" manifest.dependencies
+
+                passed =
+                    PackageName.toString manifest.name == "author/example"
+                        && Semver.versionToString manifest.version == "2.3.4"
+                        && manifest.exposedModules == [ "Example.A", "Example.B", "Example.Z" ]
+                        && (dependency |> Maybe.map (.constraint >> Semver.rangeToString)) == Just "1.0.0 <= v < 2.0.0"
+                        && Dict.keys manifest.testDependencies == [ "elm/json" ]
+            in
+            outcome "package manifests decode into normalized data" passed (Debug.toString manifest)
+
+
+rejectsApplications : TestResult
+rejectsApplications =
+    outcome
+        "application manifests are rejected explicitly"
+        (Manifest.decodeString "{\"type\":\"application\"}" == Err ApplicationManifest)
+        "Expected ApplicationManifest."
+
+
+rejectsRepeatedExposedModule : TestResult
+rejectsRepeatedExposedModule =
+    let
+        source =
+            String.replace
+                "{\"Zed\":[\"Example.Z\"],\"Alpha\":[\"Example.A\",\"Example.B\"]}"
+                "{\"One\":[\"Example.A\"],\"Two\":[\"Example.A\"]}"
+                validPackage
+    in
+    outcome
+        "a module cannot be exposed by multiple sections"
+        (when Manifest.decodeString source is
+            Err (DecodeFailure message) ->
+                String.contains "listed more than once" message
+
+            _ ->
+                False
+        )
+        "Expected a duplicate exposed-module decode error."
+
+
+rejectsInvalidDependencies : TestResult
+rejectsInvalidDependencies =
+    let
+        source =
+            String.replace "\"elm/core\":\"1.0.0 <= v < 2.0.0\"" "\"elm/Core\":\"nope\"" validPackage
+    in
+    outcome
+        "dependency names and constraints are validated"
+        (when Manifest.decodeString source is
+            Err (DecodeFailure message) ->
+                String.contains "invalid package name" message
+
+            _ ->
+                False
+        )
+        "Expected an invalid dependency decode error."
+
+
+validPackage : String
+validPackage =
+    "{\"type\":\"package\",\"name\":\"author/example\",\"summary\":\"An example package\",\"license\":\"BSD-3-Clause\",\"version\":\"2.3.4\",\"exposed-modules\":{\"Zed\":[\"Example.Z\"],\"Alpha\":[\"Example.A\",\"Example.B\"]},\"elm-version\":\"0.19.0 <= v < 0.20.0\",\"dependencies\":{\"elm/core\":\"1.0.0 <= v < 2.0.0\"},\"test-dependencies\":{\"elm/json\":\"1.0.0 <= v < 2.0.0\"}}"
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed failureDetails =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            failureDetails
+    }

@@ -1,0 +1,471 @@
+module Emit.Workspace exposing
+    ( Options
+    , Package
+    , Permissions
+    , Result
+    , emit
+    , packageDirectoryName
+    )
+
+import Crypto
+import Dict exposing (Dict)
+import Emit.Bundle as Bundle
+import Emit.Package as PackageEmit
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Json.Decode as Decode
+import Json.Encode as Encode
+import Port.Error as PortError exposing (Error)
+import Result as CoreResult
+import System.File
+import Task exposing (Task)
+
+
+type alias Package =
+    PackageEmit.Package
+
+
+type alias Permissions =
+    { fileSystem : FileSystem.Permission
+    }
+
+
+type alias Options =
+    { output : Path
+    , rootPackage : String
+    , packages : Array Package
+    , lockfile : String
+    , report : String
+    , validateBeforeCommit : Path -> Task Error {}
+    }
+
+
+type alias Result =
+    { rootDirectory : Path
+    , packageDirectories : Dict String Path
+    , bundleFiles : Array Path
+    }
+
+
+type alias PreparedSet =
+    { root : PackageEmit.Prepared
+    , dependencies : Array PackageEmit.Prepared
+    }
+
+
+packageDirectoryName : { name : String, version : String } -> String
+packageDirectoryName =
+    PackageEmit.packageDirectoryName
+
+
+emit : Permissions -> Options -> Task Error Result
+emit permissions options =
+    when prepareSet options.rootPackage options.packages is
+        Err error ->
+            Task.fail error
+
+        Ok packages ->
+            assertDestinationOwned permissions.fileSystem options.output
+                |> Task.andThen (\_ -> ensureParent permissions.fileSystem options.output)
+                |> Task.andThen (\_ -> stagingPath options.output)
+                |> Task.andThen
+                    (\staging ->
+                        createStaging permissions.fileSystem staging
+                            |> Task.andThen
+                                (\_ ->
+                                    writeWorkspace permissions.fileSystem staging options packages
+                                )
+                            |> Task.andThen (\_ -> options.validateBeforeCommit staging)
+                            |> Task.andThen
+                                (\_ ->
+                                    atomicReplace permissions.fileSystem staging options.output
+                                )
+                            |> Task.map (\_ -> emittedResult options.output packages)
+                            |> Task.onError
+                                (\error ->
+                                    removeIfExists permissions.fileSystem staging
+                                        |> Task.onError (\_ -> Task.succeed {})
+                                        |> Task.andThen (\_ -> Task.fail error)
+                                )
+                    )
+
+
+prepareSet : String -> Array Package -> CoreResult.Result Error PreparedSet
+prepareSet rootName packages =
+    packages
+        |> Array.map PackageEmit.prepare
+        |> combine
+        |> Result.andThen validateUniquePackages
+        |> Result.andThen
+            (\prepared ->
+                let
+                    roots =
+                        Array.keepIf (\package -> package.manifest.name == rootName) prepared
+                in
+                when Array.popFirst roots is
+                    Nothing ->
+                        Err <|
+                            PortError.create "OUTPUT_FAILED"
+                                ("The generated package set does not contain its root " ++ rootName ++ ".")
+
+                    Just { first = root, rest = [] } ->
+                        Ok
+                            { root = root
+                            , dependencies =
+                                prepared
+                                    |> Array.keepIf (\package -> package.manifest.name /= rootName)
+                                    |> Array.sortBy (\package -> package.manifest.name)
+                            }
+
+                    Just _ ->
+                        Err <|
+                            PortError.create "OUTPUT_FAILED"
+                                ("The generated package set contains its root more than once: " ++ rootName)
+            )
+
+
+validateUniquePackages : Array PackageEmit.Prepared -> CoreResult.Result Error (Array PackageEmit.Prepared)
+validateUniquePackages packages =
+    Array.foldl
+        (\package result ->
+            result
+                |> Result.andThen
+                    (\seen ->
+                        let
+                            packageName =
+                                package.manifest.name
+
+                            directoryName =
+                                packageDirectoryName (packageIdentity package)
+                        in
+                        if Dict.member packageName seen.names then
+                            Err <|
+                                PortError.create "OUTPUT_FAILED"
+                                    ("The generated package set contains " ++ packageName ++ " more than once.")
+
+                        else if Dict.member directoryName seen.directories then
+                            Err <|
+                                PortError.create "OUTPUT_FAILED"
+                                    ("Generated package names collide at output directory " ++ directoryName ++ ".")
+
+                        else
+                            Ok
+                                { names = Dict.set packageName {} seen.names
+                                , directories = Dict.set directoryName {} seen.directories
+                                }
+                    )
+        )
+        (Ok { names = Dict.empty, directories = Dict.empty })
+        packages
+        |> Result.map (\_ -> packages)
+
+
+combine : Array (CoreResult.Result error value) -> CoreResult.Result error (Array value)
+combine results =
+    Array.foldl
+        (\result combined ->
+            combined
+                |> Result.andThen
+                    (\values -> result |> Result.map (\value -> Array.pushLast value values))
+        )
+        (Ok [])
+        results
+
+
+writeWorkspace
+    : FileSystem.Permission
+    -> Path
+    -> Options
+    -> PreparedSet
+    -> Task Error {}
+writeWorkspace permission staging options packages =
+    let
+        dependencyRoot =
+            inDirectory ".elm-to-gren/packages" staging
+
+        bundlesRoot =
+            inDirectory "gren_packages" staging
+    in
+    System.File.ensureDirectory permission dependencyRoot
+        |> Task.andThen (\_ -> System.File.ensureDirectory permission bundlesRoot)
+        |> Task.andThen (\_ -> PackageEmit.write permission staging packages.root)
+        |> Task.andThen
+            (\_ ->
+                packages.dependencies
+                    |> Array.foldl
+                        (writeDependency permission dependencyRoot bundlesRoot)
+                        (Task.succeed {})
+            )
+        |> Task.andThen
+            (\_ ->
+                System.File.writeText permission
+                    (inDirectory "elm-to-gren.lock.json" staging)
+                    (ensureTrailingNewline options.lockfile)
+            )
+        |> Task.andThen
+            (\_ ->
+                System.File.writeText permission
+                    (inDirectory "elm-to-gren.report.json" staging)
+                    (ensureTrailingNewline options.report)
+            )
+        |> Task.andThen
+            (\_ ->
+                System.File.writeText permission
+                    (inDirectory ownershipMarker staging)
+                    (markerText packages.root.manifest.name)
+            )
+        |> Task.map (\_ -> {})
+
+
+writeDependency
+    : FileSystem.Permission
+    -> Path
+    -> Path
+    -> PackageEmit.Prepared
+    -> Task Error {}
+    -> Task Error {}
+writeDependency permission dependencyRoot bundlesRoot package pending =
+    let
+        identity =
+            packageIdentity package
+
+        directory =
+            inDirectory (packageDirectoryName identity) dependencyRoot
+
+        bundle =
+            inDirectory (PackageEmit.bundleFileName identity) bundlesRoot
+    in
+    pending
+        |> Task.andThen (\_ -> PackageEmit.write permission directory package)
+        |> Task.andThen (\_ -> Bundle.write permission bundle package)
+        |> Task.map (\_ -> {})
+
+
+emittedResult : Path -> PreparedSet -> Result
+emittedResult output packages =
+    let
+        dependencyRoot =
+            inDirectory ".elm-to-gren/packages" output
+
+        bundlesRoot =
+            inDirectory "gren_packages" output
+
+        packageDirectories =
+            packages.dependencies
+                |> Array.foldl
+                    (\package directories ->
+                        Dict.set package.manifest.name
+                            (inDirectory (packageDirectoryName (packageIdentity package)) dependencyRoot)
+                            directories
+                    )
+                    (Dict.singleton packages.root.manifest.name output)
+
+        bundleFiles =
+            packages.dependencies
+                |> Array.map
+                    (\package ->
+                        inDirectory (PackageEmit.bundleFileName (packageIdentity package)) bundlesRoot
+                    )
+    in
+    { rootDirectory = output
+    , packageDirectories = packageDirectories
+    , bundleFiles = bundleFiles
+    }
+
+
+packageIdentity : PackageEmit.Prepared -> { name : String, version : String }
+packageIdentity package =
+    { name = package.manifest.name
+    , version = package.manifest.version
+    }
+
+
+ownershipMarker : String
+ownershipMarker =
+    ".elm-to-gren-workspace.json"
+
+
+markerText : String -> String
+markerText rootPackage =
+    Encode.object
+        [ { key = "schemaVersion", value = Encode.int 1 }
+        , { key = "root", value = Encode.string rootPackage }
+        ]
+        |> Encode.encode 2
+        |> ensureTrailingNewline
+
+
+assertDestinationOwned : FileSystem.Permission -> Path -> Task Error {}
+assertDestinationOwned permission destination =
+    System.File.exists permission destination
+        |> Task.andThen
+            (\destinationExists ->
+                if not destinationExists then
+                    Task.succeed {}
+
+                else
+                    System.File.readText permission (inDirectory ownershipMarker destination)
+                        |> Task.onError (\_ -> outputNotOwned destination)
+                        |> Task.andThen
+                            (\contents ->
+                                when Decode.decodeString markerDecoder contents is
+                                    Ok _ ->
+                                        Task.succeed {}
+
+                                    Err _ ->
+                                        outputNotOwned destination
+                            )
+            )
+
+
+markerDecoder : Decode.Decoder {}
+markerDecoder =
+    Decode.map2 (\_ _ -> {})
+        (Decode.field "schemaVersion" Decode.int
+            |> Decode.andThen
+                (\version ->
+                    if version == 1 then
+                        Decode.succeed {}
+
+                    else
+                        Decode.fail "Unsupported workspace marker version."
+                )
+        )
+        (Decode.field "root" Decode.string)
+
+
+outputNotOwned : Path -> Task Error a
+outputNotOwned destination =
+    Task.fail <|
+        PortError.create "OUTPUT_NOT_OWNED"
+            ("Refusing to replace non elm-to-gren directory " ++ Path.toPosixString destination ++ ".")
+
+
+ensureParent : FileSystem.Permission -> Path -> Task Error {}
+ensureParent permission destination =
+    when Path.parentPath destination is
+        Nothing ->
+            Task.succeed {}
+
+        Just parent ->
+            System.File.ensureDirectory permission parent
+                |> Task.map (\_ -> {})
+
+
+stagingPath : Path -> Task Error Path
+stagingPath destination =
+    Crypto.getSecureContext
+        |> Task.mapError
+            (\_ ->
+                PortError.create "OUTPUT_FAILED"
+                    "Secure randomness is unavailable for staging output."
+            )
+        |> Task.andThen Crypto.randomUuidV4
+        |> Task.map
+            (\uuid ->
+                let
+                    parent =
+                        Path.parentPath destination |> Maybe.withDefault Path.empty
+
+                    name =
+                        "."
+                            ++ Path.filenameWithExtension destination
+                            ++ ".elm-to-gren-"
+                            ++ uuid
+                in
+                inDirectory name parent
+            )
+
+
+createStaging : FileSystem.Permission -> Path -> Task Error Path
+createStaging permission staging =
+    FileSystem.makeDirectory permission { recursive = False } staging
+        |> Task.mapError
+            (\error ->
+                PortError.create "OUTPUT_FAILED"
+                    ("Could not create staging directory "
+                        ++ Path.toPosixString staging
+                        ++ ": "
+                        ++ FileSystem.errorToString error
+                    )
+            )
+
+
+atomicReplace : FileSystem.Permission -> Path -> Path -> Task Error {}
+atomicReplace permission staging destination =
+    stagingPath destination
+        |> Task.andThen
+            (\backup ->
+                System.File.exists permission destination
+                    |> Task.andThen
+                        (\hadDestination ->
+                            if hadDestination then
+                                move permission backup destination "back up previous output"
+                                    |> Task.andThen
+                                        (\_ ->
+                                            move permission destination staging "publish output"
+                                                |> Task.onError
+                                                    (\publishError ->
+                                                        move permission destination backup "restore previous output"
+                                                            |> Task.onError (\_ -> Task.succeed {})
+                                                            |> Task.andThen (\_ -> Task.fail publishError)
+                                                    )
+                                        )
+                                    |> Task.andThen
+                                        (\_ ->
+                                            removeIfExists permission backup
+                                                |> Task.onError (\_ -> Task.succeed {})
+                                        )
+
+                            else
+                                move permission destination staging "publish output"
+                        )
+            )
+
+
+move : FileSystem.Permission -> Path -> Path -> String -> Task Error {}
+move permission destination source action =
+    FileSystem.move permission destination source
+        |> Task.map (\_ -> {})
+        |> Task.mapError
+            (\error ->
+                PortError.create "OUTPUT_FAILED"
+                    ("Could not " ++ action ++ ": " ++ FileSystem.errorToString error)
+            )
+
+
+removeIfExists : FileSystem.Permission -> Path -> Task Error {}
+removeIfExists permission path =
+    System.File.exists permission path
+        |> Task.andThen
+            (\pathExists ->
+                if pathExists then
+                    FileSystem.remove permission { recursive = True } path
+                        |> Task.map (\_ -> {})
+                        |> Task.mapError
+                            (\error ->
+                                PortError.create "OUTPUT_FAILED"
+                                    ("Could not remove "
+                                        ++ Path.toPosixString path
+                                        ++ ": "
+                                        ++ FileSystem.errorToString error
+                                    )
+                            )
+
+                else
+                    Task.succeed {}
+            )
+
+
+inDirectory : String -> Path -> Path
+inDirectory relative directory =
+    Path.append (Path.fromPosixString relative) directory
+
+
+ensureTrailingNewline : String -> String
+ensureTrailingNewline source =
+    if String.endsWith "\n" source then
+        source
+
+    else
+        source ++ "\n"

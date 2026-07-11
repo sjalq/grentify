@@ -1,0 +1,96 @@
+module TestMain exposing (main)
+
+import Array exposing (Array)
+import Elm.ManifestTest
+import Elm.PackageNameTest
+import Elm.RegistryTest
+import Elm.SemverTest
+import Emit.PackageTest
+import Emit.WorkspaceTest
+import FileSystem
+import Init
+import Mapping.Tests
+import Node
+import Resolve.SolverTest
+import Stream.Log
+import Task exposing (Task)
+import Transform.LexicalTest
+import Transform.PipelineTest
+import Transform.SourceEditTest
+
+
+type alias Check =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+main : Node.SimpleProgram Never
+main =
+    Node.defineSimpleProgram <|
+        \environment ->
+            Init.await FileSystem.initialize <|
+                \fileSystem ->
+                    Init.awaitTask (Emit.WorkspaceTest.tests fileSystem) <|
+                        \workspaceChecks ->
+                            runChecks environment (Array.append allChecks workspaceChecks)
+                                |> Node.endSimpleProgram
+
+
+runChecks environment checks =
+    let
+        failures =
+            checks
+                |> Array.keepIf (\check -> not check.passed)
+
+        summary =
+            String.fromInt (Array.length checks)
+                ++ " checks, "
+                ++ String.fromInt (Array.length failures)
+                ++ " failures"
+    in
+    if Array.isEmpty failures then
+        Stream.Log.line environment.stdout ("PASS: " ++ summary)
+
+    else
+        failures
+            |> Array.map renderFailure
+            |> String.join "\n"
+            |> (\details -> Stream.Log.line environment.stderr (details ++ "\nFAIL: " ++ summary))
+            |> Task.andThen (\_ -> Node.setExitCode 1)
+
+
+allChecks : Array Check
+allChecks =
+    [ Elm.ManifestTest.tests
+    , Elm.PackageNameTest.tests
+    , Elm.RegistryTest.tests
+    , Elm.SemverTest.tests
+    , Emit.PackageTest.tests
+    , Transform.LexicalTest.tests
+    , Transform.PipelineTest.tests
+    , Transform.SourceEditTest.tests
+    , Resolve.SolverTest.tests
+    , Mapping.Tests.checks
+        |> Array.map
+            (\check ->
+                { name = check.name
+                , passed = check.passed
+                , details = "Mapping check returned False."
+                }
+            )
+    ]
+        |> Array.flatten
+
+
+renderFailure : Check -> String
+renderFailure check =
+    "- "
+        ++ check.name
+        ++ (if String.isEmpty check.details then
+                ""
+
+            else
+                ": " ++ check.details
+           )

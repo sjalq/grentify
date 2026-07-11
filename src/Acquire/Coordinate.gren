@@ -1,0 +1,115 @@
+module Acquire.Coordinate exposing
+    ( Coordinate
+    , Error(..)
+    , Selector(..)
+    , packageName
+    , parse
+    , selector
+    , toString
+    , errorToString
+    )
+
+{-| A registry package coordinate accepted by the acquisition layer.
+
+`author/project` and `author/project@latest` select the newest version in the
+Elm registry. `author/project@1.2.3` selects that exact immutable release.
+Local paths are deliberately resolved by `Acquire.Provider` before this parser
+is used, so a missing path cannot silently turn into a different package.
+-}
+
+import Elm.PackageName as PackageName exposing (Name)
+import Elm.Semver as Semver exposing (Version)
+
+
+type Coordinate
+    = Coordinate
+        { packageName : Name
+        , selector : Selector
+        }
+
+
+type Selector
+    = Latest
+    | Exact Version
+
+
+type Error
+    = InvalidPackageName String
+    | EmptySelector String
+    | InvalidSelector String
+    | TooManySelectors String
+
+
+parse : String -> Result Error Coordinate
+parse source =
+    let
+        pieces =
+            String.split "@" source
+
+        build nameSource selected =
+            PackageName.parse nameSource
+                |> Result.mapError (PackageName.errorToString >> InvalidPackageName)
+                |> Result.map
+                    (\name ->
+                        Coordinate
+                            { packageName = name
+                            , selector = selected
+                            }
+                    )
+    in
+    when pieces is
+        [ nameSource ] ->
+            build nameSource Latest
+
+        [ nameSource, "latest" ] ->
+            build nameSource Latest
+
+        [ _, "" ] ->
+            Err (EmptySelector source)
+
+        [ nameSource, versionSource ] ->
+            Semver.parseVersion versionSource
+                |> Result.mapError (\_ -> InvalidSelector source)
+                |> Result.andThen (build nameSource << Exact)
+
+        _ ->
+            Err (TooManySelectors source)
+
+
+packageName : Coordinate -> Name
+packageName (Coordinate details) =
+    details.packageName
+
+
+selector : Coordinate -> Selector
+selector (Coordinate details) =
+    details.selector
+
+
+toString : Coordinate -> String
+toString coordinate =
+    PackageName.toString (packageName coordinate)
+        ++ "@"
+        ++ (when selector coordinate is
+                Latest ->
+                    "latest"
+
+                Exact version ->
+                    Semver.versionToString version
+           )
+
+
+errorToString : Error -> String
+errorToString error =
+    when error is
+        InvalidPackageName message ->
+            message
+
+        EmptySelector source ->
+            "Invalid Elm package coordinate '" ++ source ++ "': expected 'latest' or an exact semantic version after @."
+
+        InvalidSelector source ->
+            "Invalid Elm package coordinate '" ++ source ++ "': expected 'latest' or an exact x.y.z version after @."
+
+        TooManySelectors source ->
+            "Invalid Elm package coordinate '" ++ source ++ "': expected at most one @ selector."

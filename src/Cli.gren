@@ -1,0 +1,299 @@
+module Cli exposing
+    ( Command(..)
+    , Defaults
+    , Options
+    , PlatformChoice(..)
+    , help
+    , parse
+    )
+
+import Compiler.Platform as Platform exposing (Platform)
+
+
+type Command
+    = Help
+    | Version
+    | Port Options
+
+
+type PlatformChoice
+    = Auto
+    | ExactPlatform Platform
+
+
+type alias Options =
+    { input : String
+    , outputDirectory : String
+    , cacheDirectory : String
+    , platform : PlatformChoice
+    , namespace : Maybe String
+    , mappingFiles : Array String
+    , offline : Bool
+    , verify : Bool
+    , json : Bool
+    }
+
+
+type alias Defaults =
+    { outputDirectory : String
+    , cacheDirectory : String
+    }
+
+
+type alias ParseState =
+    { input : Maybe String
+    , outputDirectory : String
+    , cacheDirectory : String
+    , platform : PlatformChoice
+    , namespace : Maybe String
+    , mappingFiles : Array String
+    , offline : Bool
+    , verify : Bool
+    , json : Bool
+    }
+
+
+parse : Defaults -> Array String -> Result String Command
+parse defaults rawArguments =
+    let
+        arguments =
+            when Array.first rawArguments is
+                Just "port" ->
+                    Array.dropFirst 1 rawArguments
+
+                _ ->
+                    rawArguments
+
+        initial =
+            { input = Nothing
+            , outputDirectory = defaults.outputDirectory
+            , cacheDirectory = defaults.cacheDirectory
+            , platform = Auto
+            , namespace = Nothing
+            , mappingFiles = []
+            , offline = False
+            , verify = True
+            , json = False
+            }
+    in
+    when Array.first arguments is
+        Nothing ->
+            Ok Help
+
+        Just "help" ->
+            Ok Help
+
+        Just "--help" ->
+            Ok Help
+
+        Just "-h" ->
+            Ok Help
+
+        Just "version" ->
+            onlyVersion arguments
+
+        Just "--version" ->
+            onlyVersion arguments
+
+        Just "-v" ->
+            onlyVersion arguments
+
+        _ ->
+            parseArguments initial arguments
+
+
+onlyVersion : Array String -> Result String Command
+onlyVersion arguments =
+    if Array.length arguments == 1 then
+        Ok Version
+
+    else
+        Err "The version command does not accept arguments."
+
+
+parseArguments : ParseState -> Array String -> Result String Command
+parseArguments state arguments =
+    when Array.popFirst arguments is
+        Nothing ->
+            finalize state
+
+        Just { first = argument, rest } ->
+            when argument is
+                "--help" ->
+                    Ok Help
+
+                "-h" ->
+                    Ok Help
+
+                "--offline" ->
+                    parseArguments { state | offline = True } rest
+
+                "--no-verify" ->
+                    parseArguments { state | verify = False } rest
+
+                "--json" ->
+                    parseArguments { state | json = True } rest
+
+                "--out" ->
+                    withValue "--out" rest (\value remaining -> parseArguments { state | outputDirectory = value } remaining)
+
+                "-o" ->
+                    withValue "-o" rest (\value remaining -> parseArguments { state | outputDirectory = value } remaining)
+
+                "--cache" ->
+                    withValue "--cache" rest (\value remaining -> parseArguments { state | cacheDirectory = value } remaining)
+
+                "--platform" ->
+                    withValue "--platform" rest
+                        (\value remaining ->
+                            parsePlatform value
+                                |> Result.andThen (\choice -> parseArguments { state | platform = choice } remaining)
+                        )
+
+                "--namespace" ->
+                    withValue "--namespace" rest (\value remaining -> parseArguments { state | namespace = Just value } remaining)
+
+                "--mapping" ->
+                    withValue "--mapping" rest
+                        (\value remaining ->
+                            parseArguments { state | mappingFiles = Array.pushLast value state.mappingFiles } remaining
+                        )
+
+                "--" ->
+                    when { existing = state.input, remainder = rest } is
+                        { existing = Nothing, remainder = [ input ] } ->
+                            finalize { state | input = Just input }
+
+                        _ ->
+                            Err "Expected exactly one Elm package or local path after --."
+
+                _ ->
+                    parseLongAssignment state argument rest
+
+
+parseLongAssignment : ParseState -> String -> Array String -> Result String Command
+parseLongAssignment state argument remaining =
+    let
+        assignment prefix apply =
+            if String.startsWith prefix argument then
+                let
+                    value =
+                        String.dropFirst (String.count prefix) argument
+                in
+                if String.isEmpty value then
+                    Just (Err (prefix ++ " requires a value."))
+
+                else
+                    Just (apply value)
+
+            else
+                Nothing
+
+        attempts =
+            [ assignment "--out=" (\value -> parseArguments { state | outputDirectory = value } remaining)
+            , assignment "--cache=" (\value -> parseArguments { state | cacheDirectory = value } remaining)
+            , assignment "--namespace=" (\value -> parseArguments { state | namespace = Just value } remaining)
+            , assignment "--mapping="
+                (\value -> parseArguments { state | mappingFiles = Array.pushLast value state.mappingFiles } remaining)
+            , assignment "--platform="
+                (\value ->
+                    parsePlatform value
+                        |> Result.andThen (\choice -> parseArguments { state | platform = choice } remaining)
+                )
+            ]
+            |> Array.mapAndKeepJust identity
+    in
+    when Array.first attempts is
+        Just value ->
+            value
+
+        Nothing ->
+            if String.startsWith "-" argument then
+                Err ("Unknown option " ++ argument ++ ".")
+
+            else
+                when state.input is
+                    Nothing ->
+                        parseArguments { state | input = Just argument } remaining
+
+                    Just previous ->
+                        Err ("Expected one package input, but received both " ++ previous ++ " and " ++ argument ++ ".")
+
+
+withValue : String -> Array String -> (String -> Array String -> Result String Command) -> Result String Command
+withValue option remaining continue =
+    when Array.popFirst remaining is
+        Nothing ->
+            Err (option ++ " requires a value.")
+
+        Just { first = value, rest } ->
+            if String.startsWith "-" value then
+                Err (option ++ " requires a value.")
+
+            else
+                continue value rest
+
+
+parsePlatform : String -> Result String PlatformChoice
+parsePlatform value =
+    when String.toLower value is
+        "auto" ->
+            Ok Auto
+
+        "common" ->
+            Ok (ExactPlatform Platform.Common)
+
+        "browser" ->
+            Ok (ExactPlatform Platform.Browser)
+
+        "node" ->
+            Ok (ExactPlatform Platform.Node)
+
+        _ ->
+            Err ("Invalid platform " ++ value ++ ". Expected auto, common, browser, or node.")
+
+
+finalize : ParseState -> Result String Command
+finalize state =
+    when state.input is
+        Nothing ->
+            Err "An Elm package coordinate or local path is required."
+
+        Just input ->
+            Ok <|
+                Port
+                    { input = input
+                    , outputDirectory = state.outputDirectory
+                    , cacheDirectory = state.cacheDirectory
+                    , platform = state.platform
+                    , namespace = state.namespace
+                    , mappingFiles = state.mappingFiles
+                    , offline = state.offline
+                    , verify = state.verify
+                    , json = state.json
+                    }
+
+
+help : String
+help =
+    """
+elm-to-gren
+
+Port an Elm package and its dependency graph to Gren package source.
+
+Usage:
+  elm-to-gren <author/package[@version] | local-path> [options]
+  elm-to-gren port <author/package[@version] | local-path> [options]
+
+Options:
+  -o, --out <directory>      Output workspace (default: ./gren-output)
+      --cache <directory>    Download and analysis cache
+      --platform <platform>  auto, common, browser, or node (default: auto)
+      --namespace <author>   Namespace generated package names
+      --mapping <file>       Add or override mappings; may be repeated
+      --offline              Use cached registry data only
+      --no-verify            Skip the final Gren compiler check
+      --json                 Print the final report as JSON
+  -h, --help                 Show this help
+  -v, --version              Show the tool version
+"""

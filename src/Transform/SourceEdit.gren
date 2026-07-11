@@ -1,0 +1,673 @@
+module Transform.SourceEdit exposing
+    ( Composition
+    , EditKind(..)
+    , Position
+    , ResolvedSourceEdit
+    , SourceEdit
+    , SourceError(..)
+    , SourceIndex
+    , SourceRange
+    , applyEdits
+    , applyEditsWithinRange
+    , buildIndex
+    , composeSourceEdit
+    , describeError
+    , offsetToPosition
+    , offsetToPositionIn
+    , positionToOffset
+    , positionToOffsetIn
+    , resolveSourceEdits
+    )
+
+{-| Deterministic, Unicode-safe source edits.
+
+Offsets and columns in this module count Unicode code points. Ranges are
+half-open: their start is included and their end is excluded. Newlines may be
+LF, CRLF, or bare CR; no position is allowed in the middle of CRLF.
+-}
+
+import Array exposing (Array)
+import String
+
+
+type alias Position =
+    { row : Int
+    , column : Int
+    }
+
+
+type alias SourceRange =
+    { start : Position
+    , end : Position
+    }
+
+
+type EditKind
+    = SyntaxEdit
+    | UnitEdit
+    | TupleEdit
+    | ListEdit
+    | ModuleEdit
+    | SymbolEdit
+    | ConstructorEdit
+    | CustomEdit String
+
+
+type alias SourceEdit =
+    { range : SourceRange
+    , replacement : String
+    , kind : EditKind
+    , rule : String
+    }
+
+
+type alias ResolvedSourceEdit =
+    { startOffset : Int
+    , endOffset : Int
+    , edit : SourceEdit
+    }
+
+
+type SourceError
+    = InvalidPosition
+        { position : Position
+        , reason : String
+        }
+    | InvalidOffset
+        { offset : Int
+        , reason : String
+        }
+    | ReversedRange
+        { range : SourceRange
+        , rule : String
+        }
+    | EditCollision
+        { first : SourceEdit
+        , second : SourceEdit
+        }
+    | ChildEditOutsideRange
+        { outerRange : SourceRange
+        , child : SourceEdit
+        }
+
+
+{-| Configuration for collapsing child edits into one outer edit.
+
+`buildReplacement` receives the source covered by `range` after all child
+edits have been applied. This lets an AST rule wrap or restructure a range
+without emitting a colliding outer edit alongside its child edits.
+-}
+type alias Composition =
+    { range : SourceRange
+    , kind : EditKind
+    , rule : String
+    , buildReplacement : String -> String
+    }
+
+
+type alias SourceLine =
+    { start : Int
+    , contentEnd : Int
+    , nextStart : Int
+    }
+
+
+{-| A reusable line index. Build one when translating many ranges in the same
+source file; it avoids rescanning the whole source for every position.
+-}
+type SourceIndex
+    = SourceIndex
+        { sourceLength : Int
+        , lines : Array SourceLine
+        }
+
+
+buildIndex : String -> SourceIndex
+buildIndex source =
+    SourceIndex
+        { sourceLength = String.count source
+        , lines = indexLines source
+        }
+
+
+positionToOffset : String -> Position -> Result SourceError Int
+positionToOffset source position =
+    positionToOffsetIn (buildIndex source) position
+
+
+positionToOffsetIn : SourceIndex -> Position -> Result SourceError Int
+positionToOffsetIn (SourceIndex index) position =
+    if position.row < 1 then
+        Err <|
+            InvalidPosition
+                { position = position
+                , reason = "Rows are one-based; row must be at least 1."
+                }
+
+    else if position.column < 1 then
+        Err <|
+            InvalidPosition
+                { position = position
+                , reason = "Columns are one-based; column must be at least 1."
+                }
+
+    else
+        when Array.get (position.row - 1) index.lines is
+            Nothing ->
+                Err <|
+                    InvalidPosition
+                        { position = position
+                        , reason =
+                            "Row "
+                                ++ String.fromInt position.row
+                                ++ " does not exist in this source."
+                        }
+
+            Just line ->
+                let
+                    maximumColumn =
+                        line.contentEnd - line.start + 1
+                in
+                if position.column > maximumColumn then
+                    Err <|
+                        InvalidPosition
+                            { position = position
+                            , reason =
+                                "Column "
+                                    ++ String.fromInt position.column
+                                    ++ " is past the end of row "
+                                    ++ String.fromInt position.row
+                                    ++ "; its maximum position is column "
+                                    ++ String.fromInt maximumColumn
+                                    ++ "."
+                            }
+
+                else
+                    Ok (line.start + position.column - 1)
+
+
+offsetToPosition : String -> Int -> Result SourceError Position
+offsetToPosition source offset =
+    offsetToPositionIn (buildIndex source) offset
+
+
+offsetToPositionIn : SourceIndex -> Int -> Result SourceError Position
+offsetToPositionIn (SourceIndex index) offset =
+    if offset < 0 then
+        Err <|
+            InvalidOffset
+                { offset = offset
+                , reason = "Offsets cannot be negative."
+                }
+
+    else if offset > index.sourceLength then
+        Err <|
+            InvalidOffset
+                { offset = offset
+                , reason =
+                    "Offset "
+                        ++ String.fromInt offset
+                        ++ " is past the source length of "
+                        ++ String.fromInt index.sourceLength
+                        ++ " code points."
+                }
+
+    else
+        when lineAtOffset offset index.lines is
+            Nothing ->
+                Err <|
+                    InvalidOffset
+                        { offset = offset
+                        , reason = "No source line contains this offset."
+                        }
+
+            Just { row, line } ->
+                if offset > line.contentEnd then
+                    Err <|
+                        InvalidOffset
+                            { offset = offset
+                            , reason =
+                                "Offset "
+                                    ++ String.fromInt offset
+                                    ++ " lies in the middle of a CRLF newline."
+                            }
+
+                else
+                    Ok
+                        { row = row
+                        , column = offset - line.start + 1
+                        }
+
+
+resolveSourceEdits : String -> Array SourceEdit -> Result SourceError (Array ResolvedSourceEdit)
+resolveSourceEdits source edits =
+    resolveSourceEditsIn (buildIndex source) edits
+
+
+resolveSourceEditsIn : SourceIndex -> Array SourceEdit -> Result SourceError (Array ResolvedSourceEdit)
+resolveSourceEditsIn sourceIndex edits =
+    resolveAll sourceIndex edits
+        |> Result.map (Array.sortWith compareResolvedEdits)
+        |> Result.andThen ensureNoCollisions
+
+
+applyEdits : String -> Array SourceEdit -> Result SourceError String
+applyEdits source edits =
+    resolveSourceEdits source edits
+        |> Result.map (applyResolved source)
+
+
+{-| Apply only edits contained by an outer range and return that edited slice.
+
+The child edit positions remain absolute positions in `source`. Insertions at
+either boundary are permitted. Any child that crosses the outer boundary is a
+hard error instead of being silently truncated.
+-}
+applyEditsWithinRange : String -> SourceRange -> Array SourceEdit -> Result SourceError String
+applyEditsWithinRange source outerRange childEdits =
+    let
+        sourceIndex =
+            buildIndex source
+    in
+    rangeToOffsets sourceIndex "outer composition" outerRange
+        |> Result.andThen
+            (\outer ->
+                resolveSourceEditsIn sourceIndex childEdits
+                    |> Result.andThen (ensureChildrenWithin outerRange outer)
+                    |> Result.map
+                        (\children ->
+                            children
+                                |> Array.map
+                                    (\child ->
+                                        { child
+                                            | startOffset = child.startOffset - outer.startOffset
+                                            , endOffset = child.endOffset - outer.startOffset
+                                        }
+                                    )
+                                |> applyResolved
+                                    (String.slice outer.startOffset outer.endOffset source)
+                        )
+            )
+
+
+{-| Collapse an outer transformation and its child transformations into one
+non-overlapping edit.
+-}
+composeSourceEdit : Composition -> String -> Array SourceEdit -> Result SourceError SourceEdit
+composeSourceEdit composition source childEdits =
+    applyEditsWithinRange source composition.range childEdits
+        |> Result.map
+            (\editedChildren ->
+                { range = composition.range
+                , replacement = composition.buildReplacement editedChildren
+                , kind = composition.kind
+                , rule = composition.rule
+                }
+            )
+
+
+describeError : SourceError -> String
+describeError sourceError =
+    when sourceError is
+        InvalidPosition details ->
+            "Invalid source position "
+                ++ describePosition details.position
+                ++ ": "
+                ++ details.reason
+
+        InvalidOffset details ->
+            "Invalid source offset "
+                ++ String.fromInt details.offset
+                ++ ": "
+                ++ details.reason
+
+        ReversedRange details ->
+            "Rule \""
+                ++ details.rule
+                ++ "\" produced a reversed range from "
+                ++ describePosition details.range.start
+                ++ " to "
+                ++ describePosition details.range.end
+                ++ "."
+
+        EditCollision details ->
+            "Source edits from rules \""
+                ++ details.first.rule
+                ++ "\" and \""
+                ++ details.second.rule
+                ++ "\" collide ("
+                ++ describeRange details.first.range
+                ++ " versus "
+                ++ describeRange details.second.range
+                ++ ")."
+
+        ChildEditOutsideRange details ->
+            "Child edit from rule \""
+                ++ details.child.rule
+                ++ "\" at "
+                ++ describeRange details.child.range
+                ++ " is not contained by outer range "
+                ++ describeRange details.outerRange
+                ++ "."
+
+
+indexLines : String -> Array SourceLine
+indexLines source =
+    indexLineCharacters (String.toArray source) 0 0 []
+
+
+indexLineCharacters : Array Char -> Int -> Int -> Array SourceLine -> Array SourceLine
+indexLineCharacters characters offset lineStart lines =
+    when Array.get offset characters is
+        Nothing ->
+            Array.pushLast
+                { start = lineStart
+                , contentEnd = Array.length characters
+                , nextStart = Array.length characters
+                }
+                lines
+
+        Just '\n' ->
+            let
+                nextStart =
+                    offset + 1
+            in
+            let
+                -- Bound first: Gren only eliminates direct self tail calls.
+                nextLines =
+                    Array.pushLast
+                        { start = lineStart
+                        , contentEnd = offset
+                        , nextStart = nextStart
+                        }
+                        lines
+            in
+            indexLineCharacters characters nextStart nextStart nextLines
+
+        Just '\r' ->
+            let
+                nextStart =
+                    if Array.get (offset + 1) characters == Just '\n' then
+                        offset + 2
+
+                    else
+                        offset + 1
+            in
+            let
+                -- Bound first: Gren only eliminates direct self tail calls.
+                nextLines =
+                    Array.pushLast
+                        { start = lineStart
+                        , contentEnd = offset
+                        , nextStart = nextStart
+                        }
+                        lines
+            in
+            indexLineCharacters characters nextStart nextStart nextLines
+
+        Just _ ->
+            indexLineCharacters characters (offset + 1) lineStart lines
+
+
+lineAtOffset : Int -> Array SourceLine -> Maybe { row : Int, line : SourceLine }
+lineAtOffset offset lines =
+    Array.indexedFoldl
+        (\index line found ->
+            if line.start <= offset then
+                Just
+                    { row = index + 1
+                    , line = line
+                    }
+
+            else
+                found
+        )
+        Nothing
+        lines
+
+
+resolveAll : SourceIndex -> Array SourceEdit -> Result SourceError (Array ResolvedSourceEdit)
+resolveAll sourceIndex edits =
+    Array.foldl
+        (\edit resolved ->
+            resolved
+                |> Result.andThen
+                    (\previous ->
+                        resolveOne sourceIndex edit
+                            |> Result.map (\next -> Array.pushLast next previous)
+                    )
+        )
+        (Ok [])
+        edits
+
+
+resolveOne : SourceIndex -> SourceEdit -> Result SourceError ResolvedSourceEdit
+resolveOne sourceIndex edit =
+    Result.map2
+        (\startOffset endOffset ->
+            { startOffset = startOffset
+            , endOffset = endOffset
+            , edit = edit
+            }
+        )
+        (positionToOffsetIn sourceIndex edit.range.start)
+        (positionToOffsetIn sourceIndex edit.range.end)
+        |> Result.andThen
+            (\resolved ->
+                if resolved.startOffset > resolved.endOffset then
+                    Err <|
+                        ReversedRange
+                            { range = edit.range
+                            , rule = edit.rule
+                            }
+
+                else
+                    Ok resolved
+            )
+
+
+rangeToOffsets : SourceIndex -> String -> SourceRange -> Result SourceError ResolvedSourceEdit
+rangeToOffsets sourceIndex rule range =
+    resolveOne sourceIndex
+        { range = range
+        , replacement = ""
+        , kind = CustomEdit "range"
+        , rule = rule
+        }
+
+
+compareResolvedEdits : ResolvedSourceEdit -> ResolvedSourceEdit -> Order
+compareResolvedEdits left right =
+    compareIntThen left.startOffset right.startOffset <|
+        \_ ->
+            compareIntThen left.endOffset right.endOffset <|
+                \_ ->
+                    when compareEditKinds left.edit.kind right.edit.kind is
+                        EQ ->
+                            when compare left.edit.rule right.edit.rule is
+                                EQ ->
+                                    compare left.edit.replacement right.edit.replacement
+
+                                order ->
+                                    order
+
+                        order ->
+                            order
+
+
+compareIntThen : Int -> Int -> ({} -> Order) -> Order
+compareIntThen left right whenEqual =
+    when compare left right is
+        EQ ->
+            whenEqual {}
+
+        order ->
+            order
+
+
+editKindRank : EditKind -> Int
+editKindRank editKind =
+    when editKind is
+        SyntaxEdit ->
+            0
+
+        UnitEdit ->
+            1
+
+        TupleEdit ->
+            2
+
+        ListEdit ->
+            3
+
+        ModuleEdit ->
+            4
+
+        SymbolEdit ->
+            5
+
+        ConstructorEdit ->
+            6
+
+        CustomEdit _ ->
+            7
+
+
+compareEditKinds : EditKind -> EditKind -> Order
+compareEditKinds left right =
+    when compare (editKindRank left) (editKindRank right) is
+        EQ ->
+            when left is
+                CustomEdit leftName ->
+                    when right is
+                        CustomEdit rightName ->
+                            compare leftName rightName
+
+                        _ ->
+                            EQ
+
+                _ ->
+                    EQ
+
+        order ->
+            order
+
+
+ensureNoCollisions : Array ResolvedSourceEdit -> Result SourceError (Array ResolvedSourceEdit)
+ensureNoCollisions edits =
+    checkCollisionFrom 0 1 edits
+
+
+checkCollisionFrom : Int -> Int -> Array ResolvedSourceEdit -> Result SourceError (Array ResolvedSourceEdit)
+checkCollisionFrom leftIndex rightIndex edits =
+    when Array.get leftIndex edits is
+        Nothing ->
+            Ok edits
+
+        Just left ->
+            when Array.get rightIndex edits is
+                Nothing ->
+                    checkCollisionFrom (leftIndex + 1) (leftIndex + 2) edits
+
+                Just right ->
+                    if right.startOffset > left.endOffset then
+                        checkCollisionFrom (leftIndex + 1) (leftIndex + 2) edits
+
+                    else if editsCollide left right then
+                        Err <|
+                            EditCollision
+                                { first = left.edit
+                                , second = right.edit
+                                }
+
+                    else
+                        checkCollisionFrom leftIndex (rightIndex + 1) edits
+
+
+editsCollide : ResolvedSourceEdit -> ResolvedSourceEdit -> Bool
+editsCollide left right =
+    let
+        leftIsInsertion =
+            left.startOffset == left.endOffset
+
+        rightIsInsertion =
+            right.startOffset == right.endOffset
+    in
+    if leftIsInsertion && rightIsInsertion then
+        left.startOffset == right.startOffset
+
+    else if leftIsInsertion then
+        left.startOffset > right.startOffset
+            && left.startOffset < right.endOffset
+
+    else if rightIsInsertion then
+        right.startOffset > left.startOffset
+            && right.startOffset < left.endOffset
+
+    else
+        left.startOffset < right.endOffset
+            && right.startOffset < left.endOffset
+
+
+applyResolved : String -> Array ResolvedSourceEdit -> String
+applyResolved source edits =
+    let
+        characters =
+            String.toArray source
+
+        assembled =
+            Array.foldl
+                (\resolved state ->
+                    { cursor = resolved.endOffset
+                    , chunks =
+                        state.chunks
+                            |> Array.pushLast
+                                (characters
+                                    |> Array.slice state.cursor resolved.startOffset
+                                    |> String.fromArray
+                                )
+                            |> Array.pushLast resolved.edit.replacement
+                    }
+                )
+                { cursor = 0, chunks = [] }
+                edits
+    in
+    assembled.chunks
+        |> Array.pushLast
+            (characters
+                |> Array.slice assembled.cursor (Array.length characters)
+                |> String.fromArray
+            )
+        |> String.join ""
+
+
+ensureChildrenWithin : SourceRange -> ResolvedSourceEdit -> Array ResolvedSourceEdit -> Result SourceError (Array ResolvedSourceEdit)
+ensureChildrenWithin outerRange outer children =
+    Array.foldl
+        (\child result ->
+            result
+                |> Result.andThen
+                    (\_ ->
+                        if child.startOffset < outer.startOffset || child.endOffset > outer.endOffset then
+                            Err <|
+                                ChildEditOutsideRange
+                                    { outerRange = outerRange
+                                    , child = child.edit
+                                    }
+
+                        else
+                            Ok children
+                    )
+        )
+        (Ok children)
+        children
+
+
+describePosition : Position -> String
+describePosition position =
+    String.fromInt position.row ++ ":" ++ String.fromInt position.column
+
+
+describeRange : SourceRange -> String
+describeRange range =
+    describePosition range.start ++ "-" ++ describePosition range.end

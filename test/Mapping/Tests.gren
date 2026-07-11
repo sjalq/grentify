@@ -1,0 +1,364 @@
+module Mapping.Tests exposing (Check, allPassed, checks, failures)
+
+import Array
+import Dict
+import Mapping.Adapter as Adapter
+import Mapping.Decode as MappingDecode
+import Mapping.Registry as Registry
+import Mapping.Types exposing (AdapterId(..), PackageMapping(..), Platform(..))
+import Maybe exposing (Maybe(..))
+import Result exposing (Result(..))
+
+
+type alias Check =
+    { name : String
+    , passed : Bool
+    }
+
+
+checks : Array Check
+checks =
+    [ check "valid mapping JSON decodes into typed variants" validDocumentDecodes
+    , check "invalid optional maps are rejected instead of defaulted" invalidOptionalMapRejected
+    , check "duplicate module declarations are rejected" duplicateModuleRejected
+    , check "overlay replacement moves package to the final position" overlayOrderIsStable
+    , check "transpile overlay removes stale module mappings" transpileRemovesModules
+    , check "module collisions resolve according to package overlay order" moduleCollisionUsesLastPackage
+    , check "platform inference selects the narrowest host" platformInferenceWorks
+    , check "browser and node evidence produces a typed conflict" platformConflictIsTyped
+    , check "adapter discovery follows fully-qualified target symbols" adapterDiscoveryWorks
+    , check "adapter generation is sorted and de-duplicated" adapterGenerationIsDeterministic
+    , check "Tuple adapter contains record-pair semantics" tupleAdapterIsSemantic
+    , check "JSON encoding adapter converts pair field names" jsonEncodeAdapterIsSemantic
+    , check "List and Array adapters preserve collection conversions" listAndArrayAdaptersAreSemantic
+    , check "mapping lexical validation matches the JSON contract" lexicalValidationWorks
+    ]
+
+
+allPassed : Bool
+allPassed =
+    Array.all .passed checks
+
+
+failures : Array String
+failures =
+    checks
+        |> Array.keepIf (\item -> not item.passed)
+        |> Array.map .name
+
+
+check : String -> Bool -> Check
+check name passed =
+    { name = name, passed = passed }
+
+
+isErr result =
+    when result is
+        Err _ ->
+            True
+
+        Ok _ ->
+            False
+
+
+validDocumentDecodes : Bool
+validDocumentDecodes =
+    when MappingDecode.decodeString "valid.json" baseDocumentJson is
+        Ok document ->
+            document.schemaVersion == 1
+                && Array.length document.packages == 2
+                && when Array.get 0 document.packages is
+                    Just (GrenAnalogue details) ->
+                        details.elmPackage == "elm/core"
+                            && details.grenPackage == "gren-lang/core"
+                            && details.platform == Common
+
+                    _ ->
+                        False
+
+        Err _ ->
+            False
+
+
+invalidOptionalMapRejected : Bool
+invalidOptionalMapRejected =
+    MappingDecode.decodeString "invalid-map.json"
+        """
+{
+  "schemaVersion": 1,
+  "packages": [{
+    "kind": "gren-analogue",
+    "elmPackage": "elm/core",
+    "grenPackage": "gren-lang/core",
+    "grenVersion": "7.4.2",
+    "platform": "common",
+    "modules": [{ "source": "Basics", "target": "Basics", "values": [], "types": {} }]
+  }]
+}
+"""
+        |> isErr
+
+
+duplicateModuleRejected : Bool
+duplicateModuleRejected =
+    MappingDecode.decodeString "duplicate.json"
+        """
+{
+  "schemaVersion": 1,
+  "packages": [{
+    "kind": "absorbed",
+    "elmPackage": "elm/json",
+    "grenPackage": "gren-lang/core",
+    "grenVersion": "7.4.2",
+    "platform": "common",
+    "modules": [
+      { "source": "Json.Decode", "target": "Json.Decode", "values": {}, "types": {} },
+      { "source": "Json.Decode", "target": "Json.Decode", "values": {}, "types": {} }
+    ]
+  }]
+}
+"""
+        |> isErr
+
+
+overlayOrderIsStable : Bool
+overlayOrderIsStable =
+    when decodedDocuments is
+        Just documents ->
+            let
+                registry =
+                    Registry.overlayDocuments documents
+            in
+            registry.packageOrder == [ "elm/html", "elm/core" ]
+
+        Nothing ->
+            False
+
+
+transpileRemovesModules : Bool
+transpileRemovesModules =
+    when decodedDocuments is
+        Just documents ->
+            let
+                registry =
+                    Registry.overlayDocuments documents
+            in
+            Registry.moduleMappingFor "Basics" registry == Nothing
+                && when Registry.mappingFor "elm/core" registry is
+                    Just (Transpile details) ->
+                        details.grenPackage == "ported/elm--core"
+
+                    _ ->
+                        False
+
+        Nothing ->
+            False
+
+
+moduleCollisionUsesLastPackage : Bool
+moduleCollisionUsesLastPackage =
+    when MappingDecode.decodeString "collision.json" collisionDocumentJson is
+        Ok document ->
+            when Registry.moduleMappingFor "Shared" (Registry.fromDocument document) is
+                Just module_ ->
+                    module_.target == "Second.Shared"
+
+                Nothing ->
+                    False
+
+        Err _ ->
+            False
+
+
+platformInferenceWorks : Bool
+platformInferenceWorks =
+    when MappingDecode.decodeString "base.json" baseDocumentJson is
+        Ok document ->
+            let
+                registry =
+                    Registry.fromDocument document
+            in
+            Registry.inferPlatform registry [ "elm/core" ] [] == Ok Common
+                && Registry.inferPlatform registry [ "elm/html" ] [] == Ok Browser
+                && Registry.inferPlatform registry [] [ Node ] == Ok Node
+
+        Err _ ->
+            False
+
+
+platformConflictIsTyped : Bool
+platformConflictIsTyped =
+    when MappingDecode.decodeString "base.json" baseDocumentJson is
+        Ok document ->
+            when Registry.inferPlatform (Registry.fromDocument document) [ "elm/html" ] [ Node ] is
+                Err _ ->
+                    True
+
+                Ok _ ->
+                    False
+
+        Err _ ->
+            False
+
+
+adapterDiscoveryWorks : Bool
+adapterDiscoveryWorks =
+    Adapter.adapterModuleForTarget "ElmToGren.Compat.Json.Decode.keyValuePairs"
+        == Just "ElmToGren.Compat.Json.Decode"
+        && Adapter.adapterModuleForTarget "Array.keepIf" == Nothing
+        && Adapter.requiredForModules
+            [ { source = "List"
+              , target = "Array"
+              , values =
+                    Dict.empty
+                        |> Dict.set "tail" "ElmToGren.Compat.List.tail"
+                        |> Dict.set "fromList" "ElmToGren.Compat.Array.fromList"
+              , types = Dict.empty
+              }
+            ]
+            == [ ArrayAdapter, ListAdapter ]
+
+
+adapterGenerationIsDeterministic : Bool
+adapterGenerationIsDeterministic =
+    when Adapter.generateFromRequirements
+        [ "list"
+        , "ElmToGren.Compat.Array.initialize"
+        , "List"
+        , "Tuple"
+        ]
+    is
+        Ok modules ->
+            Array.map .moduleName modules
+                == [ "ElmToGren.Compat.Array"
+                   , "ElmToGren.Compat.List"
+                   , "ElmToGren.Compat.Tuple"
+                   ]
+                && when Array.get 0 modules is
+                    Just firstModule ->
+                        firstModule.relativePath == "ElmToGren/Compat/Array.gren"
+
+                    Nothing ->
+                        False
+
+        Err _ ->
+            False
+
+
+tupleAdapterIsSemantic : Bool
+tupleAdapterIsSemantic =
+    Adapter.sourceFor TupleAdapter
+        |> String.contains "{ first = firstValue, second = secondValue }"
+
+
+jsonEncodeAdapterIsSemantic : Bool
+jsonEncodeAdapterIsSemantic =
+    Adapter.sourceFor JsonEncodeAdapter
+        |> String.contains "{ key = pair.first, value = pair.second }"
+
+
+listAndArrayAdaptersAreSemantic : Bool
+listAndArrayAdaptersAreSemantic =
+    String.contains "Array.foldl (+) 0 values" (Adapter.sourceFor ListAdapter)
+        && String.contains "fromList values =" (Adapter.sourceFor ArrayAdapter)
+        && String.contains "toList values =" (Adapter.sourceFor ArrayAdapter)
+
+
+lexicalValidationWorks : Bool
+lexicalValidationWorks =
+    MappingDecode.isValidElmPackageName "NoRedInk/elm-json-decode-pipeline"
+        && not (MappingDecode.isValidGrenPackageName "NoRedInk/port")
+        && MappingDecode.isValidGrenPackageName "noredink/port"
+        && MappingDecode.isValidModuleName "Json.Decode"
+        && MappingDecode.isValidSourceSymbol "(::)"
+        && MappingDecode.isValidTargetSymbol "Math.round"
+        && not (MappingDecode.isValidTargetSymbol "Math round")
+        && MappingDecode.isValidSemanticVersion "7.4.2"
+        && not (MappingDecode.isValidSemanticVersion "07.4.2")
+
+
+decodedDocuments =
+    when MappingDecode.decodeString "base.json" baseDocumentJson is
+        Ok base ->
+            when MappingDecode.decodeString "overlay.json" transpileOverlayJson is
+                Ok overlay ->
+                    Just [ base, overlay ]
+
+                Err _ ->
+                    Nothing
+
+        Err _ ->
+            Nothing
+
+
+baseDocumentJson : String
+baseDocumentJson =
+    """
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "kind": "gren-analogue",
+      "elmPackage": "elm/core",
+      "grenPackage": "gren-lang/core",
+      "grenVersion": "7.4.2",
+      "platform": "common",
+      "modules": [{
+        "source": "Basics",
+        "target": "Basics",
+        "values": { "round": "Math.round" },
+        "types": {}
+      }]
+    },
+    {
+      "kind": "absorbed",
+      "elmPackage": "elm/html",
+      "grenPackage": "gren-lang/browser",
+      "grenVersion": "6.0.2",
+      "platform": "browser",
+      "modules": [{ "source": "Html", "target": "Html", "values": {}, "types": {} }]
+    }
+  ]
+}
+"""
+
+
+transpileOverlayJson : String
+transpileOverlayJson =
+    """
+{
+  "schemaVersion": 1,
+  "packages": [{
+    "kind": "transpile",
+    "elmPackage": "elm/core",
+    "grenPackage": "ported/elm--core"
+  }]
+}
+"""
+
+
+collisionDocumentJson : String
+collisionDocumentJson =
+    """
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "kind": "gren-analogue",
+      "elmPackage": "one/shared",
+      "grenPackage": "one/shared",
+      "grenVersion": "1.0.0",
+      "platform": "common",
+      "modules": [{ "source": "Shared", "target": "First.Shared" }]
+    },
+    {
+      "kind": "gren-analogue",
+      "elmPackage": "two/shared",
+      "grenPackage": "two/shared",
+      "grenVersion": "1.0.0",
+      "platform": "common",
+      "modules": [{ "source": "Shared", "target": "Second.Shared" }]
+    }
+  ]
+}
+"""

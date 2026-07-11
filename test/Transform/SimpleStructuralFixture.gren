@@ -1,0 +1,29 @@
+module Transform.SimpleStructuralFixture exposing (orElse, prepend, swap, unit)
+
+import Array exposing (Array)
+
+
+swap : { first : a, second : b } -> { first : b, second : a }
+swap { first = first, second = second } =
+    { first = second, second = first }
+
+
+orElse : a -> Maybe a -> a
+orElse fallback maybeValue =
+    when maybeValue is
+        Just value ->
+            value
+
+        Nothing ->
+            fallback
+
+
+prepend : a -> Array a -> Array a
+prepend first rest =
+    Array.pushFirst first rest
+
+
+unit : {}
+unit =
+    {}
+

@@ -1,0 +1,272 @@
+module Elm.PackageName exposing
+    ( Name
+    , Error(..)
+    , parse
+    , fromString
+    , isValid
+    , toString
+    , author
+    , project
+    , compare
+    , errorToString
+    )
+
+{-| A validated Elm package name.
+
+Keeping the constructor private makes it impossible for the resolver and
+manifest decoder to accidentally admit a value which the Elm registry cannot
+address.
+-}
+
+import Array exposing (Array)
+import Char
+import String
+
+
+type Name
+    = Name { author : String, project : String }
+
+
+type Error
+    = ExpectedAuthorProject String
+    | EmptyAuthor String
+    | EmptyProject String
+    | SegmentTooLong { packageName : String, segment : String }
+    | InvalidAuthorStart String
+    | InvalidProjectStart String
+    | InvalidAuthorCharacter { packageName : String, offset : Int }
+    | InvalidProjectCharacter { packageName : String, offset : Int }
+    | ConsecutiveDashes { packageName : String, segment : String }
+    | TrailingDash { packageName : String, segment : String }
+
+
+parse : String -> Result Error Name
+parse source =
+    let
+        pieces =
+            String.split "/" source
+    in
+    if Array.length pieces /= 2 then
+        Err (ExpectedAuthorProject source)
+
+    else
+        when { author = Array.get 0 pieces, project = Array.get 1 pieces } is
+            { author = Just authorPart, project = Just projectPart } ->
+                validateAuthor source authorPart
+                    |> Result.andThen (\_ -> validateProject source projectPart)
+                    |> Result.map (\_ -> Name { author = authorPart, project = projectPart })
+
+            _ ->
+                Err (ExpectedAuthorProject source)
+
+
+fromString : String -> Result Error Name
+fromString =
+    parse
+
+
+isValid : String -> Bool
+isValid source =
+    when parse source is
+        Ok _ ->
+            True
+
+        Err _ ->
+            False
+
+
+toString : Name -> String
+toString (Name parts) =
+    parts.author ++ "/" ++ parts.project
+
+
+author : Name -> String
+author (Name parts) =
+    parts.author
+
+
+project : Name -> String
+project (Name parts) =
+    parts.project
+
+
+compare : Name -> Name -> Order
+compare left right =
+    Basics.compare (toString left) (toString right)
+
+
+validateAuthor : String -> String -> Result Error {}
+validateAuthor packageName segment =
+    validateSegment
+        { packageName = packageName
+        , segment = segment
+        , role = Author
+        }
+
+
+validateProject : String -> String -> Result Error {}
+validateProject packageName segment =
+    validateSegment
+        { packageName = packageName
+        , segment = segment
+        , role = Project
+        }
+
+
+type Role
+    = Author
+    | Project
+
+
+validateSegment : { packageName : String, segment : String, role : Role } -> Result Error {}
+validateSegment details =
+    let
+        characters =
+            String.toArray details.segment
+    in
+    if Array.isEmpty characters then
+        when details.role is
+            Author ->
+                Err (EmptyAuthor details.packageName)
+
+            Project ->
+                Err (EmptyProject details.packageName)
+
+    else if Array.length characters > 255 then
+        Err
+            (SegmentTooLong
+                { packageName = details.packageName
+                , segment = roleName details.role
+                }
+            )
+
+    else
+        when Array.first characters is
+            Nothing ->
+                Err (ExpectedAuthorProject details.packageName)
+
+            Just first ->
+                if not (validStart details.role first) then
+                    when details.role is
+                        Author ->
+                            Err (InvalidAuthorStart details.packageName)
+
+                        Project ->
+                            Err (InvalidProjectStart details.packageName)
+
+                else
+                    validateCharacters details 1 False (Array.dropFirst 1 characters)
+
+
+validateCharacters : { packageName : String, segment : String, role : Role } -> Int -> Bool -> Array Char -> Result Error {}
+validateCharacters details offset previousWasDash remaining =
+    when Array.first remaining is
+        Nothing ->
+            if previousWasDash then
+                Err
+                    (TrailingDash
+                        { packageName = details.packageName
+                        , segment = roleName details.role
+                        }
+                    )
+
+            else
+                Ok {}
+
+        Just character ->
+            let
+                isDash =
+                    character == '-'
+            in
+            if isDash && previousWasDash then
+                Err
+                    (ConsecutiveDashes
+                        { packageName = details.packageName
+                        , segment = roleName details.role
+                        }
+                    )
+
+            else if not (isDash || validCharacter details.role character) then
+                when details.role is
+                    Author ->
+                        Err
+                            (InvalidAuthorCharacter
+                                { packageName = details.packageName
+                                , offset = offset
+                                }
+                            )
+
+                    Project ->
+                        Err
+                            (InvalidProjectCharacter
+                                { packageName = details.packageName
+                                , offset = offset
+                                }
+                            )
+
+            else
+                validateCharacters details (offset + 1) isDash (Array.dropFirst 1 remaining)
+
+
+validStart : Role -> Char -> Bool
+validStart role character =
+    when role is
+        Author ->
+            Char.isAlphaNum character
+
+        Project ->
+            Char.isLower character
+
+
+validCharacter : Role -> Char -> Bool
+validCharacter role character =
+    when role is
+        Author ->
+            Char.isAlphaNum character
+
+        Project ->
+            Char.isLower character || Char.isDigit character
+
+
+roleName : Role -> String
+roleName role =
+    when role is
+        Author ->
+            "author"
+
+        Project ->
+            "project"
+
+
+errorToString : Error -> String
+errorToString error =
+    when error is
+        ExpectedAuthorProject packageName ->
+            "Invalid Elm package name '" ++ packageName ++ "': expected exactly one slash."
+
+        EmptyAuthor packageName ->
+            "Invalid Elm package name '" ++ packageName ++ "': the author segment is empty."
+
+        EmptyProject packageName ->
+            "Invalid Elm package name '" ++ packageName ++ "': the project segment is empty."
+
+        SegmentTooLong details ->
+            "Invalid Elm package name '" ++ details.packageName ++ "': the " ++ details.segment ++ " segment must be fewer than 256 ASCII bytes."
+
+        InvalidAuthorStart packageName ->
+            "Invalid Elm package name '" ++ packageName ++ "': the author must start with an ASCII letter or digit."
+
+        InvalidProjectStart packageName ->
+            "Invalid Elm package name '" ++ packageName ++ "': the project must start with a lowercase ASCII letter."
+
+        InvalidAuthorCharacter details ->
+            "Invalid Elm package name '" ++ details.packageName ++ "': the author contains an unsupported character at offset " ++ String.fromInt details.offset ++ "."
+
+        InvalidProjectCharacter details ->
+            "Invalid Elm package name '" ++ details.packageName ++ "': the project contains an unsupported character at offset " ++ String.fromInt details.offset ++ "."
+
+        ConsecutiveDashes details ->
+            "Invalid Elm package name '" ++ details.packageName ++ "': the " ++ details.segment ++ " segment cannot contain consecutive dashes."
+
+        TrailingDash details ->
+            "Invalid Elm package name '" ++ details.packageName ++ "': the " ++ details.segment ++ " segment cannot end with a dash."

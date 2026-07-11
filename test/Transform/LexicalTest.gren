@@ -1,0 +1,184 @@
+module Transform.LexicalTest exposing (tests)
+
+import Array exposing (Array)
+import Debug
+import String
+import Transform.Lexical as Lexical
+import Transform.SourceEdit exposing (SourceError)
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ rewritesElmSyntax
+    , ignoresProtectedRegions
+    , ignoresUnterminatedRegions
+    , reportsUnicodePositions
+    , respectsIdentifierBoundaries
+    , preservesCrLf
+    , isIdempotent
+    ]
+
+
+rewritesElmSyntax : TestResult
+rewritesElmSyntax =
+    let
+        source =
+            String.join "\n"
+                [ "answer value ="
+                , "    case value of"
+                , "        Just casey -> ()"
+                , "        Nothing -> caseOf"
+                , ""
+                ]
+
+        expected =
+            String.join "\n"
+                [ "answer value ="
+                , "    when value is"
+                , "        Just casey -> {}"
+                , "        Nothing -> caseOf"
+                , ""
+                ]
+    in
+    expectEqual "case/of and unit syntax are rewritten" (Ok expected) (transformedSource source)
+
+
+ignoresProtectedRegions : TestResult
+ignoresProtectedRegions =
+    let
+        source =
+            String.join "\n"
+                [ "-- case ignored of ()"
+                , "{- outer case () {- nested of () -} still ignored -}"
+                , "ordinary = \"case of () \\\"still a string\\\"\""
+                , "character = 'c'"
+                , "multiline = \"\"\"case ignored of ()"
+                , "and still ignored\"\"\""
+                , "shader = [glsl| case ignored of () |]"
+                , "real value = case value of () -> ()"
+                ]
+
+        expected =
+            String.join "\n"
+                [ "-- case ignored of ()"
+                , "{- outer case () {- nested of () -} still ignored -}"
+                , "ordinary = \"case of () \\\"still a string\\\"\""
+                , "character = 'c'"
+                , "multiline = \"\"\"case ignored of ()"
+                , "and still ignored\"\"\""
+                , "shader = [glsl| case ignored of () |]"
+                , "real value = when value is {} -> {}"
+                ]
+    in
+    expectEqual "scanner ignores strings, chars, comments, and GLSL" (Ok expected) (transformedSource source)
+
+
+ignoresUnterminatedRegions : TestResult
+ignoresUnterminatedRegions =
+    let
+        sources =
+            [ "value = 1\n{- case value of ()"
+            , "value = \"case value of ()"
+            , "value = [glsl| case value of ()"
+            , "value = \"\"\"case value of ()"
+            ]
+
+        passed =
+            Array.all (\source -> transformedSource source == Ok source) sources
+    in
+    outcome "unterminated protected regions consume the remaining source" passed "A protected region was rewritten."
+
+
+reportsUnicodePositions : TestResult
+reportsUnicodePositions =
+    let
+        source =
+            "emoji = \"😀\"\nvalue = case x of\n    _ -> ()\n"
+
+        actual =
+            Lexical.collectLexicalEdits source
+                |> Result.map (Array.map (\edit -> edit.range.start))
+
+        expected =
+            Ok
+                [ { row = 2, column = 9 }
+                , { row = 2, column = 16 }
+                , { row = 3, column = 10 }
+                ]
+    in
+    expectEqual "lexical edit ranges remain valid after astral Unicode" expected actual
+
+
+respectsIdentifierBoundaries : TestResult
+respectsIdentifierBoundaries =
+    let
+        source =
+            "casey = ofCourse\ncase value of result -> ()"
+
+        expected =
+            "casey = ofCourse\nwhen value is result -> {}"
+    in
+    expectEqual "keywords inside identifiers are untouched" (Ok expected) (transformedSource source)
+
+
+preservesCrLf : TestResult
+preservesCrLf =
+    expectEqual
+        "CRLF text keeps its original newline encoding"
+        (Ok "x = when y is\r\n    _ -> {}\r\n")
+        (transformedSource "x = case y of\r\n    _ -> ()\r\n")
+
+
+isIdempotent : TestResult
+isIdempotent =
+    let
+        sources =
+            [ "case x of\n  () -> ()"
+            , "when x is\n  {} -> {}"
+            , "{- case of () -} casey ofCourse"
+            , "😀 case x of ()"
+            , "[glsl| () case of |]"
+            ]
+
+        stable source =
+            when Lexical.transform source is
+                Err _ ->
+                    False
+
+                Ok once ->
+                    transformedSource once.source == Ok once.source
+    in
+    outcome "lexical transformation is idempotent" (Array.all stable sources) "A second pass changed the first pass output."
+
+
+transformedSource : String -> Result SourceError String
+transformedSource source =
+    Lexical.transform source |> Result.map .source
+
+
+expectEqual : String -> a -> a -> TestResult
+expectEqual name expected actual =
+    outcome
+        name
+        (expected == actual)
+        ("Expected " ++ Debug.toString expected ++ ", got " ++ Debug.toString actual)
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed failureDetails =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            failureDetails
+    }

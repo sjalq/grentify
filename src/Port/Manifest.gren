@@ -1,0 +1,213 @@
+module Port.Manifest exposing (Built, LocalDependency, build)
+
+import Cli
+import Compiler.Platform as GrenPlatform exposing (Platform)
+import Dict exposing (Dict)
+import Elm.Manifest exposing (Manifest)
+import Elm.PackageName as ElmPackageName
+import Elm.Semver
+import Emit.Manifest as GrenManifest
+import Mapping.Registry
+import Mapping.Types as Mapping exposing (PackageMapping(..), Registry)
+import Port.Error as PortError exposing (Error)
+
+
+type alias LocalDependency =
+    { grenPackage : String
+    , path : String
+    }
+
+
+type alias Built =
+    { encoded : String
+    , spec : GrenManifest.Spec
+    , platform : Platform
+    , dependencies : Dict String GrenManifest.Dependency
+    }
+
+
+build
+    : { source : Manifest
+      , targetName : String
+      , mappings : Registry
+      , localDependencies : Dict String LocalDependency
+      , detectedPlatforms : Array Mapping.Platform
+      , requestedPlatform : Cli.PlatformChoice
+      }
+    -> Result Error Built
+build options =
+    buildDependencies options.targetName options.mappings options.localDependencies options.source.dependencies
+        |> Result.andThen
+            (\dependencies ->
+                Mapping.Registry.inferPlatformFromDependencyDicts
+                    options.mappings
+                    options.source.dependencies
+                    options.source.testDependencies
+                    options.detectedPlatforms
+                    |> Result.mapError platformInferenceError
+                    |> Result.andThen
+                        (\inferred ->
+                            choosePlatform options.requestedPlatform inferred
+                                |> Result.andThen
+                                    (\platform ->
+                                        let
+                                            spec =
+                                                { platform = platform
+                                                , name = options.targetName
+                                                , summary = options.source.summary
+                                                , license = options.source.license
+                                                , version = Elm.Semver.versionToString options.source.version
+                                                , exposedModules = GrenManifest.ExposedArray options.source.exposedModules
+                                                , grenVersion = "0.6.0 <= v < 0.7.0"
+                                                , dependencies = dependencies
+                                                }
+                                        in
+                                        GrenManifest.encode spec
+                                            |> Result.map
+                                                (\encoded ->
+                                                    { encoded = encoded
+                                                    , spec = spec
+                                                    , platform = platform
+                                                    , dependencies = dependencies
+                                                    }
+                                                )
+                                    )
+                        )
+            )
+
+
+buildDependencies
+    : String
+    -> Registry
+    -> Dict String LocalDependency
+    -> Dict String Elm.Manifest.Dependency
+    -> Result Error (Dict String GrenManifest.Dependency)
+buildDependencies targetName mappings localDependencies dependencies =
+    Dict.foldl
+        (\elmName _ accumulated ->
+            accumulated
+                |> Result.andThen
+                    (\built ->
+                        when Dict.get elmName localDependencies is
+                            Just local ->
+                                if local.grenPackage == targetName then
+                                    Ok built
+
+                                else
+                                    setDependency local.grenPackage (GrenManifest.LocalPath local.path) built
+
+                            Nothing ->
+                                when Mapping.Registry.mappingFor elmName mappings is
+                                    Just (GrenAnalogue details) ->
+                                        addMapped targetName details built
+
+                                    Just (Absorbed details) ->
+                                        addMapped targetName details built
+
+                                    Just (Transpile _) ->
+                                        Err <|
+                                            PortError.create "MISSING_TRANSPILED_DEPENDENCY"
+                                                ("Dependency " ++ elmName ++ " must be emitted in the generated package graph.")
+
+                                    Nothing ->
+                                        Err <|
+                                            PortError.create "UNMAPPED_DEPENDENCY"
+                                                ("No Gren analogue or transpiled sibling is available for " ++ elmName ++ ".")
+                    )
+        )
+        (Ok Dict.empty)
+        dependencies
+
+
+addMapped
+    : String
+    -> Mapping.PackageDetails
+    -> Dict String GrenManifest.Dependency
+    -> Result Error (Dict String GrenManifest.Dependency)
+addMapped targetName details dependencies =
+    if details.grenPackage == targetName then
+        Ok dependencies
+
+    else
+        setDependency details.grenPackage (GrenManifest.VersionRange (mappedRange details.grenVersion)) dependencies
+
+
+setDependency
+    : String
+    -> GrenManifest.Dependency
+    -> Dict String GrenManifest.Dependency
+    -> Result Error (Dict String GrenManifest.Dependency)
+setDependency name requirement dependencies =
+    when Dict.get name dependencies is
+        Nothing ->
+            Ok (Dict.set name requirement dependencies)
+
+        Just previous ->
+            if previous == requirement then
+                Ok dependencies
+
+            else
+                Err <|
+                    PortError.create "GREN_DEPENDENCY_CONFLICT"
+                        ("Multiple Elm dependencies map to incompatible requirements for " ++ name ++ ".")
+
+
+mappedRange : String -> String
+mappedRange version =
+    when Elm.Semver.parseVersion version is
+        Ok parsed ->
+            version
+                ++ " <= v < "
+                ++ String.fromInt (parsed.major + 1)
+                ++ ".0.0"
+
+        Err _ ->
+            version ++ " <= v < " ++ version
+
+
+platformInferenceError : Mapping.PlatformInferenceError -> Error
+platformInferenceError inferenceError =
+    when inferenceError is
+        Mapping.BrowserAndNode details ->
+            PortError.create "PLATFORM_CONFLICT"
+                ("The dependency graph mixes browser and node packages: "
+                    ++ String.join ", " (Array.append details.browserSources details.nodeSources)
+                )
+
+
+choosePlatform : Cli.PlatformChoice -> Mapping.Platform -> Result Error Platform
+choosePlatform requested inferred =
+    let
+        inferredPlatform =
+            mappingPlatformToGren inferred
+    in
+    when requested is
+        Cli.Auto ->
+            Ok inferredPlatform
+
+        Cli.ExactPlatform chosen ->
+            if inferredPlatform == GrenPlatform.Common || inferredPlatform == chosen then
+                Ok chosen
+
+            else
+                Err <|
+                    PortError.create "PLATFORM_CONFLICT"
+                        ("Requested "
+                            ++ GrenPlatform.toString chosen
+                            ++ " but dependencies require "
+                            ++ GrenPlatform.toString inferredPlatform
+                            ++ "."
+                        )
+
+
+mappingPlatformToGren : Mapping.Platform -> Platform
+mappingPlatformToGren platform =
+    when platform is
+        Mapping.Common ->
+            GrenPlatform.Common
+
+        Mapping.Browser ->
+            GrenPlatform.Browser
+
+        Mapping.Node ->
+            GrenPlatform.Node

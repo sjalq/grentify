@@ -1,0 +1,86 @@
+module Port.Mapping exposing (Loaded, load)
+
+import Bitwise
+import Char
+import FileSystem
+import FileSystem.Path exposing (Path)
+import Mapping.Decode
+import Mapping.Registry
+import Mapping.Types exposing (MappingDocument, MappingError(..), Registry)
+import Port.Error as PortError exposing (Error)
+import System.File
+import Task exposing (Task)
+
+
+type alias Loaded =
+    { registry : Registry
+    , fingerprint : String
+    }
+
+
+load : FileSystem.Permission -> Path -> Array Path -> Task Error Loaded
+load permission builtin overlays =
+    readDocument permission builtin
+        |> Task.andThen
+            (\builtinDocument ->
+                Array.foldl
+                    (\path pendingDocuments ->
+                        pendingDocuments
+                            |> Task.andThen
+                                (\documents ->
+                                    readDocument permission path
+                                        |> Task.map (\document -> Array.pushLast document documents)
+                                )
+                    )
+                    (Task.succeed [ builtinDocument ])
+                    overlays
+            )
+        |> Task.map
+            (\documents ->
+                { registry = Mapping.Registry.overlayDocuments (Array.map .document documents)
+                , fingerprint =
+                    documents
+                        |> Array.map .contents
+                        |> String.join "\n"
+                        |> fingerprint
+                }
+            )
+
+
+readDocument : FileSystem.Permission -> Path -> Task Error { document : MappingDocument, contents : String }
+readDocument permission path =
+    System.File.readText permission path
+        |> Task.andThen
+            (\contents ->
+                when Mapping.Decode.decodeString (FileSystem.Path.toPosixString path) contents is
+                    Ok document ->
+                        Task.succeed { document = document, contents = contents }
+
+                    Err mappingError ->
+                        Task.fail (mappingErrorToPortError mappingError)
+            )
+
+
+fingerprint : String -> String
+fingerprint source =
+    let
+        hash =
+            source
+                |> String.toArray
+                |> Array.foldl
+                    (\character current ->
+                        Bitwise.xor current (Char.toCode character)
+                            * 16777619
+                            |> Bitwise.shiftRightZfBy 0
+                    )
+                    2166136261
+    in
+    "fnv1a32:" ++ String.fromInt hash
+
+
+mappingErrorToPortError : MappingError -> Error
+mappingErrorToPortError mappingError =
+    when mappingError is
+        InvalidMapping details ->
+            PortError.create "INVALID_MAPPING"
+                (details.source ++ " " ++ details.path ++ ": " ++ details.message)

@@ -1,0 +1,9 @@
+module Transform.AdapterUseFixture exposing (total)
+
+import Array exposing ( {- keep List.sum -} keepIf)
+import ElmToGren.Compat.List
+
+
+total values =
+    ElmToGren.Compat.List.sum (keepIf (\value -> value > 0) values)
+

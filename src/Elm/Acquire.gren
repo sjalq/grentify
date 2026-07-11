@@ -1,0 +1,882 @@
+module Elm.Acquire exposing
+    ( Input(..)
+    , Options
+    , PackageSource
+    , Permissions
+    , acquire
+    , loadManifest
+    , loadRegistry
+    , loadVersions
+    , parseInput
+    )
+
+{-| Elm package input, registry metadata caching, source archive acquisition,
+and local package loading. The registry metadata and archive bytes are fetched
+with Gren's Node APIs. SHA-1 verification and ZIP extraction use mature system
+tools because Gren 0.6 does not expose SHA-1 or a ZIP container decoder.
+-}
+
+import Array exposing (Array)
+import Bytes exposing (Bytes)
+import ChildProcess
+import Dict exposing (Dict)
+import Elm.Manifest as Manifest exposing (Manifest)
+import Elm.PackageName as PackageName exposing (Name)
+import Elm.Registry as Registry exposing (Registry)
+import Elm.Semver as Semver exposing (Version)
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import HttpClient
+import Json.Decode as Decode
+import Node
+import Port.Error as PortError exposing (Error)
+import System.File
+import System.Process
+import Task exposing (Task)
+
+
+type Input
+    = Local Path
+    | RegistryPackage { name : Name, version : Maybe Version }
+
+
+type alias Options =
+    { cacheDirectory : Path
+    , registryBaseUrl : String
+    , offline : Bool
+    }
+
+
+type alias Permissions =
+    { fileSystem : FileSystem.Permission
+    , http : HttpClient.Permission
+    , childProcess : ChildProcess.Permission
+    }
+
+
+type alias PackageSource =
+    { manifest : Manifest
+    , root : Path
+    , sourceFiles : Array Path
+    , sourceUrl : Maybe String
+    , sourceHash : Maybe String
+    }
+
+
+type alias Endpoint =
+    { url : String
+    , hash : String
+    }
+
+
+parseInput : Node.Platform -> Path -> Path -> String -> Result Error Input
+parseInput platform workingDirectory homeDirectory rawInput =
+    let
+        input =
+            String.trim rawInput
+
+        explicitPath =
+            String.startsWith "file:" input
+
+        withoutScheme =
+            if explicitPath then
+                String.dropFirst 5 input
+
+            else
+                input
+
+        expanded =
+            if withoutScheme == "~" then
+                System.File.pathToString platform homeDirectory
+
+            else if String.startsWith "~/" withoutScheme then
+                Path.join
+                    [ homeDirectory
+                    , Path.fromPosixString (String.dropFirst 2 withoutScheme)
+                    ]
+                    |> System.File.pathToString platform
+
+            else
+                withoutScheme
+
+        looksLikePath =
+            explicitPath
+                || String.startsWith "." withoutScheme
+                || String.startsWith "/" withoutScheme
+                || String.startsWith "~" withoutScheme
+                || String.contains "\\" withoutScheme
+                || Array.length (String.split "/" withoutScheme) /= 2
+    in
+    if String.isEmpty input then
+        Err (PortError.create "INVALID_ARGUMENT" "An Elm package coordinate or local path is required.")
+
+    else if String.startsWith packageSitePrefix input then
+        parsePackageSiteUrl input
+
+    else if looksLikePath then
+        Ok (Local (System.File.resolve platform workingDirectory expanded))
+
+    else
+        parseCoordinate input
+
+
+packageSitePrefix : String
+packageSitePrefix =
+    "https://package.elm-lang.org/packages/"
+
+
+parsePackageSiteUrl : String -> Result Error Input
+parsePackageSiteUrl source =
+    let
+        withoutFragment =
+            String.split "#" source
+                |> Array.first
+                |> Maybe.withDefault source
+
+        withoutQuery =
+            String.split "?" withoutFragment
+                |> Array.first
+                |> Maybe.withDefault withoutFragment
+
+        segments =
+            String.dropFirst (String.count packageSitePrefix) withoutQuery
+                |> String.split "/"
+                |> Array.keepIf (String.isEmpty >> not)
+    in
+    when Array.takeFirst 3 segments is
+        [ author, project, "latest" ] ->
+            parseCoordinate (author ++ "/" ++ project)
+
+        [ author, project, version ] ->
+            parseCoordinate (author ++ "/" ++ project ++ "@" ++ version)
+
+        _ ->
+            Err <|
+                PortError.create "INVALID_ARGUMENT"
+                    ("Invalid Elm package URL "
+                        ++ source
+                        ++ ". Expected https://package.elm-lang.org/packages/author/project/latest/."
+                    )
+
+
+parseCoordinate : String -> Result Error Input
+parseCoordinate source =
+    let
+        pieces =
+            String.split "@" source
+    in
+    when pieces is
+        [ packageName ] ->
+            PackageName.parse packageName
+                |> Result.map (\name -> RegistryPackage { name = name, version = Nothing })
+                |> Result.mapError
+                    (PackageName.errorToString
+                        >> PortError.create "INVALID_PACKAGE_NAME"
+                    )
+
+        [ packageName, version ] ->
+            Result.map2
+                (\name semanticVersion -> RegistryPackage { name = name, version = Just semanticVersion })
+                (PackageName.parse packageName
+                    |> Result.mapError
+                        (PackageName.errorToString
+                            >> PortError.create "INVALID_PACKAGE_NAME"
+                        )
+                )
+                (Semver.parseVersion version
+                    |> Result.mapError
+                        (Semver.errorToString
+                            >> PortError.create "INVALID_VERSION"
+                        )
+                )
+
+        _ ->
+            Err (PortError.create "INVALID_ARGUMENT" ("Invalid Elm package coordinate " ++ source ++ "."))
+
+
+acquire : Node.Platform -> Permissions -> Options -> Input -> Task Error PackageSource
+acquire platform permissions options input =
+    when input is
+        Local directory ->
+            acquireLocal permissions.fileSystem directory
+
+        RegistryPackage coordinate ->
+            acquireRegistry platform permissions options coordinate.name coordinate.version
+
+
+loadRegistry : Permissions -> Options -> Task Error Registry
+loadRegistry permissions options =
+    let
+        cachePath =
+            Path.join
+                [ options.cacheDirectory
+                , Path.fromPosixString "registry/all-packages.json"
+                ]
+
+        url =
+            options.registryBaseUrl ++ "/all-packages"
+
+        decode source =
+            Registry.decodeString source
+                |> resultTask
+                    (Registry.errorToString
+                        >> PortError.create "REGISTRY_INVALID"
+                    )
+
+        fromCache =
+            System.File.readText permissions.fileSystem cachePath
+                |> Task.andThen decode
+
+        fromNetwork =
+            fetchString permissions.http url
+                |> Task.andThen
+                    (\body ->
+                        decode body
+                            |> Task.andThen
+                                (\registry ->
+                                    -- Cache write is best-effort: a valid registry response
+                                    -- must still be usable when the cache directory is not writable.
+                                    System.File.writeText permissions.fileSystem cachePath body
+                                        |> Task.map (\_ -> registry)
+                                        |> Task.onError (\_ -> Task.succeed registry)
+                                )
+                    )
+    in
+    -- /all-packages is mutable: online mode always refreshes, using cache only
+    -- as a fallback when the network is unreachable. Offline mode is cache-only.
+    if options.offline then
+        System.File.exists permissions.fileSystem cachePath
+            |> Task.andThen
+                (\cached ->
+                    if cached then
+                        fromCache
+
+                    else
+                        Task.fail <|
+                            PortError.create "OFFLINE_CACHE_MISS"
+                                ("Offline cache does not contain " ++ Path.toPosixString cachePath ++ ".")
+                )
+
+    else
+        fromNetwork
+            |> Task.onError
+                (\fetchError ->
+                    System.File.exists permissions.fileSystem cachePath
+                        |> Task.andThen
+                            (\cached ->
+                                if cached then
+                                    fromCache
+                                        |> Task.onError (\_ -> Task.fail fetchError)
+
+                                else
+                                    Task.fail <|
+                                        PortError.withHint
+                                            "No usable cached registry index was available. Retry online once package.elm-lang.org is reachable."
+                                            fetchError
+                            )
+                )
+
+
+loadVersions : Permissions -> Options -> Name -> Task Error (Array Version)
+loadVersions permissions options name =
+    loadRegistry permissions options
+        |> Task.andThen
+            (\registry ->
+                when Registry.versionsFor name registry is
+                    Just versions ->
+                        Task.succeed versions
+
+                    Nothing ->
+                        Task.fail <|
+                            PortError.create "PACKAGE_NOT_FOUND"
+                                ("Elm registry does not contain " ++ PackageName.toString name ++ ".")
+            )
+
+
+loadManifest : Permissions -> Options -> Name -> Version -> Task Error Manifest
+loadManifest permissions options name version =
+    let
+        path =
+            packageCachePath options name version "elm.json"
+
+        url =
+            packageUrl options name version "elm.json"
+    in
+    cachedText permissions options path url
+        |> Task.andThen
+            (Manifest.decodeString
+                >> resultTask
+                    (Manifest.errorToString
+                        >> PortError.create "ELM_MANIFEST_INVALID"
+                    )
+            )
+        |> Task.andThen (validateIdentity name version)
+
+
+acquireLocal : FileSystem.Permission -> Path -> Task Error PackageSource
+acquireLocal permission directory =
+    FileSystem.realPath permission directory
+        |> Task.mapError
+            (FileSystem.errorToString
+                >> PortError.create "LOCAL_PACKAGE_NOT_FOUND"
+            )
+        |> Task.andThen
+            (\root ->
+                readPackageAt permission root
+                    |> Task.map
+                        (\loaded ->
+                            { manifest = loaded.manifest
+                            , root = root
+                            , sourceFiles = loaded.sourceFiles
+                            , sourceUrl = Nothing
+                            , sourceHash = Nothing
+                            }
+                        )
+            )
+
+
+acquireRegistry : Node.Platform -> Permissions -> Options -> Name -> Maybe Version -> Task Error PackageSource
+acquireRegistry platform permissions options name requestedVersion =
+    resolveVersion permissions options name requestedVersion
+        |> Task.andThen
+            (\version ->
+                Task.map2
+                    (\manifest endpoint -> { manifest = manifest, endpoint = endpoint, version = version })
+                    (loadManifest permissions options name version)
+                    (loadEndpoint permissions options name version)
+            )
+        |> Task.andThen
+            (\resolved ->
+                acquireArchive platform permissions options name resolved.version resolved.endpoint
+                    |> Task.andThen
+                        (\root ->
+                            readPackageAt permissions.fileSystem root
+                                |> Task.andThen
+                                    (\loaded ->
+                                        validateIdentity name resolved.version loaded.manifest
+                                            |> Task.map
+                                                (\_ ->
+                                                    { manifest = resolved.manifest
+                                                    , root = root
+                                                    , sourceFiles = loaded.sourceFiles
+                                                    , sourceUrl = Just resolved.endpoint.url
+                                                    , sourceHash = Just resolved.endpoint.hash
+                                                    }
+                                                )
+                                    )
+                        )
+            )
+
+
+resolveVersion : Permissions -> Options -> Name -> Maybe Version -> Task Error Version
+resolveVersion permissions options name requested =
+    when requested is
+        Just version ->
+            Task.succeed version
+
+        Nothing ->
+            loadVersions permissions options name
+                |> Task.andThen
+                    (\versions ->
+                        when Array.first versions is
+                            Just version ->
+                                Task.succeed version
+
+                            Nothing ->
+                                Task.fail <|
+                                    PortError.create "VERSION_NOT_FOUND"
+                                        ("Elm package " ++ PackageName.toString name ++ " has no versions.")
+                    )
+
+
+loadEndpoint : Permissions -> Options -> Name -> Version -> Task Error Endpoint
+loadEndpoint permissions options name version =
+    cachedText permissions options
+        (packageCachePath options name version "endpoint.json")
+        (packageUrl options name version "endpoint.json")
+        |> Task.andThen
+            (Decode.decodeString endpointDecoder
+                >> resultTask
+                    (Decode.errorToString
+                        >> PortError.create "REGISTRY_INVALID"
+                    )
+            )
+
+
+endpointDecoder : Decode.Decoder Endpoint
+endpointDecoder =
+    Decode.map2
+        (\url hash -> { url = url, hash = hash })
+        (Decode.field "url" Decode.string)
+        (Decode.field "hash" Decode.string
+            |> Decode.andThen
+                (\hash ->
+                    if String.count hash == 40
+                        && Array.all isHexDigit (String.toArray hash)
+                    then
+                        Decode.succeed (String.toLower hash)
+
+                    else
+                        Decode.fail "Elm endpoint hash must be a 40-character SHA-1 digest."
+                )
+        )
+
+
+isHexDigit character =
+    Char.isDigit character
+        || Array.member character [ 'a', 'b', 'c', 'd', 'e', 'f', 'A', 'B', 'C', 'D', 'E', 'F' ]
+
+
+cachedText : Permissions -> Options -> Path -> String -> Task Error String
+cachedText permissions options cachePath url =
+    System.File.exists permissions.fileSystem cachePath
+        |> Task.andThen
+            (\cached ->
+                if cached then
+                    System.File.readText permissions.fileSystem cachePath
+
+                else if options.offline then
+                    Task.fail <|
+                        PortError.create "OFFLINE_CACHE_MISS"
+                            ("Offline cache does not contain " ++ Path.toPosixString cachePath ++ ".")
+
+                else
+                    fetchString permissions.http url
+                        |> Task.andThen
+                            (\body ->
+                                System.File.writeText permissions.fileSystem cachePath body
+                                    |> Task.map (\_ -> body)
+                                    |> Task.onError (\_ -> Task.succeed body)
+                            )
+            )
+
+
+fetchString : HttpClient.Permission -> String -> Task Error String
+fetchString permission url =
+    HttpClient.get url
+        |> HttpClient.withTimeout (60 * 1000)
+        |> HttpClient.withHeader "accept" "application/json"
+        |> HttpClient.withHeader "accept-encoding" "gzip"
+        |> HttpClient.expectString
+        |> HttpClient.send permission
+        |> Task.mapError
+            (HttpClient.errorToString
+                >> PortError.create "DOWNLOAD_FAILED"
+            )
+        |> Task.map .data
+
+
+fetchBytes : HttpClient.Permission -> String -> Task Error Bytes
+fetchBytes permission url =
+    HttpClient.get url
+        |> HttpClient.withTimeout (5 * 60 * 1000)
+        |> HttpClient.withHeader "accept" "application/zip"
+        |> HttpClient.expectBytes
+        |> HttpClient.send permission
+        |> Task.mapError
+            (HttpClient.errorToString
+                >> PortError.create "DOWNLOAD_FAILED"
+            )
+        |> Task.map .data
+
+
+acquireArchive : Node.Platform -> Permissions -> Options -> Name -> Version -> Endpoint -> Task Error Path
+acquireArchive platform permissions options name version endpoint =
+    let
+        archivePath =
+            packageCachePath options name version (endpoint.hash ++ ".zip")
+
+        destination =
+            packageCachePath options name version ("source-" ++ endpoint.hash)
+
+        verifyOrRecover =
+            verifyArchive platform permissions.childProcess archivePath endpoint.hash
+                |> Task.onError
+                    (\verifyError ->
+                        if options.offline || PortError.code verifyError /= "SOURCE_HASH_MISMATCH" then
+                            Task.fail verifyError
+
+                        else
+                            -- A corrupt or truncated cached ZIP would otherwise stick forever.
+                            removeIfExists permissions.fileSystem archivePath
+                                |> Task.andThen (\_ -> removeIfExists permissions.fileSystem destination)
+                                |> Task.andThen (\_ -> ensureArchive permissions options endpoint archivePath)
+                                |> Task.andThen (\_ -> verifyArchive platform permissions.childProcess archivePath endpoint.hash)
+                    )
+    in
+    ensureArchive permissions options endpoint archivePath
+        |> Task.andThen (\_ -> verifyOrRecover)
+        |> Task.andThen (\_ -> extractArchive platform permissions destination archivePath)
+        |> Task.andThen (\_ -> findPackageRoot permissions.fileSystem destination)
+
+
+ensureArchive : Permissions -> Options -> Endpoint -> Path -> Task Error Path
+ensureArchive permissions options endpoint archivePath =
+    System.File.exists permissions.fileSystem archivePath
+        |> Task.andThen
+            (\cached ->
+                if cached then
+                    Task.succeed archivePath
+
+                else if options.offline then
+                    Task.fail <|
+                        PortError.create "OFFLINE_CACHE_MISS"
+                            ("Offline cache does not contain " ++ Path.toPosixString archivePath ++ ".")
+
+                else
+                    when Path.parentPath archivePath is
+                        Nothing ->
+                            Task.fail (PortError.create "CACHE_INVALID" "Archive cache path has no parent.")
+
+                        Just parent ->
+                            System.File.ensureDirectory permissions.fileSystem parent
+                                |> Task.andThen (\_ -> fetchBytes permissions.http endpoint.url)
+                                |> Task.andThen
+                                    (\bytes ->
+                                        FileSystem.writeFile permissions.fileSystem bytes archivePath
+                                            |> Task.mapError
+                                                (FileSystem.errorToString
+                                                    >> PortError.create "FILE_WRITE_FAILED"
+                                                )
+                                    )
+            )
+
+
+verifyArchive : Node.Platform -> ChildProcess.Permission -> Path -> String -> Task Error {}
+verifyArchive platform permission archivePath expected =
+    let
+        filename =
+            System.File.pathToString platform archivePath
+
+        command program arguments =
+            System.Process.run permission
+                { program = program
+                , arguments = arguments
+                , workingDirectory = "."
+                , environment = Dict.empty
+                , allowedExitCodes = [ 0 ]
+                , timeoutMilliseconds = 60 * 1000
+                , maximumOutputBytes = 1024 * 1024
+                }
+
+        digest output =
+            String.words output.stdout
+                |> Array.first
+                |> Maybe.map String.toLower
+    in
+    command "sha1sum" [ filename ]
+        |> Task.onError (\_ -> command "shasum" [ "-a", "1", filename ])
+        |> Task.andThen
+            (\output ->
+                if digest output == Just expected then
+                    Task.succeed {}
+
+                else
+                    Task.fail <|
+                        PortError.create "SOURCE_HASH_MISMATCH"
+                            ("Elm archive SHA-1 does not match endpoint metadata for " ++ filename ++ ".")
+            )
+
+
+extractArchive : Node.Platform -> Permissions -> Path -> Path -> Task Error Path
+extractArchive platform permissions destination archivePath =
+    let
+        partial =
+            when Path.parentPath destination is
+                Just parent ->
+                    Path.append
+                        (Path.fromPosixString (Path.filenameWithExtension destination ++ ".partial"))
+                        parent
+
+                Nothing ->
+                    Path.fromPosixString (Path.toPosixString destination ++ ".partial")
+
+        marker directory =
+            Path.append (Path.fromPosixString ".elm-to-gren-extracted") directory
+
+        cleanPartial error =
+            removeIfExists permissions.fileSystem partial
+                |> Task.onError (\_ -> Task.succeed {})
+                |> Task.andThen (\_ -> Task.fail error)
+    in
+    System.File.exists permissions.fileSystem (marker destination)
+        |> Task.andThen
+            (\complete ->
+                if complete then
+                    Task.succeed destination
+
+                else
+                    removeIfExists permissions.fileSystem destination
+                        |> Task.andThen (\_ -> removeIfExists permissions.fileSystem partial)
+                        |> Task.andThen (\_ -> validateArchiveEntries platform permissions.childProcess archivePath)
+                        |> Task.andThen (\_ -> System.File.ensureDirectory permissions.fileSystem partial)
+                        |> Task.andThen
+                            (\_ ->
+                                System.Process.run permissions.childProcess
+                                    { program = "unzip"
+                                    , arguments =
+                                        [ "-q"
+                                        , System.File.pathToString platform archivePath
+                                        , "-d"
+                                        , System.File.pathToString platform partial
+                                        ]
+                                    , workingDirectory = "."
+                                    , environment = Dict.empty
+                                    , allowedExitCodes = [ 0 ]
+                                    , timeoutMilliseconds = 5 * 60 * 1000
+                                    , maximumOutputBytes = 16 * 1024 * 1024
+                                    }
+                            )
+                        |> Task.andThen
+                            (\_ ->
+                                System.File.writeText permissions.fileSystem (marker partial) "verified\n"
+                            )
+                        |> Task.andThen
+                            (\_ ->
+                                FileSystem.move permissions.fileSystem destination partial
+                                    |> Task.mapError
+                                        (FileSystem.errorToString
+                                            >> PortError.create "CACHE_WRITE_FAILED"
+                                        )
+                            )
+                        |> Task.map (\_ -> destination)
+                        |> Task.onError cleanPartial
+            )
+
+
+validateArchiveEntries : Node.Platform -> ChildProcess.Permission -> Path -> Task Error {}
+validateArchiveEntries platform permission archivePath =
+    let
+        inspect arguments =
+            System.Process.run permission
+                { program = "unzip"
+                , arguments = arguments ++ [ System.File.pathToString platform archivePath ]
+                , workingDirectory = "."
+                , environment = Dict.empty
+                , allowedExitCodes = [ 0 ]
+                , timeoutMilliseconds = 60 * 1000
+                , maximumOutputBytes = 64 * 1024 * 1024
+                }
+    in
+    Task.map2
+        (\entries details -> { entries = entries.stdout, details = details.stdout })
+        (inspect [ "-Z1" ])
+        (inspect [ "-ZTs" ])
+        |> Task.andThen
+            (\output ->
+                let
+                    hasSymbolicLink =
+                        output.details
+                            |> String.lines
+                            |> Array.any (String.startsWith "l")
+                in
+                if hasSymbolicLink then
+                    Task.fail (PortError.create "ARCHIVE_INVALID" "Package archive contains a symbolic link.")
+
+                else
+                    output.entries
+                        |> String.lines
+                        |> Array.keepIf (String.isEmpty >> not)
+                        |> validateEntryNames
+                        |> resultTask (PortError.create "ARCHIVE_INVALID")
+            )
+
+
+removeIfExists : FileSystem.Permission -> Path -> Task Error {}
+removeIfExists permission path =
+    System.File.exists permission path
+        |> Task.andThen
+            (\exists ->
+                if exists then
+                    FileSystem.remove permission { recursive = True } path
+                        |> Task.map (\_ -> {})
+                        |> Task.mapError
+                            (FileSystem.errorToString
+                                >> PortError.create "CACHE_WRITE_FAILED"
+                            )
+
+                else
+                    Task.succeed {}
+            )
+
+
+validateEntryNames : Array String -> Result String {}
+validateEntryNames entries =
+    entries
+        |> Array.foldl
+            (\entry accumulated ->
+                accumulated
+                    |> Result.andThen
+                        (\seen ->
+                            let
+                                segments =
+                                    entry
+                                        |> String.replace "\\" "/"
+                                        |> String.split "/"
+                                        |> Array.keepIf (String.isEmpty >> not)
+
+                                normalized =
+                                    String.toLower entry
+                            in
+                            if String.startsWith "/" entry
+                                || String.contains "\\" entry
+                                || String.contains "\u{0000}" entry
+                                || Array.any (\segment -> segment == "." || segment == "..") segments
+                            then
+                                Err ("Unsafe ZIP entry " ++ entry ++ ".")
+
+                            else if Dict.member normalized seen then
+                                Err ("Duplicate ZIP entry " ++ entry ++ ".")
+
+                            else
+                                Ok (Dict.set normalized True seen)
+                        )
+            )
+            (Ok Dict.empty)
+        |> Result.map (\_ -> {})
+
+
+findPackageRoot : FileSystem.Permission -> Path -> Task Error Path
+findPackageRoot permission extractionRoot =
+    System.File.listFilesRecursively permission extractionRoot
+        |> Task.andThen
+            (\files ->
+                let
+                    candidates =
+                        files
+                            |> Array.keepIf (\file -> Path.filenameWithExtension file == "elm.json")
+                            |> Array.sortWith comparePathDepth
+                in
+                when Array.first candidates is
+                    Nothing ->
+                        Task.fail (PortError.create "ARCHIVE_INVALID" "Package archive does not contain elm.json.")
+
+                    Just first ->
+                        let
+                            depth =
+                                Array.length first.directory
+
+                            equallyShallow =
+                                Array.keepIf (\candidate -> Array.length candidate.directory == depth) candidates
+                        in
+                        if Array.length equallyShallow /= 1 then
+                            Task.fail (PortError.create "ARCHIVE_INVALID" "Package archive has multiple possible roots.")
+
+                        else
+                            when Path.parentPath first is
+                                Just root ->
+                                    Task.succeed root
+
+                                Nothing ->
+                                    Task.fail (PortError.create "ARCHIVE_INVALID" "Package elm.json has no parent directory.")
+            )
+
+
+comparePathDepth : Path -> Path -> Order
+comparePathDepth left right =
+    when compare (Array.length left.directory) (Array.length right.directory) is
+        EQ ->
+            compare (Path.toPosixString left) (Path.toPosixString right)
+
+        order ->
+            order
+
+
+readPackageAt : FileSystem.Permission -> Path -> Task Error { manifest : Manifest, sourceFiles : Array Path }
+readPackageAt permission root =
+    let
+        manifestPath =
+            Path.join [ root, Path.fromPosixString "elm.json" ]
+
+        sourceRoot =
+            Path.join [ root, Path.fromPosixString "src" ]
+    in
+    Task.map2
+        (\manifest sourceFiles -> { manifest = manifest, sourceFiles = sourceFiles })
+        (System.File.readText permission manifestPath
+            |> Task.andThen
+                (Manifest.decodeString
+                    >> resultTask
+                        (Manifest.errorToString
+                            >> PortError.create "ELM_MANIFEST_INVALID"
+                        )
+                )
+        )
+        (System.File.listFilesRecursively permission sourceRoot
+            |> Task.andThen
+                (\allFiles ->
+                    let
+                        kernelFiles =
+                            Array.keepIf (\file -> String.toLower file.extension == "js") allFiles
+
+                        elmFiles =
+                            Array.keepIf (\file -> String.toLower file.extension == "elm") allFiles
+                    in
+                    if not (Array.isEmpty kernelFiles) then
+                        Task.fail <|
+                            PortError.create "UNSUPPORTED_KERNEL"
+                                ("Elm package contains native JavaScript under src: "
+                                    ++ (kernelFiles
+                                            |> Array.map Path.toPosixString
+                                            |> String.join ", "
+                                       )
+                                    ++ ". Add an explicit Gren mapping instead of transpiling kernel code."
+                                )
+
+                    else if Array.isEmpty elmFiles then
+                        Task.fail (PortError.create "SOURCE_INVALID" "Elm package has no .elm files under src/.")
+
+                    else
+                        Task.succeed
+                            (Array.sortWith
+                                (\left right -> compare (Path.toPosixString left) (Path.toPosixString right))
+                                elmFiles
+                            )
+                )
+        )
+
+
+validateIdentity : Name -> Version -> Manifest -> Task Error Manifest
+validateIdentity expectedName expectedVersion manifest =
+    if PackageName.toString manifest.name /= PackageName.toString expectedName
+        || Semver.compare manifest.version expectedVersion /= EQ
+    then
+        Task.fail <|
+            PortError.create "SOURCE_INVALID"
+                "Downloaded Elm package identity does not match the requested coordinate."
+
+    else
+        Task.succeed manifest
+
+
+packageCachePath : Options -> Name -> Version -> String -> Path
+packageCachePath options name version leaf =
+    Path.join
+        [ options.cacheDirectory
+        , Path.fromPosixString "registry/packages"
+        , Path.fromPosixString (PackageName.author name)
+        , Path.fromPosixString (PackageName.project name)
+        , Path.fromPosixString (Semver.versionToString version)
+        , Path.fromPosixString leaf
+        ]
+
+
+packageUrl : Options -> Name -> Version -> String -> String
+packageUrl options name version leaf =
+    options.registryBaseUrl
+        ++ "/packages/"
+        ++ PackageName.toString name
+        ++ "/"
+        ++ Semver.versionToString version
+        ++ "/"
+        ++ leaf
+
+
+resultTask : (problem -> Error) -> Result problem value -> Task Error value
+resultTask toError result =
+    when result is
+        Ok value ->
+            Task.succeed value
+
+        Err problem ->
+            Task.fail (toError problem)

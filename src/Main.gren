@@ -1,0 +1,131 @@
+module Main exposing (main)
+
+import ChildProcess
+import Cli
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import HttpClient
+import Init
+import Json.Encode as Encode
+import Node
+import Port.Error as PortError
+import Port.Orchestrator as Orchestrator
+import Stream.Log
+import Task exposing (Task)
+
+
+version : String
+version =
+    "0.1.0"
+
+
+main : Node.SimpleProgram Never
+main =
+    Node.defineSimpleProgram <|
+        \environment ->
+            Init.await FileSystem.initialize <|
+                \fileSystemPermission ->
+                    Init.await ChildProcess.initialize <|
+                        \childProcessPermission ->
+                            Init.await HttpClient.initialize <|
+                                \httpPermission ->
+                                    Init.awaitTask (FileSystem.currentWorkingDirectory fileSystemPermission) <|
+                                        \workingDirectory ->
+                                            Init.awaitTask (FileSystem.homeDirectory fileSystemPermission) <|
+                                                \homeDirectory ->
+                                                    let
+                                                        pathToString =
+                                                            when environment.platform is
+                                                                Node.Win32 ->
+                                                                    Path.toWin32String
+
+                                                                _ ->
+                                                                    Path.toPosixString
+
+                                                        defaults =
+                                                            { outputDirectory =
+                                                                Path.append (Path.fromPosixString "gren-output") workingDirectory
+                                                                    |> pathToString
+                                                            , cacheDirectory =
+                                                                Path.join
+                                                                    [ homeDirectory
+                                                                    , Path.fromPosixString ".cache"
+                                                                    , Path.fromPosixString "elm-to-gren"
+                                                                    ]
+                                                                    |> pathToString
+                                                            }
+
+                                                        arguments =
+                                                            Array.dropFirst 2 environment.args
+
+                                                        permissions =
+                                                            { fileSystem = fileSystemPermission
+                                                            , childProcess = childProcessPermission
+                                                            , http = httpPermission
+                                                            }
+
+                                                        context =
+                                                            { platform = environment.platform
+                                                            , workingDirectory = workingDirectory
+                                                            , homeDirectory = homeDirectory
+                                                            , applicationPath = environment.applicationPath
+                                                            , toolVersion = version
+                                                            }
+                                                    in
+                                                    Cli.parse defaults arguments
+                                                        |> runCommand environment context permissions
+                                                        |> Node.endSimpleProgram
+
+
+runCommand
+    : Node.Environment
+    -> Orchestrator.Context
+    ->
+        { fileSystem : FileSystem.Permission
+        , childProcess : ChildProcess.Permission
+        , http : HttpClient.Permission
+        }
+    -> Result String Cli.Command
+    -> Task Never {}
+runCommand environment context permissions parsed =
+    when parsed is
+        Err parseError ->
+            fail environment (parseError ++ "\n\n" ++ Cli.help)
+
+        Ok Cli.Help ->
+            Stream.Log.string environment.stdout Cli.help
+
+        Ok Cli.Version ->
+            Stream.Log.line environment.stdout version
+
+        Ok (Cli.Port options) ->
+            Orchestrator.run context permissions options
+                |> Task.andThen
+                    (\outcome ->
+                        if options.json then
+                            Stream.Log.line environment.stdout outcome.report
+
+                        else
+                            Stream.Log.line environment.stdout
+                                ("Ported "
+                                    ++ String.fromInt outcome.packageCount
+                                    ++ " package(s) to "
+                                    ++ Path.toPosixString outcome.output
+                                    ++ ". Root: "
+                                    ++ outcome.rootPackage
+                                )
+                    )
+                |> Task.onError
+                    (\error ->
+                        if options.json then
+                            fail environment (Encode.encode 0 (PortError.toJson error))
+
+                        else
+                            fail environment (PortError.toString error)
+                    )
+
+
+fail : Node.Environment -> String -> Task Never {}
+fail environment errorMessage =
+    Stream.Log.line environment.stderr errorMessage
+        |> Task.andThen (\_ -> Node.setExitCode 1)

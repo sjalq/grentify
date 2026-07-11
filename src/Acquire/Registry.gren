@@ -1,0 +1,279 @@
+module Acquire.Registry exposing
+    ( Permissions
+    , Options
+    , allPackagesUrl
+    , loadIndex
+    , loadManifest
+    , resolveVersion
+    , validateManifest
+    )
+
+{-| Cached access to the public Elm package registry.
+
+Online `latest` lookups refresh `/all-packages` and atomically replace the
+cache only after decoding it. Immutable per-version manifests are reused from
+cache. Offline mode performs no HTTP requests and reports the precise missing
+artifact.
+-}
+
+import Acquire.Cache as Cache
+import Acquire.Coordinate as Coordinate exposing (Coordinate, Selector(..))
+import Elm.Manifest as Manifest exposing (Manifest)
+import Elm.PackageName as PackageName exposing (Name)
+import Elm.Registry as ElmRegistry exposing (Registry)
+import Elm.Semver as Semver exposing (Version)
+import FileSystem
+import FileSystem.Path exposing (Path)
+import HttpClient
+import Port.Error as PortError exposing (Error)
+import System.File
+import Task exposing (Task)
+
+
+type alias Permissions =
+    { fileSystem : FileSystem.Permission
+    , http : HttpClient.Permission
+    }
+
+
+type alias Options =
+    { cacheDirectory : Path
+    , offline : Bool
+    }
+
+
+allPackagesUrl : String
+allPackagesUrl =
+    "https://package.elm-lang.org/all-packages"
+
+
+loadIndex : Permissions -> Options -> Task Error Registry
+loadIndex permissions options =
+    let
+        cachePath =
+            Cache.allPackagesPath options.cacheDirectory
+
+        decode loaded =
+            when ElmRegistry.decodeString loaded.body is
+                Ok registry ->
+                    if loaded.fetched then
+                        -- Cache write is best-effort: a valid online registry
+                        -- response must still be usable when the cache cannot be written.
+                        System.File.writeText permissions.fileSystem cachePath loaded.body
+                            |> Task.map (\_ -> registry)
+                            |> Task.onError (\_ -> Task.succeed registry)
+
+                    else
+                        Task.succeed registry
+
+                Err registryError ->
+                    Task.fail <|
+                        PortError.create "INVALID_REGISTRY_CACHE"
+                            ((if loaded.fetched then
+                                "The Elm registry returned invalid /all-packages data: "
+
+                              else
+                                "The cached Elm /all-packages data is invalid: "
+                             )
+                                ++ ElmRegistry.errorToString registryError
+                            )
+    in
+    if options.offline then
+        readRequiredCache permissions.fileSystem
+            { code = "OFFLINE_REGISTRY_CACHE_MISS"
+            , description = "Elm /all-packages registry index"
+            , path = cachePath
+            }
+            |> Task.map (\body -> { body = body, fetched = False })
+            |> Task.andThen decode
+
+    else
+        fetchText permissions.http "REGISTRY_FETCH_FAILED" allPackagesUrl
+            |> Task.map (\body -> { body = body, fetched = True })
+            |> Task.onError
+                (\fetchError ->
+                    readRequiredCache permissions.fileSystem
+                        { code = "REGISTRY_CACHE_MISS"
+                        , description = "fallback Elm /all-packages registry index"
+                        , path = cachePath
+                        }
+                        |> Task.map (\body -> { body = body, fetched = False })
+                        |> Task.onError
+                            (\_ ->
+                                Task.fail <|
+                                    PortError.withHint
+                                        "No usable cached registry index was available. Retry online once package.elm-lang.org is reachable."
+                                        fetchError
+                            )
+                )
+            |> Task.andThen decode
+
+
+resolveVersion : Permissions -> Options -> Coordinate -> Task Error Version
+resolveVersion permissions options coordinate =
+    when Coordinate.selector coordinate is
+        Exact version ->
+            Task.succeed version
+
+        Latest ->
+            loadIndex permissions options
+                |> Task.andThen
+                    (\registry ->
+                        when ElmRegistry.latestFor (Coordinate.packageName coordinate) registry is
+                            Just version ->
+                                Task.succeed version
+
+                            Nothing ->
+                                Task.fail <|
+                                    PortError.create "ELM_PACKAGE_NOT_FOUND"
+                                        ("The Elm registry does not contain "
+                                            ++ PackageName.toString (Coordinate.packageName coordinate)
+                                            ++ "."
+                                        )
+                    )
+
+
+loadManifest : Permissions -> Options -> Name -> Version -> Task Error Manifest
+loadManifest permissions options packageName version =
+    let
+        cachePath =
+            Cache.manifestPath options.cacheDirectory packageName version
+
+        fromCache =
+            readRequiredCache permissions.fileSystem
+                { code =
+                    if options.offline then
+                        "OFFLINE_MANIFEST_CACHE_MISS"
+
+                    else
+                        "MANIFEST_CACHE_MISS"
+                , description =
+                    "Elm manifest for "
+                        ++ PackageName.toString packageName
+                        ++ "@"
+                        ++ Semver.versionToString version
+                , path = cachePath
+                }
+                |> Task.andThen (validateManifest packageName version >> taskFromResult)
+
+        fromNetwork =
+            fetchText permissions.http "MANIFEST_FETCH_FAILED" (Cache.manifestUrl packageName version)
+                |> Task.andThen
+                    (\source ->
+                        validateManifest packageName version source
+                            |> taskFromResult
+                            |> Task.andThen
+                                (\manifest ->
+                                    System.File.writeText permissions.fileSystem cachePath source
+                                        |> Task.map (\_ -> manifest)
+                                        |> Task.onError (\_ -> Task.succeed manifest)
+                                )
+                    )
+    in
+    System.File.exists permissions.fileSystem cachePath
+        |> Task.andThen
+            (\cacheExists ->
+                if cacheExists then
+                    fromCache
+                        |> Task.onError
+                            (\cacheError ->
+                                if options.offline then
+                                    Task.fail cacheError
+
+                                else
+                                    fromNetwork
+                            )
+
+                else if options.offline then
+                    fromCache
+
+                else
+                    fromNetwork
+            )
+
+
+validateManifest : Name -> Version -> String -> Result Error Manifest
+validateManifest expectedName expectedVersion source =
+    Manifest.decodeString source
+        |> Result.mapError
+            (Manifest.errorToString
+                >> PortError.create "INVALID_ELM_MANIFEST"
+            )
+        |> Result.andThen
+            (\manifest ->
+                if PackageName.toString manifest.name /= PackageName.toString expectedName then
+                    Err <|
+                        PortError.create "MANIFEST_COORDINATE_MISMATCH"
+                            ("Expected manifest for "
+                                ++ PackageName.toString expectedName
+                                ++ ", but received "
+                                ++ PackageName.toString manifest.name
+                                ++ "."
+                            )
+
+                else if manifest.version /= expectedVersion then
+                    Err <|
+                        PortError.create "MANIFEST_COORDINATE_MISMATCH"
+                            ("Expected manifest version "
+                                ++ Semver.versionToString expectedVersion
+                                ++ ", but received "
+                                ++ Semver.versionToString manifest.version
+                                ++ "."
+                            )
+
+                else
+                    Ok manifest
+            )
+
+
+fetchText : HttpClient.Permission -> String -> String -> Task Error String
+fetchText permission errorCode url =
+    HttpClient.get url
+        |> HttpClient.withHeader "accept" "application/json"
+        |> HttpClient.withHeader "user-agent" "elm-to-gren/0.1 (Gren acquisition provider)"
+        |> HttpClient.withTimeout 30000
+        |> HttpClient.expectString
+        |> HttpClient.send permission
+        |> Task.map .data
+        |> Task.mapError
+            (\httpError ->
+                PortError.create errorCode
+                    ("Could not fetch " ++ url ++ ": " ++ HttpClient.errorToString httpError)
+            )
+
+
+readRequiredCache
+    : FileSystem.Permission
+    -> { code : String, description : String, path : Path }
+    -> Task Error String
+readRequiredCache permission details =
+    System.File.exists permission details.path
+        |> Task.andThen
+            (\cacheExists ->
+                if cacheExists then
+                    System.File.readText permission details.path
+                        |> Task.mapError
+                            (\fileError ->
+                                PortError.create details.code
+                                    ("Could not read cached "
+                                        ++ details.description
+                                        ++ ": "
+                                        ++ PortError.toString fileError
+                                    )
+                            )
+
+                else
+                    Task.fail <|
+                        PortError.create details.code
+                            ("Missing cached " ++ details.description ++ ".")
+            )
+
+
+taskFromResult : Result Error value -> Task Error value
+taskFromResult result =
+    when result is
+        Ok value ->
+            Task.succeed value
+
+        Err error ->
+            Task.fail error

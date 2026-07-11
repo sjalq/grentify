@@ -1,0 +1,355 @@
+module Elm.Manifest exposing
+    ( Manifest
+    , Dependency
+    , Error(..)
+    , decoder
+    , decodeString
+    , dependencyArray
+    , dependencyNames
+    , errorToString
+    )
+
+{-| Decoder for Elm _package_ manifests.
+
+Applications intentionally are not accepted: they have exact dependency
+versions and source-directory semantics which cannot be emitted as a Gren
+package. Dependencies are keyed by their canonical package-name string and
+exposed modules are flattened into one deterministic array, so callers do not
+need to handle both Elm's flat and sectioned encodings.
+-}
+
+import Array exposing (Array)
+import Char
+import Dict exposing (Dict)
+import Elm.PackageName as PackageName exposing (Name)
+import Elm.Semver as Semver exposing (Range, Version)
+import Json.Decode as Decode exposing (Decoder)
+import Result exposing (Result)
+import String
+
+
+type alias Manifest =
+    { name : Name
+    , summary : String
+    , license : String
+    , version : Version
+    , exposedModules : Array String
+    , elmVersion : Range
+    , dependencies : Dict String Dependency
+    , testDependencies : Dict String Dependency
+    }
+
+
+type alias Dependency =
+    { name : Name
+    , constraint : Range
+    }
+
+
+type Error
+    = ApplicationManifest
+    | DecodeFailure String
+
+
+decoder : Decoder Manifest
+decoder =
+    Decode.field "type" Decode.string
+        |> Decode.andThen
+            (\manifestType ->
+                if manifestType == "package" then
+                    packageDecoder
+
+                else if manifestType == "application" then
+                    Decode.fail "Elm applications are not supported; expected an Elm package manifest."
+
+                else
+                    Decode.fail ("Unsupported Elm manifest type '" ++ manifestType ++ "'; expected 'package'.")
+            )
+
+
+decodeString : String -> Result Error Manifest
+decodeString source =
+    when Decode.decodeString (Decode.field "type" Decode.string) source is
+        Ok "application" ->
+            Err ApplicationManifest
+
+        Ok _ ->
+            Decode.decodeString decoder source
+                |> Result.mapError (Decode.errorToString >> DecodeFailure)
+
+        Err decodeError ->
+            Err (DecodeFailure (Decode.errorToString decodeError))
+
+
+packageDecoder : Decoder Manifest
+packageDecoder =
+    Decode.map8
+        (\name summary license version exposedModules elmVersion dependencies testDependencies ->
+            { name = name
+            , summary = summary
+            , license = license
+            , version = version
+            , exposedModules = exposedModules
+            , elmVersion = elmVersion
+            , dependencies = dependencies
+            , testDependencies = testDependencies
+            }
+        )
+        (Decode.field "name" packageNameDecoder)
+        (Decode.field "summary" (nonEmptyString "summary"))
+        (Decode.field "license" (nonEmptyString "license"))
+        (Decode.field "version" (versionDecoder "version"))
+        (Decode.field "exposed-modules" exposedModulesDecoder)
+        (Decode.field "elm-version" (rangeDecoder "elm-version"))
+        (Decode.field "dependencies" (dependenciesDecoder "dependencies"))
+        (Decode.field "test-dependencies" (dependenciesDecoder "test-dependencies"))
+
+
+packageNameDecoder : Decoder Name
+packageNameDecoder =
+    Decode.string
+        |> Decode.andThen
+            (\source ->
+                when PackageName.parse source is
+                    Ok packageName ->
+                        Decode.succeed packageName
+
+                    Err packageError ->
+                        Decode.fail (PackageName.errorToString packageError)
+            )
+
+
+nonEmptyString : String -> Decoder String
+nonEmptyString fieldName =
+    Decode.string
+        |> Decode.andThen
+            (\value ->
+                if String.isEmpty value then
+                    Decode.fail ("Elm manifest field '" ++ fieldName ++ "' must be a non-empty string.")
+
+                else
+                    Decode.succeed value
+            )
+
+
+versionDecoder : String -> Decoder Version
+versionDecoder fieldName =
+    Decode.string
+        |> Decode.andThen
+            (\source ->
+                when Semver.parseVersion source is
+                    Ok semanticVersion ->
+                        Decode.succeed semanticVersion
+
+                    Err versionError ->
+                        Decode.fail
+                            ("Elm manifest field '"
+                                ++ fieldName
+                                ++ "' is invalid. "
+                                ++ Semver.errorToString versionError
+                            )
+            )
+
+
+rangeDecoder : String -> Decoder Range
+rangeDecoder fieldName =
+    Decode.string
+        |> Decode.andThen
+            (\source ->
+                when Semver.parseRange source is
+                    Ok range ->
+                        Decode.succeed range
+
+                    Err rangeError ->
+                        Decode.fail
+                            ("Elm manifest field '"
+                                ++ fieldName
+                                ++ "' is invalid. "
+                                ++ Semver.errorToString rangeError
+                            )
+            )
+
+
+dependenciesDecoder : String -> Decoder (Dict String Dependency)
+dependenciesDecoder fieldName =
+    Decode.keyValuePairs Decode.string
+        |> Decode.andThen (decodeDependencies fieldName)
+
+
+decodeDependencies : String -> Array { key : String, value : String } -> Decoder (Dict String Dependency)
+decodeDependencies fieldName pairs =
+    pairs
+        |> Array.sortBy .key
+        |> Array.foldl
+            (\pair accumulated ->
+                accumulated
+                    |> Result.andThen
+                        (\dependencies ->
+                            if Dict.member pair.key dependencies then
+                                Err
+                                    ("Elm package field '"
+                                        ++ fieldName
+                                        ++ "' repeats dependency '"
+                                        ++ pair.key
+                                        ++ "'."
+                                    )
+
+                            else
+                                when PackageName.parse pair.key is
+                                    Err packageError ->
+                                        Err
+                                            ("Elm package field '"
+                                                ++ fieldName
+                                                ++ "' contains an invalid package name. "
+                                                ++ PackageName.errorToString packageError
+                                            )
+
+                                    Ok packageName ->
+                                        when Semver.parseRange pair.value is
+                                            Err rangeError ->
+                                                Err
+                                                    ("Elm package dependency '"
+                                                        ++ pair.key
+                                                        ++ "' has an invalid constraint. "
+                                                        ++ Semver.errorToString rangeError
+                                                    )
+
+                                            Ok constraint ->
+                                                Ok
+                                                    (Dict.set pair.key
+                                                        { name = packageName
+                                                        , constraint = constraint
+                                                        }
+                                                        dependencies
+                                                    )
+                        )
+            )
+            (Ok Dict.empty)
+        |> resultToDecoder
+
+
+exposedModulesDecoder : Decoder (Array String)
+exposedModulesDecoder =
+    Decode.oneOf
+        [ Decode.array Decode.string
+            |> Decode.andThen (validateModuleArray "exposed-modules")
+        , Decode.keyValuePairs (Decode.array Decode.string)
+            |> Decode.andThen normalizeSections
+        ]
+
+
+normalizeSections : Array { key : String, value : Array String } -> Decoder (Array String)
+normalizeSections sections =
+    sections
+        |> Array.sortBy .key
+        |> Array.foldl
+            (\section accumulated ->
+                accumulated
+                    |> Result.andThen
+                        (\state ->
+                            if String.isEmpty section.key then
+                                Err "Elm exposed-module section names cannot be empty."
+
+                            else
+                                when validateModules ("exposed-modules." ++ section.key) state.seen section.value is
+                                    Err message ->
+                                        Err message
+
+                                    Ok next ->
+                                        Ok
+                                            { modules = Array.append state.modules section.value
+                                            , seen = next
+                                            }
+                        )
+            )
+            (Ok { modules = [], seen = Dict.empty })
+        |> Result.map (.modules >> Array.sort)
+        |> resultToDecoder
+
+
+validateModuleArray : String -> Array String -> Decoder (Array String)
+validateModuleArray fieldName modules =
+    validateModules fieldName Dict.empty modules
+        |> Result.map (\_ -> Array.sort modules)
+        |> resultToDecoder
+
+
+validateModules : String -> Dict String Bool -> Array String -> Result String (Dict String Bool)
+validateModules fieldName initialSeen modules =
+    Array.indexedFoldl
+        (\index moduleName accumulated ->
+            accumulated
+                |> Result.andThen
+                    (\seen ->
+                        if not (isModuleName moduleName) then
+                            Err
+                                ("Elm manifest field '"
+                                    ++ fieldName
+                                    ++ "' contains invalid module name '"
+                                    ++ moduleName
+                                    ++ "' at index "
+                                    ++ String.fromInt index
+                                    ++ "."
+                                )
+
+                        else if Dict.member moduleName seen then
+                            Err ("Exposed module '" ++ moduleName ++ "' is listed more than once.")
+
+                        else
+                            Ok (Dict.set moduleName True seen)
+                    )
+        )
+        (Ok initialSeen)
+        modules
+
+
+isModuleName : String -> Bool
+isModuleName moduleName =
+    let
+        segments =
+            String.split "." moduleName
+    in
+    not (Array.isEmpty segments) && Array.all isModuleSegment segments
+
+
+isModuleSegment : String -> Bool
+isModuleSegment segment =
+    when Array.first (String.toArray segment) is
+        Nothing ->
+            False
+
+        Just first ->
+            Char.isUpper first
+                && Array.all
+                    (\character -> Char.isAlphaNum character || character == '_')
+                    (Array.dropFirst 1 (String.toArray segment))
+
+
+resultToDecoder : Result String a -> Decoder a
+resultToDecoder result =
+    when result is
+        Ok value ->
+            Decode.succeed value
+
+        Err message ->
+            Decode.fail message
+
+
+dependencyArray : Manifest -> Array Dependency
+dependencyArray manifest =
+    Dict.values manifest.dependencies
+
+
+dependencyNames : Manifest -> Array Name
+dependencyNames manifest =
+    dependencyArray manifest |> Array.map .name
+
+
+errorToString : Error -> String
+errorToString error =
+    when error is
+        ApplicationManifest ->
+            "The supplied elm.json describes an application. Only Elm packages can be ported to Gren package format."
+
+        DecodeFailure message ->
+            "Invalid Elm package manifest: " ++ message

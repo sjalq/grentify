@@ -1,0 +1,477 @@
+module E2EMain exposing (main)
+
+{-| Gren-native end-to-end coverage for the complete package porting pipeline.
+
+This intentionally exercises the real `elm-review` extractor, registry/source
+acquisition, recursive dependency planning, package emission, bundle creation,
+and `gren docs` verification. It is separate from the fast unit-test runner so
+that network or toolchain failures are reported as explicit integration-test
+failures rather than skipped.
+-}
+
+import ChildProcess
+import Cli
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import HttpClient
+import Init
+import Node
+import Port.Error as PortError
+import Port.Orchestrator as Orchestrator
+import Stream.Log
+import System.File
+import Task exposing (Task)
+
+
+type Scenario
+    = Simple
+    | Transitive
+    | Analogue
+    | Creative
+
+
+type alias ScenarioSpec =
+    { scenario : Scenario
+    , name : String
+    , expectedRoot : String
+    , expectedPackageCount : Int
+    }
+
+
+type alias Runtime =
+    { context : Orchestrator.Context
+    , permissions : Orchestrator.Permissions
+    , fileSystem : FileSystem.Permission
+    , e2eRoot : Path
+    }
+
+
+scenarios : Array ScenarioSpec
+scenarios =
+    [ { scenario = Simple
+      , name = "simple"
+      , expectedRoot = "example/simple"
+      , expectedPackageCount = 1
+      }
+    , { scenario = Transitive
+      , name = "transitive"
+      , expectedRoot = "example/transitive"
+      , expectedPackageCount = 2
+      }
+    , { scenario = Analogue
+      , name = "analogue"
+      , expectedRoot = "example/analogue"
+      , expectedPackageCount = 1
+      }
+    , { scenario = Creative
+      , name = "creative"
+      , expectedRoot = "example/creative"
+      , expectedPackageCount = 1
+      }
+    ]
+
+
+main : Node.SimpleProgram Never
+main =
+    Node.defineSimpleProgram <|
+        \environment ->
+            Init.await FileSystem.initialize <|
+                \fileSystemPermission ->
+                    Init.await ChildProcess.initialize <|
+                        \childProcessPermission ->
+                            Init.await HttpClient.initialize <|
+                                \httpPermission ->
+                                    Init.awaitTask (FileSystem.currentWorkingDirectory fileSystemPermission) <|
+                                        \workingDirectory ->
+                                            Init.awaitTask (FileSystem.homeDirectory fileSystemPermission) <|
+                                                \homeDirectory ->
+                                                    let
+                                                        e2eRoot =
+                                                            inDirectory ".test-cache/e2e" workingDirectory
+
+                                                        runtime =
+                                                            { context =
+                                                                { platform = environment.platform
+                                                                , workingDirectory = workingDirectory
+                                                                , homeDirectory = homeDirectory
+                                                                , applicationPath = environment.applicationPath
+                                                                , toolVersion = "e2e-test"
+                                                                }
+                                                            , permissions =
+                                                                { fileSystem = fileSystemPermission
+                                                                , childProcess = childProcessPermission
+                                                                , http = httpPermission
+                                                                }
+                                                            , fileSystem = fileSystemPermission
+                                                            , e2eRoot = e2eRoot
+                                                            }
+                                                    in
+                                                    runWithCleanup runtime
+                                                        |> Task.andThen
+                                                            (\count ->
+                                                                Stream.Log.line environment.stdout
+                                                                    ("PASS: "
+                                                                        ++ String.fromInt count
+                                                                        ++ " verified end-to-end scenarios"
+                                                                    )
+                                                            )
+                                                        |> Task.onError
+                                                            (\message ->
+                                                                Stream.Log.line environment.stderr ("FAIL: " ++ message)
+                                                                    |> Task.andThen (\_ -> Node.setExitCode 1)
+                                                            )
+                                                        |> Node.endSimpleProgram
+
+
+runWithCleanup : Runtime -> Task String Int
+runWithCleanup runtime =
+    removeIfExists runtime.fileSystem runtime.e2eRoot
+        |> Task.andThen (\_ -> runScenarios runtime)
+        |> settle
+        |> Task.andThen
+            (\outcome ->
+                removeIfExists runtime.fileSystem runtime.e2eRoot
+                    |> settle
+                    |> Task.andThen (finishAfterCleanup outcome)
+            )
+
+
+settle : Task error value -> Task never (Result error value)
+settle task =
+    task
+        |> Task.map Ok
+        |> Task.onError (Err >> Task.succeed)
+
+
+finishAfterCleanup : Result String Int -> Result String {} -> Task String Int
+finishAfterCleanup outcome cleanupOutcome =
+    when { outcome = outcome, cleanup = cleanupOutcome } is
+        { outcome = Ok count, cleanup = Ok _ } ->
+            Task.succeed count
+
+        { outcome = Err failure, cleanup = Ok _ } ->
+            Task.fail failure
+
+        { outcome = Ok _, cleanup = Err cleanupFailure } ->
+            Task.fail ("E2E cleanup failed: " ++ cleanupFailure)
+
+        { outcome = Err failure, cleanup = Err cleanupFailure } ->
+            Task.fail (failure ++ "\nE2E cleanup also failed: " ++ cleanupFailure)
+
+
+runScenarios : Runtime -> Task String Int
+runScenarios runtime =
+    scenarios
+        |> Array.foldl
+            (\scenario pending ->
+                pending
+                    |> Task.andThen
+                        (\count ->
+                            runScenario runtime scenario
+                                |> Task.map (\_ -> count + 1)
+                        )
+            )
+            (Task.succeed 0)
+
+
+runScenario : Runtime -> ScenarioSpec -> Task String {}
+runScenario runtime spec =
+    let
+        output =
+            inDirectory ("output-" ++ spec.name) runtime.e2eRoot
+
+        cache =
+            inDirectory "cache" runtime.e2eRoot
+
+        fixture =
+            inDirectory ("test/fixtures/" ++ spec.name) runtime.context.workingDirectory
+
+        options : Cli.Options
+        options =
+            { input = Path.toPosixString fixture
+            , outputDirectory = Path.toPosixString output
+            , cacheDirectory = Path.toPosixString cache
+            , platform = Cli.Auto
+            , namespace = Nothing
+            , mappingFiles = []
+            , offline = False
+            , verify = True
+            , json = False
+            }
+    in
+    Orchestrator.run runtime.context runtime.permissions options
+        |> Task.mapError
+            (\error ->
+                scenarioFailure spec
+                    ("orchestration failed (network/toolchain failures are not skipped): "
+                        ++ PortError.toString error
+                    )
+            )
+        |> Task.andThen (assertOutcome runtime spec output)
+
+
+assertOutcome : Runtime -> ScenarioSpec -> Path -> Orchestrator.Outcome -> Task String {}
+assertOutcome runtime spec expectedOutput outcome =
+    expect spec
+        "package count"
+        (outcome.packageCount == spec.expectedPackageCount)
+        ("expected "
+            ++ String.fromInt spec.expectedPackageCount
+            ++ ", got "
+            ++ String.fromInt outcome.packageCount
+        )
+        |> Task.andThen
+            (\_ ->
+                expect spec
+                    "root package"
+                    (outcome.rootPackage == spec.expectedRoot)
+                    ("expected " ++ spec.expectedRoot ++ ", got " ++ outcome.rootPackage)
+            )
+        |> Task.andThen
+            (\_ ->
+                expect spec
+                    "output directory"
+                    (Path.toPosixString outcome.output == Path.toPosixString expectedOutput)
+                    ("expected "
+                        ++ Path.toPosixString expectedOutput
+                        ++ ", got "
+                        ++ Path.toPosixString outcome.output
+                    )
+            )
+        |> Task.andThen (\_ -> assertCommonFiles runtime.fileSystem spec expectedOutput)
+        |> Task.andThen (\_ -> assertScenarioFiles runtime.fileSystem spec expectedOutput)
+
+
+assertCommonFiles : FileSystem.Permission -> ScenarioSpec -> Path -> Task String {}
+assertCommonFiles permission spec output =
+    let
+        required =
+            [ "gren.json"
+            , "elm-to-gren.lock.json"
+            , "elm-to-gren.report.json"
+            , ".elm-to-gren-workspace.json"
+            ]
+    in
+    required
+        |> Array.foldl
+            (\relative pending ->
+                pending
+                    |> Task.andThen
+                        (\_ ->
+                            System.File.exists permission (inDirectory relative output)
+                                |> Task.andThen
+                                    (\exists ->
+                                        expect spec
+                                            (relative ++ " emission")
+                                            exists
+                                            (relative ++ " was not emitted")
+                                    )
+                        )
+            )
+            (Task.succeed {})
+        |> Task.andThen
+            (\_ -> readText permission (inDirectory "elm-to-gren.report.json" output))
+        |> Task.andThen
+            (\report ->
+                expect spec
+                    "verification report"
+                    (String.contains "\"verified\": true" report)
+                    "report did not record successful gren docs verification"
+            )
+
+
+assertScenarioFiles : FileSystem.Permission -> ScenarioSpec -> Path -> Task String {}
+assertScenarioFiles permission spec output =
+    when spec.scenario is
+        Simple ->
+            Task.map2
+                (\manifest source -> { manifest = manifest, source = source })
+                (readText permission (inDirectory "gren.json" output))
+                (readText permission (inDirectory "src/Simple.gren" output))
+                |> Task.andThen
+                    (\files ->
+                        expectAll spec
+                            [ { name = "core analogue dependency"
+                              , passed = String.contains "\"gren-lang/core\"" files.manifest
+                              , details = "gren.json does not depend on gren-lang/core"
+                              }
+                            , { name = "case syntax conversion"
+                              , passed = String.contains "when maybeValue is" files.source
+                              , details = "Simple.gren does not contain Gren when/is syntax"
+                              }
+                            ]
+                    )
+                |> Task.andThen (\_ -> expectExists permission spec output "src/ElmToGren/Compat/List.gren")
+                |> Task.andThen (\_ -> expectExists permission spec output "src/ElmToGren/Compat/Tuple.gren")
+
+        Transitive ->
+            Task.map3
+                (\manifest dependencyFiles bundleFiles ->
+                    { manifest = manifest
+                    , dependencyFiles = dependencyFiles
+                    , bundleFiles = bundleFiles
+                    }
+                )
+                (readText permission (inDirectory "gren.json" output))
+                (listFiles permission (inDirectory ".elm-to-gren/packages" output))
+                (listFiles permission (inDirectory "gren_packages" output))
+                |> Task.andThen
+                    (\files ->
+                        let
+                            dependencyPaths =
+                                Array.map Path.toPosixString files.dependencyFiles
+
+                            bundlePaths =
+                                Array.map Path.toPosixString files.bundleFiles
+                        in
+                        expectAll spec
+                            [ { name = "local dependency manifest"
+                              , passed =
+                                    String.contains "\"elm-community/maybe-extra\"" files.manifest
+                                        && String.contains "local:.elm-to-gren/packages/elm-community_maybe-extra__" files.manifest
+                              , details = "root gren.json does not reference the generated maybe-extra package"
+                              }
+                            , { name = "generated dependency package"
+                              , passed =
+                                    Array.any
+                                        (\path ->
+                                            String.contains "/elm-community_maybe-extra__" path
+                                                && String.endsWith "/src/Maybe/Extra.gren" path
+                                        )
+                                        dependencyPaths
+                              , details = "generated Maybe.Extra source was not emitted under .elm-to-gren/packages"
+                              }
+                            , { name = "generated dependency bundle"
+                              , passed =
+                                    Array.any
+                                        (\path ->
+                                            String.contains "/elm-community_maybe-extra__" path
+                                                && String.endsWith ".pkg.gz" path
+                                        )
+                                        bundlePaths
+                              , details = "generated maybe-extra .pkg.gz bundle was not emitted"
+                              }
+                            ]
+                    )
+
+        Analogue ->
+            Task.map2
+                (\manifest source -> { manifest = manifest, source = source })
+                (readText permission (inDirectory "gren.json" output))
+                (readText permission (inDirectory "src/Palette.gren" output))
+                |> Task.andThen
+                    (\files ->
+                        expectAll spec
+                            [ { name = "Gren analogue dependency"
+                              , passed = String.contains "\"aramiscd/gren-color\"" files.manifest
+                              , details = "gren.json does not map avh4/elm-color to aramiscd/gren-color"
+                              }
+                            , { name = "analogue module preservation"
+                              , passed = String.contains "import Color" files.source
+                              , details = "Palette.gren does not import the analogue Color module"
+                              }
+                            ]
+                    )
+
+        Creative ->
+            Task.map2
+                (\manifest source -> { manifest = manifest, source = source })
+                (readText permission (inDirectory "gren.json" output))
+                (readText permission (inDirectory "src/Generators.gren" output))
+                |> Task.andThen
+                    (\files ->
+                        expectAll spec
+                            [ { name = "absorbed Random dependency"
+                              , passed =
+                                    String.contains "\"gren-lang/core\"" files.manifest
+                                        && not (String.contains "\"elm/random\"" files.manifest)
+                              , details = "elm/random was not absorbed into gren-lang/core"
+                              }
+                            , { name = "collection API mapping"
+                              , passed = String.contains "Random.array" files.source
+                              , details = "Random.list was not mapped to Random.array"
+                              }
+                            , { name = "semantic adapter mapping"
+                              , passed = String.contains "ElmToGren.Compat.Random.weighted" files.source
+                              , details = "Random.weighted was not routed through its compatibility adapter"
+                              }
+                            ]
+                    )
+                |> Task.andThen (\_ -> expectExists permission spec output "src/ElmToGren/Compat/Random.gren")
+
+
+type alias Assertion =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+expectAll : ScenarioSpec -> Array Assertion -> Task String {}
+expectAll spec assertions =
+    assertions
+        |> Array.foldl
+            (\assertion pending ->
+                pending
+                    |> Task.andThen
+                        (\_ -> expect spec assertion.name assertion.passed assertion.details)
+            )
+            (Task.succeed {})
+
+
+expectExists : FileSystem.Permission -> ScenarioSpec -> Path -> String -> Task String {}
+expectExists permission spec output relative =
+    System.File.exists permission (inDirectory relative output)
+        |> Task.andThen
+            (\exists ->
+                expect spec
+                    (relative ++ " emission")
+                    exists
+                    (relative ++ " was not emitted")
+            )
+
+
+expect : ScenarioSpec -> String -> Bool -> String -> Task String {}
+expect spec assertion passed details =
+    if passed then
+        Task.succeed {}
+
+    else
+        Task.fail (scenarioFailure spec (assertion ++ ": " ++ details))
+
+
+scenarioFailure : ScenarioSpec -> String -> String
+scenarioFailure spec details =
+    spec.name ++ " scenario — " ++ details
+
+
+readText : FileSystem.Permission -> Path -> Task String String
+readText permission path =
+    System.File.readText permission path
+        |> Task.mapError PortError.toString
+
+
+listFiles : FileSystem.Permission -> Path -> Task String (Array Path)
+listFiles permission path =
+    System.File.listFilesRecursively permission path
+        |> Task.mapError PortError.toString
+
+
+removeIfExists : FileSystem.Permission -> Path -> Task String {}
+removeIfExists permission path =
+    System.File.exists permission path
+        |> Task.andThen
+            (\exists ->
+                if exists then
+                    FileSystem.remove permission { recursive = True } path
+                        |> Task.map (\_ -> {})
+                        |> Task.mapError FileSystem.errorToString
+
+                else
+                    Task.succeed {}
+            )
+
+
+inDirectory : String -> Path -> Path
+inDirectory relative directory =
+    Path.join [ directory, Path.fromPosixString relative ]

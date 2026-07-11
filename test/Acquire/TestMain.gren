@@ -1,0 +1,33 @@
+module Acquire.TestMain exposing (main)
+
+import Acquire.CoordinateTest
+import Acquire.HazardTest
+import Acquire.RegistryTest
+import Array
+import Debug
+import Node
+import Stream.Log
+import Task
+
+
+main : Node.SimpleProgram Never
+main =
+    Node.defineSimpleProgram <|
+        \environment ->
+            let
+                failures =
+                    [ Acquire.CoordinateTest.tests
+                    , Acquire.HazardTest.tests
+                    , Acquire.RegistryTest.tests
+                    ]
+                        |> Array.flatten
+                        |> Array.keepIf (\test -> not test.passed)
+            in
+            if Array.isEmpty failures then
+                Stream.Log.line environment.stdout "Acquire pure tests passed."
+                    |> Node.endSimpleProgram
+
+            else
+                Stream.Log.line environment.stderr (Debug.toString failures)
+                    |> Task.andThen (\_ -> Node.setExitCode 1)
+                    |> Node.endSimpleProgram

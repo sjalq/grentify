@@ -1,0 +1,92 @@
+module Acquire.Cache exposing
+    ( allPackagesPath
+    , manifestPath
+    , sourcePath
+    , sourcePartialPath
+    , manifestUrl
+    , endpointUrl
+    , githubUrl
+    )
+
+{-| Deterministic addresses for immutable Elm registry artifacts.
+
+The registry index is cached separately because it is mutable. Per-version
+manifests and cloned source trees live below coordinate-specific directories.
+-}
+
+import Elm.PackageName as PackageName exposing (Name)
+import Elm.Semver as Semver exposing (Version)
+import FileSystem.Path as Path exposing (Path)
+
+
+allPackagesPath : Path -> Path
+allPackagesPath cacheDirectory =
+    Path.join
+        [ cacheDirectory
+        , Path.fromPosixString "elm-registry"
+        , Path.fromPosixString "all-packages.json"
+        ]
+
+
+manifestPath : Path -> Name -> Version -> Path
+manifestPath cacheDirectory packageName version =
+    Path.join
+        [ cacheDirectory
+        , Path.fromPosixString "elm-registry"
+        , Path.fromPosixString "manifests"
+        , Path.fromPosixString (PackageName.author packageName)
+        , Path.fromPosixString (PackageName.project packageName)
+        , Path.fromPosixString (Semver.versionToString version)
+        , Path.fromPosixString "elm.json"
+        ]
+
+
+sourcePath : Path -> Name -> Version -> Path
+sourcePath cacheDirectory packageName version =
+    Path.join
+        [ cacheDirectory
+        , Path.fromPosixString "elm-sources"
+        , Path.fromPosixString (PackageName.author packageName)
+        , Path.fromPosixString (PackageName.project packageName)
+        , Path.fromPosixString (Semver.versionToString version)
+        ]
+
+
+sourcePartialPath : Path -> Name -> Version -> Path
+sourcePartialPath cacheDirectory packageName version =
+    Path.join
+        [ cacheDirectory
+        , Path.fromPosixString "elm-sources"
+        , Path.fromPosixString (PackageName.author packageName)
+        , Path.fromPosixString (PackageName.project packageName)
+        , Path.fromPosixString (Semver.versionToString version ++ ".partial")
+        ]
+
+
+manifestUrl : Name -> Version -> String
+manifestUrl packageName version =
+    packageBaseUrl packageName version ++ "/elm.json"
+
+
+endpointUrl : Name -> Version -> String
+endpointUrl packageName version =
+    packageBaseUrl packageName version ++ "/endpoint.json"
+
+
+packageBaseUrl : Name -> Version -> String
+packageBaseUrl packageName version =
+    "https://package.elm-lang.org/packages/"
+        ++ PackageName.author packageName
+        ++ "/"
+        ++ PackageName.project packageName
+        ++ "/"
+        ++ Semver.versionToString version
+
+
+githubUrl : Name -> String
+githubUrl packageName =
+    "https://github.com/"
+        ++ PackageName.author packageName
+        ++ "/"
+        ++ PackageName.project packageName
+        ++ ".git"

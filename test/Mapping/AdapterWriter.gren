@@ -1,0 +1,101 @@
+module Mapping.AdapterWriter exposing (main)
+
+import Bytes
+import FileSystem
+import FileSystem.Path as Path
+import Init
+import Mapping.Adapter as Adapter
+import Node
+import Stream.Log
+import Task exposing (Task)
+
+
+root : String
+root =
+    "/tmp/elm-to-gren-adapter-check"
+
+
+main : Node.SimpleProgram Never
+main =
+    Node.defineSimpleProgram <|
+        \environment ->
+            Init.await FileSystem.initialize <|
+                \permission ->
+                    Init.awaitTask
+                        (writeFixture permission
+                            |> Task.map (\_ -> Ok {})
+                            |> Task.onError (\_ -> Task.succeed (Err {}))
+                        )
+                    <|
+                        \result ->
+                            (when result is
+                                Ok _ ->
+                                    Stream.Log.line environment.stdout root
+
+                                Err _ ->
+                                    Stream.Log.line environment.stderr "Could not write generated adapter fixtures."
+                                        |> Task.andThen (\_ -> Node.setExitCode 1)
+                            )
+                                |> Node.endSimpleProgram
+
+
+writeFixture : FileSystem.Permission -> Task FileSystem.Error {}
+writeFixture permission =
+    FileSystem.makeDirectory permission { recursive = True } (Path.fromPosixString (root ++ "/src"))
+        |> Task.andThen
+            (\_ ->
+                FileSystem.writeFile
+                    permission
+                    (Bytes.fromString fixtureGrenJson)
+                    (Path.fromPosixString (root ++ "/gren.json"))
+            )
+        |> Task.andThen
+            (\_ ->
+                Adapter.generate Adapter.all
+                    |> Array.foldl (writeModule permission) (Task.succeed {})
+            )
+
+
+writeModule permission generated pending =
+    pending
+        |> Task.andThen
+            (\_ ->
+                let
+                    filePath =
+                        Path.fromPosixString (root ++ "/src/" ++ generated.relativePath)
+                in
+                when Path.parentPath filePath is
+                    Nothing ->
+                        Task.succeed {}
+
+                    Just parent ->
+                        FileSystem.makeDirectory permission { recursive = True } parent
+                            |> Task.andThen
+                                (\_ ->
+                                    FileSystem.writeFile permission (Bytes.fromString generated.source) filePath
+                                        |> Task.map (\_ -> {})
+                                )
+            )
+
+
+fixtureGrenJson : String
+fixtureGrenJson =
+    """
+{
+    "type": "application",
+    "platform": "node",
+    "source-directories": ["src"],
+    "gren-version": "0.6.6",
+    "dependencies": {
+        "direct": {
+            "gren-lang/compiler-common": "3.0.0",
+            "gren-lang/compiler-node": "5.0.0",
+            "gren-lang/core": "7.4.2",
+            "gren-lang/node": "6.1.3"
+        },
+        "indirect": {
+            "gren-lang/url": "6.0.0"
+        }
+    }
+}
+"""

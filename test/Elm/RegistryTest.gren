@@ -1,0 +1,82 @@
+module Elm.RegistryTest exposing (tests)
+
+import Array exposing (Array)
+import Debug
+import Elm.PackageName as PackageName
+import Elm.Registry as Registry exposing (Error(..))
+import Elm.Semver as Semver
+import String
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ decodesAllPackages
+    , rejectsDuplicateVersions
+    , rejectsInvalidPackageKeys
+    ]
+
+
+decodesAllPackages : TestResult
+decodesAllPackages =
+    when { registry = Registry.decodeString "{\"elm/core\":[\"1.0.2\",\"1.0.0\",\"1.0.1\"]}", packageName = PackageName.parse "elm/core" } is
+        { registry = Ok registry, packageName = Ok packageName } ->
+            Registry.versionsFor packageName registry
+                |> Maybe.withDefault []
+                |> Array.map Semver.versionToString
+                |> expectEqual "all-packages versions are normalized newest-first" [ "1.0.2", "1.0.1", "1.0.0" ]
+
+        values ->
+            outcome "all-packages versions are normalized newest-first" False (Debug.toString values)
+
+
+rejectsDuplicateVersions : TestResult
+rejectsDuplicateVersions =
+    outcome
+        "all-packages rejects repeated versions"
+        (when Registry.decodeString "{\"elm/core\":[\"1.0.0\",\"1.0.0\"]}" is
+            Err (DecodeFailure message) ->
+                String.contains "repeats" message
+
+            _ ->
+                False
+        )
+        "Expected a duplicate-version decode error."
+
+
+rejectsInvalidPackageKeys : TestResult
+rejectsInvalidPackageKeys =
+    outcome
+        "all-packages validates package keys"
+        (when Registry.decodeString "{\"elm/Core\":[\"1.0.0\"]}" is
+            Err (DecodeFailure message) ->
+                String.contains "invalid package name" message
+
+            _ ->
+                False
+        )
+        "Expected an invalid package-name decode error."
+
+
+expectEqual : String -> a -> a -> TestResult
+expectEqual name expected actual =
+    outcome name (expected == actual) ("Expected " ++ Debug.toString expected ++ ", got " ++ Debug.toString actual)
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed failureDetails =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            failureDetails
+    }

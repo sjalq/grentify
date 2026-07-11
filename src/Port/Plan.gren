@@ -1,0 +1,340 @@
+module Port.Plan exposing
+    ( Identity
+    , LocalDependency
+    , buildManifest
+    , inferPackagePlatform
+    , targetName
+    )
+
+{-| Deterministic planning from resolved Elm package identities to Gren package
+names, platforms, dependency requirements, and package manifests.
+-}
+
+import Cli
+import Compiler.PackageName as GrenPackageName
+import Compiler.Platform as CompilerPlatform exposing (Platform)
+import Dict exposing (Dict)
+import Elm.Manifest exposing (Manifest)
+import Elm.PackageName as PackageName
+import Elm.Semver as Semver
+import Emit.Manifest as GrenManifest exposing (Dependency(..), ExposedModules(..), Spec)
+import Emit.Workspace
+import Mapping.Registry as MappingRegistry
+import Mapping.Types as Mapping exposing (MappingKind(..), PackageMapping(..), Registry)
+import Port.Error as PortError exposing (Error)
+
+
+type alias Identity =
+    { elmName : String
+    , grenName : String
+    , version : String
+    , platform : Mapping.Platform
+    }
+
+
+type alias LocalDependency =
+    { identity : Identity
+    , isRootDependency : Bool
+    }
+
+
+targetName : Maybe String -> Registry -> Manifest -> Result Error String
+targetName namespace registry manifest =
+    let
+        sourceName =
+            PackageName.toString manifest.name
+    in
+    when MappingRegistry.mappingFor sourceName registry is
+        Just mapping ->
+            Ok (Mapping.mappingGrenPackage mapping)
+
+        Nothing ->
+            when namespace is
+                Nothing ->
+                    Ok sourceName
+
+                Just author ->
+                    namespacedTarget author manifest
+
+
+namespacedTarget : String -> Manifest -> Result Error String
+namespacedTarget namespace manifest =
+    let
+        normalizedNamespace =
+            String.toLower namespace
+
+        project =
+            encodeSourceSegment (String.toLower (PackageName.author manifest.name))
+                ++ "zp"
+                ++ encodeSourceSegment (String.toLower (PackageName.project manifest.name))
+
+        target =
+            normalizedNamespace ++ "/" ++ project
+    in
+    if String.isEmpty normalizedNamespace
+        || String.count normalizedNamespace > 40
+        || not (validGrenSegment normalizedNamespace)
+    then
+        Err (PortError.create "INVALID_NAMESPACE" ("Invalid Gren namespace " ++ namespace ++ "."))
+
+    else if String.count project > 40 then
+        Err <|
+            PortError.create "INVALID_PACKAGE_NAME"
+                ("Namespaced target project " ++ project ++ " exceeds Gren's 40-character package segment limit.")
+
+    else if GrenPackageName.fromString target == Nothing then
+        Err (PortError.create "INVALID_PACKAGE_NAME" ("Invalid namespaced Gren package " ++ target ++ "."))
+
+    else
+        Ok target
+
+
+{-| Encode both Elm package segments into one reversible Gren project segment.
+`z` is escaped as `zz`, `-` as `zh`, and the otherwise impossible `zp`
+sequence separates author from project. This avoids namespace collisions such
+as `a-b/c` versus `a/b-c` without using Gren-invalid consecutive hyphens.
+-}
+encodeSourceSegment : String -> String
+encodeSourceSegment segment =
+    segment
+        |> String.toArray
+        |> Array.map
+            (\character ->
+                when character is
+                    'z' ->
+                        "zz"
+
+                    '-' ->
+                        "zh"
+
+                    _ ->
+                        String.fromArray [ character ]
+            )
+        |> String.join ""
+
+
+validGrenSegment : String -> Bool
+validGrenSegment segment =
+    when Array.first (String.toArray segment) is
+        Nothing ->
+            False
+
+        Just first ->
+            Char.isLower first
+                && Array.all (\character -> Char.isLower character || Char.isDigit character || character == '-') (String.toArray segment)
+                && not (String.endsWith "-" segment)
+                && not (String.contains "--" segment)
+
+
+inferPackagePlatform
+    : Cli.PlatformChoice
+    -> Bool
+    -> Registry
+    -> Manifest
+    -> Array Mapping.Platform
+    -> Mapping.Platform
+    -> Result Error Mapping.Platform
+inferPackagePlatform requested isRoot registry manifest dependencyPlatforms detected =
+    MappingRegistry.inferPlatform
+        registry
+        (Dict.keys manifest.dependencies)
+        (Array.pushLast detected dependencyPlatforms)
+        |> Result.mapError
+            (\_ ->
+                PortError.create "PLATFORM_CONFLICT"
+                    ("Elm package " ++ PackageName.toString manifest.name ++ " combines browser and node dependencies.")
+            )
+        |> Result.andThen
+            (\inferred ->
+                if not isRoot then
+                    Ok inferred
+
+                else
+                    applyRequestedPlatform requested inferred
+            )
+
+
+applyRequestedPlatform : Cli.PlatformChoice -> Mapping.Platform -> Result Error Mapping.Platform
+applyRequestedPlatform requested inferred =
+    when requested is
+        Cli.Auto ->
+            Ok inferred
+
+        Cli.ExactPlatform platform ->
+            let
+                exact =
+                    fromCompilerPlatform platform
+            in
+            if inferred == Mapping.Common || inferred == exact then
+                Ok exact
+
+            else
+                Err <|
+                    PortError.create "PLATFORM_CONFLICT"
+                        ("Requested "
+                            ++ Mapping.platformName exact
+                            ++ " cannot host "
+                            ++ Mapping.platformName inferred
+                            ++ " dependencies."
+                        )
+
+
+buildManifest
+    : { source : Manifest
+      , identity : Identity
+      , registry : Registry
+      , rootElmName : String
+      , localDependencies : Dict String Identity
+      }
+    -> Result Error Spec
+buildManifest options =
+    Dict.foldl
+        (addDependency options)
+        (Ok Dict.empty)
+        options.source.dependencies
+        |> Result.map
+            (\dependencies ->
+                { platform = toCompilerPlatform options.identity.platform
+                , name = options.identity.grenName
+                , summary = options.source.summary
+                , license = options.source.license
+                , version = options.identity.version
+                , exposedModules = ExposedArray options.source.exposedModules
+                , grenVersion = "0.6.0 <= v < 0.7.0"
+                , dependencies = dependencies
+                }
+            )
+
+
+addDependency
+    : { source : Manifest
+      , identity : Identity
+      , registry : Registry
+      , rootElmName : String
+      , localDependencies : Dict String Identity
+      }
+    -> String
+    -> Elm.Manifest.Dependency
+    -> Result Error (Dict String Dependency)
+    -> Result Error (Dict String Dependency)
+addDependency options elmName _ accumulated =
+    accumulated
+        |> Result.andThen
+            (\dependencies ->
+                when Dict.get elmName options.localDependencies is
+                    Just local ->
+                        if local.grenName == options.identity.grenName then
+                            Ok dependencies
+
+                        else
+                            setDependency local.grenName
+                                (LocalPath (localPath options local))
+                                dependencies
+
+                    Nothing ->
+                        when MappingRegistry.mappingFor elmName options.registry is
+                            Just (GrenAnalogue details) ->
+                                addMapped options details dependencies
+
+                            Just (Absorbed details) ->
+                                addMapped options details dependencies
+
+                            Just (Transpile _) ->
+                                Err (missingLocal options elmName)
+
+                            Nothing ->
+                                Err (missingLocal options elmName)
+            )
+
+
+addMapped options details dependencies =
+    if details.grenPackage == options.identity.grenName then
+        Ok dependencies
+
+    else
+        mappedRange details.grenVersion
+            |> Result.andThen
+                (\range -> setDependency details.grenPackage (VersionRange range) dependencies)
+
+
+setDependency : String -> Dependency -> Dict String Dependency -> Result Error (Dict String Dependency)
+setDependency packageName requirement dependencies =
+    when Dict.get packageName dependencies is
+        Nothing ->
+            Ok (Dict.set packageName requirement dependencies)
+
+        Just existing ->
+            if existing == requirement then
+                Ok dependencies
+
+            else
+                Err <|
+                    PortError.create "DEPENDENCY_MAPPING_CONFLICT"
+                        ("Elm dependencies map to incompatible requirements for " ++ packageName ++ ".")
+
+
+mappedRange : String -> Result Error String
+mappedRange source =
+    Semver.parseVersion source
+        |> Result.map
+            (\version ->
+                source
+                    ++ " <= v < "
+                    ++ String.fromInt (version.major + 1)
+                    ++ ".0.0"
+            )
+        |> Result.mapError
+            (Semver.errorToString
+                >> PortError.create "INVALID_MAPPING"
+            )
+
+
+localPath options dependency =
+    let
+        directory =
+            Emit.Workspace.packageDirectoryName
+                { name = dependency.grenName
+                , version = dependency.version
+                }
+    in
+    if options.identity.elmName == options.rootElmName then
+        ".elm-to-gren/packages/" ++ directory
+
+    else
+        "../" ++ directory
+
+
+missingLocal options dependencyName =
+    PortError.create "GREN_MANIFEST_INVALID"
+        ("Elm package "
+            ++ options.identity.elmName
+            ++ " depends on "
+            ++ dependencyName
+            ++ ", but no generated local package was supplied."
+        )
+
+
+toCompilerPlatform : Mapping.Platform -> Platform
+toCompilerPlatform platform =
+    when platform is
+        Mapping.Common ->
+            CompilerPlatform.Common
+
+        Mapping.Browser ->
+            CompilerPlatform.Browser
+
+        Mapping.Node ->
+            CompilerPlatform.Node
+
+
+fromCompilerPlatform : Platform -> Mapping.Platform
+fromCompilerPlatform platform =
+    when platform is
+        CompilerPlatform.Common ->
+            Mapping.Common
+
+        CompilerPlatform.Browser ->
+            Mapping.Browser
+
+        CompilerPlatform.Node ->
+            Mapping.Node

@@ -1,0 +1,225 @@
+module Transform.SourceEditTest exposing (tests)
+
+import Array exposing (Array)
+import Debug
+import Transform.SourceEdit as SourceEdit exposing (EditKind(..), SourceEdit, SourceError(..))
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ unicodePositions
+    , rejectsCrLfInterior
+    , deterministicApplication
+    , allowsAdjacentEdits
+    , detectsReplacementCollision
+    , detectsInsertionCollision
+    , rejectsInvalidRanges
+    , appliesChildrenWithinRange
+    , composesOuterAndChildEdits
+    , rejectsEscapingChild
+    ]
+
+
+unicodePositions : TestResult
+unicodePositions =
+    let
+        source =
+            "a😀b\r\né\n"
+
+        actual =
+            [ SourceEdit.positionToOffset source { row = 1, column = 1 }
+            , SourceEdit.positionToOffset source { row = 1, column = 2 }
+            , SourceEdit.positionToOffset source { row = 1, column = 3 }
+            , SourceEdit.positionToOffset source { row = 1, column = 4 }
+            , SourceEdit.positionToOffset source { row = 2, column = 1 }
+            , SourceEdit.positionToOffset source { row = 3, column = 1 }
+            ]
+
+        expected =
+            [ Ok 0, Ok 1, Ok 2, Ok 3, Ok 5, Ok 7 ]
+    in
+    expectEqual "positions count Unicode code points and CRLF once" expected actual
+
+
+rejectsCrLfInterior : TestResult
+rejectsCrLfInterior =
+    let
+        passed =
+            when SourceEdit.offsetToPosition "a😀b\r\né" 4 is
+                Err (InvalidOffset details) ->
+                    details.offset == 4
+
+                _ ->
+                    False
+    in
+    outcome "offsets cannot split a CRLF newline" passed "Expected InvalidOffset at the LF code point."
+
+
+deterministicApplication : TestResult
+deterministicApplication =
+    let
+        edits =
+            [ edit 5 6 "Y" "later"
+            , edit 2 3 "X" "earlier"
+            ]
+
+        forward =
+            SourceEdit.applyEdits "abcdef" edits
+
+        backward =
+            SourceEdit.applyEdits "abcdef" (Array.reverse edits)
+    in
+    expectEqual
+        "edit application is independent of input order"
+        [ Ok "aXcdYf", Ok "aXcdYf" ]
+        [ forward, backward ]
+
+
+allowsAdjacentEdits : TestResult
+allowsAdjacentEdits =
+    let
+        edits =
+            [ edit 1 2 "A" "replace"
+            , edit 2 2 "!" "insert"
+            , edit 2 3 "B" "adjacent"
+            ]
+    in
+    expectEqual "adjacent edits and boundary insertions do not collide" (Ok "A!Bc") (SourceEdit.applyEdits "abc" edits)
+
+
+detectsReplacementCollision : TestResult
+detectsReplacementCollision =
+    let
+        passed =
+            when SourceEdit.applyEdits "abcdef" [ edit 2 5 "x" "first", edit 4 6 "y" "second" ] is
+                Err (EditCollision details) ->
+                    details.first.rule == "first" && details.second.rule == "second"
+
+                _ ->
+                    False
+    in
+    outcome "overlapping replacements fail deterministically" passed "Expected an EditCollision ordered by source location."
+
+
+detectsInsertionCollision : TestResult
+detectsInsertionCollision =
+    let
+        passed =
+            when SourceEdit.applyEdits "abc" [ edit 2 2 "x" "first", edit 2 2 "y" "second" ] is
+                Err (EditCollision _) ->
+                    True
+
+                _ ->
+                    False
+    in
+    outcome "same-position insertions cannot depend on input order" passed "Expected an EditCollision."
+
+
+rejectsInvalidRanges : TestResult
+rejectsInvalidRanges =
+    let
+        reversed =
+            when SourceEdit.applyEdits "abc" [ edit 3 2 "x" "reversed" ] is
+                Err (ReversedRange _) ->
+                    True
+
+                _ ->
+                    False
+
+        tooWide =
+            when SourceEdit.applyEdits "abc" [ edit 1 8 "x" "too-wide" ] is
+                Err (InvalidPosition _) ->
+                    True
+
+                _ ->
+                    False
+    in
+    outcome "reversed and out-of-line ranges are rejected" (reversed && tooWide) "Expected ReversedRange and InvalidPosition errors."
+
+
+appliesChildrenWithinRange : TestResult
+appliesChildrenWithinRange =
+    SourceEdit.applyEditsWithinRange
+        "abcde"
+        { start = { row = 1, column = 2 }, end = { row = 1, column = 5 } }
+        [ edit 3 4 "X" "child" ]
+        |> expectEqual "child edits can be applied to an outer source slice" (Ok "bXd")
+
+
+composesOuterAndChildEdits : TestResult
+composesOuterAndChildEdits =
+    let
+        result =
+            SourceEdit.composeSourceEdit
+                { range =
+                    { start = { row = 1, column = 2 }
+                    , end = { row = 1, column = 5 }
+                    }
+                , kind = TupleEdit
+                , rule = "outer"
+                , buildReplacement = \children -> "[" ++ children ++ "]"
+                }
+                "abcde"
+                [ edit 3 4 "X" "child" ]
+                |> Result.andThen (\outer -> SourceEdit.applyEdits "abcde" [ outer ])
+    in
+    expectEqual "outer edits compose child replacements without collisions" (Ok "a[bXd]e") result
+
+
+rejectsEscapingChild : TestResult
+rejectsEscapingChild =
+    let
+        passed =
+            when
+                SourceEdit.applyEditsWithinRange
+                    "abcde"
+                    { start = { row = 1, column = 2 }, end = { row = 1, column = 5 } }
+                    [ edit 1 3 "X" "escaping-child" ]
+            is
+                Err (ChildEditOutsideRange details) ->
+                    details.child.rule == "escaping-child"
+
+                _ ->
+                    False
+    in
+    outcome "children may not cross their outer range" passed "Expected ChildEditOutsideRange."
+
+
+edit : Int -> Int -> String -> String -> SourceEdit
+edit startColumn endColumn replacement rule =
+    { range =
+        { start = { row = 1, column = startColumn }
+        , end = { row = 1, column = endColumn }
+        }
+    , replacement = replacement
+    , kind = SyntaxEdit
+    , rule = rule
+    }
+
+
+expectEqual : String -> a -> a -> TestResult
+expectEqual name expected actual =
+    outcome
+        name
+        (expected == actual)
+        ("Expected " ++ Debug.toString expected ++ ", got " ++ Debug.toString actual)
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed failureDetails =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            failureDetails
+    }

@@ -1,0 +1,105 @@
+module Acquire.OnlineSmokeMain exposing (main)
+
+{-| Opt-in live smoke test. It is intentionally separate from the deterministic
+test runner because it contacts package.elm-lang.org and GitHub.
+-}
+
+import Acquire.Provider as Provider
+import ChildProcess
+import Elm.PackageName as PackageName
+import FileSystem
+import FileSystem.Path as Path
+import HttpClient
+import Init
+import Node
+import Port.Error as PortError
+import Stream.Log
+import System.File
+import Task
+
+
+main : Node.SimpleProgram Never
+main =
+    Node.defineSimpleProgram <|
+        \environment ->
+            Init.await FileSystem.initialize <|
+                \fileSystemPermission ->
+                    Init.await ChildProcess.initialize <|
+                        \childProcessPermission ->
+                            Init.await HttpClient.initialize <|
+                                \httpPermission ->
+                                    Init.awaitTask (FileSystem.currentWorkingDirectory fileSystemPermission) <|
+                                        \workingDirectory ->
+                                            let
+                                                cacheDirectory =
+                                                    Path.append (Path.fromPosixString ".acquire-online-smoke-cache") workingDirectory
+
+                                                permissions =
+                                                    { fileSystem = fileSystemPermission
+                                                    , childProcess = childProcessPermission
+                                                    , http = httpPermission
+                                                    }
+
+                                                online =
+                                                    { platform = environment.platform
+                                                    , workingDirectory = workingDirectory
+                                                    , cacheDirectory = cacheDirectory
+                                                    , offline = False
+                                                    }
+
+                                                offline =
+                                                    { online | offline = True }
+                                            in
+                                            removeIfExists fileSystemPermission cacheDirectory
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        Provider.acquire permissions online "elm-community/maybe-extra"
+                                                    )
+                                                |> Task.andThen
+                                                    (\fresh ->
+                                                        System.File.exists fileSystemPermission
+                                                            (Path.append (Path.fromPosixString ".elm-to-gren-source.json") fresh.packageRoot)
+                                                            |> Task.andThen
+                                                                (\provenanceFileExists ->
+                                                                    Provider.acquire permissions offline "elm-community/maybe-extra"
+                                                                        |> Task.andThen
+                                                                            (\cached ->
+                                                                                if PackageName.toString fresh.manifest.name == "elm-community/maybe-extra"
+                                                                                    && not (Array.isEmpty fresh.sources)
+                                                                                    && fresh.provenance.revision /= Nothing
+                                                                                    && cached.provenance.fromCache
+                                                                                    && cached.provenance.revision /= Nothing
+                                                                                    && provenanceFileExists
+                                                                                then
+                                                                                    Task.succeed {}
+
+                                                                                else
+                                                                                    Task.fail <|
+                                                                                        PortError.create "ONLINE_SMOKE_ASSERTION_FAILED"
+                                                                                            "Fresh and cached acquisition results did not retain expected provenance."
+                                                                            )
+                                                                )
+                                                    )
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        removeIfExists fileSystemPermission cacheDirectory
+                                                            |> Task.onError (\_ -> Task.succeed {})
+                                                    )
+                                                |> Task.andThen
+                                                    (\_ -> Stream.Log.line environment.stdout "Acquire online smoke test passed.")
+                                                |> Task.onError
+                                                    (\error ->
+                                                        Stream.Log.line environment.stderr (PortError.toString error)
+                                                            |> Task.andThen (\_ -> Node.setExitCode 1)
+                                                    )
+                                                |> Node.endSimpleProgram
+
+
+removeIfExists permission path =
+    FileSystem.metadata permission { resolveLink = True } path
+        |> Task.andThen
+            (\_ ->
+                FileSystem.remove permission { recursive = True } path
+                    |> Task.map (\_ -> {})
+            )
+        |> Task.onError (\_ -> Task.succeed {})

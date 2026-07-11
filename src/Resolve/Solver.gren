@@ -1,0 +1,619 @@
+module Resolve.Solver exposing
+    ( Catalog
+    , Options
+    , Requirement
+    , ResolvedPackage
+    , Resolution
+    , Error(..)
+    , catalogFromManifests
+    , solve
+    , solveWith
+    , errorToString
+    )
+
+{-| A deterministic, pure dependency solver for Elm packages.
+
+Acquisition is deliberately outside this module. Supply every available
+manifest in a `Catalog`, then the solver selects the newest compatible graph.
+It branches on the package with the fewest viable versions (name as the stable
+tie-breaker), backtracks across transitive conflicts, and returns dependencies
+before dependants in `order`.
+-}
+
+import Array exposing (Array)
+import Dict exposing (Dict)
+import Elm.Manifest as Manifest exposing (Dependency, Manifest)
+import Elm.PackageName as PackageName exposing (Name)
+import Elm.Semver as Semver exposing (Range, Version)
+import Result exposing (Result)
+import String
+
+
+type alias Catalog =
+    Dict String (Array Manifest)
+
+
+type alias Options =
+    { isMapped : Name -> Bool
+    }
+
+
+type alias Requirement =
+    { requester : Name
+    , packageName : Name
+    , constraint : Range
+    }
+
+
+type alias ResolvedPackage =
+    { manifest : Manifest
+    , requirements : Array Requirement
+    }
+
+
+type alias Resolution =
+    { root : Name
+    , packages : Dict String ResolvedPackage
+    , order : Array Name
+    }
+
+
+type Error
+    = CatalogNameMismatch { key : String, actual : Name, version : Version }
+    | DuplicateCatalogVersion { packageName : Name, version : Version }
+    | PackageUnavailable { packageName : Name, requirements : Array Requirement }
+    | NoCompatibleVersion { packageName : Name, requirements : Array Requirement, availableVersions : Array Version }
+    | SelectedVersionConflict { packageName : Name, selectedVersion : Version, requirements : Array Requirement }
+    | DependencyCycle (Array Name)
+    | InternalInvariant String
+
+
+type alias SolverState =
+    { selected : Dict String Manifest
+    , requirements : Dict String (Array Requirement)
+    }
+
+
+type alias SearchResult =
+    { state : SolverState
+    , order : Array Name
+    }
+
+
+type alias CandidateSet =
+    { key : String
+    , packageName : Name
+    , requirements : Array Requirement
+    , availableVersions : Array Version
+    , candidates : Array Manifest
+    }
+
+
+type alias TopologyState =
+    { permanent : Dict String Bool
+    , visiting : Dict String Bool
+    , stack : Array Name
+    , order : Array Name
+    }
+
+
+catalogFromManifests : Array Manifest -> Result Error Catalog
+catalogFromManifests manifests =
+    manifests
+        |> Array.foldl
+            (\manifest catalog ->
+                let
+                    key =
+                        PackageName.toString manifest.name
+
+                    versions =
+                        Dict.get key catalog |> Maybe.withDefault []
+                in
+                Dict.set key (Array.pushLast manifest versions) catalog
+            )
+            Dict.empty
+        |> normalizeCatalog
+
+
+solve : Catalog -> Manifest -> Result Error Resolution
+solve =
+    solveWith { isMapped = \_ -> False }
+
+
+solveWith : Options -> Catalog -> Manifest -> Result Error Resolution
+solveWith options untrustedCatalog rootManifest =
+    normalizeCatalog untrustedCatalog
+        |> Result.andThen
+            (\catalog ->
+                let
+                    rootKey =
+                        PackageName.toString rootManifest.name
+
+                    initial =
+                        { selected = Dict.singleton rootKey rootManifest
+                        , requirements = Dict.empty
+                        }
+                in
+                addDependencies options rootManifest initial
+                    |> Result.andThen (search options catalog rootManifest.name)
+                    |> Result.map
+                        (\solved ->
+                            { root = rootManifest.name
+                            , packages = resolvedPackages solved.state
+                            , order = solved.order
+                            }
+                        )
+            )
+
+
+normalizeCatalog : Catalog -> Result Error Catalog
+normalizeCatalog catalog =
+    Dict.foldl
+        (\key manifests accumulated ->
+            accumulated
+                |> Result.andThen
+                    (\normalized ->
+                        normalizeCatalogEntry key manifests
+                            |> Result.map (\entry -> Dict.set key entry normalized)
+                    )
+        )
+        (Ok Dict.empty)
+        catalog
+
+
+normalizeCatalogEntry : String -> Array Manifest -> Result Error (Array Manifest)
+normalizeCatalogEntry key manifests =
+    manifests
+        |> Array.foldl
+            (\manifest accumulated ->
+                accumulated
+                    |> Result.andThen
+                        (\_ ->
+                            if PackageName.toString manifest.name == key then
+                                Ok {}
+
+                            else
+                                Err
+                                    (CatalogNameMismatch
+                                        { key = key
+                                        , actual = manifest.name
+                                        , version = manifest.version
+                                        }
+                                    )
+                        )
+            )
+            (Ok {})
+        |> Result.andThen
+            (\_ ->
+                let
+                    sorted =
+                        Array.sortWith compareManifestsDescending manifests
+                in
+                when firstDuplicateManifest sorted is
+                    Nothing ->
+                        Ok sorted
+
+                    Just duplicate ->
+                        Err
+                            (DuplicateCatalogVersion
+                                { packageName = duplicate.name
+                                , version = duplicate.version
+                                }
+                            )
+            )
+
+
+compareManifestsDescending : Manifest -> Manifest -> Order
+compareManifestsDescending left right =
+    Semver.compare right.version left.version
+
+
+firstDuplicateManifest : Array Manifest -> Maybe Manifest
+firstDuplicateManifest manifests =
+    when { first = Array.get 0 manifests, second = Array.get 1 manifests } is
+        { first = Just first, second = Just second } ->
+            if Semver.compare first.version second.version == EQ then
+                Just first
+
+            else
+                firstDuplicateManifest (Array.dropFirst 1 manifests)
+
+        _ ->
+            Nothing
+
+
+addDependencies : Options -> Manifest -> SolverState -> Result Error SolverState
+addDependencies options source initialState =
+    Manifest.dependencyArray source
+        |> Array.foldl
+            (\dependency accumulated ->
+                accumulated
+                    |> Result.andThen
+                        (\state -> addDependency options source.name dependency state)
+            )
+            (Ok initialState)
+
+
+addDependency : Options -> Name -> Dependency -> SolverState -> Result Error SolverState
+addDependency options requester dependency state =
+    if options.isMapped dependency.name then
+        Ok state
+
+    else
+        let
+            key =
+                PackageName.toString dependency.name
+
+            requirement =
+                { requester = requester
+                , packageName = dependency.name
+                , constraint = dependency.constraint
+                }
+
+            requirements =
+                Dict.get key state.requirements
+                    |> Maybe.withDefault []
+                    |> Array.pushLast requirement
+                    |> Array.sortWith compareRequirements
+
+            nextState =
+                { selected = state.selected
+                , requirements = Dict.set key requirements state.requirements
+                }
+        in
+        when Dict.get key state.selected is
+            Nothing ->
+                Ok nextState
+
+            Just selected ->
+                if requirementsSatisfied selected.version requirements then
+                    Ok nextState
+
+                else
+                    Err
+                        (SelectedVersionConflict
+                            { packageName = dependency.name
+                            , selectedVersion = selected.version
+                            , requirements = requirements
+                            }
+                        )
+
+
+search : Options -> Catalog -> Name -> SolverState -> Result Error SearchResult
+search options catalog root state =
+    let
+        unresolved =
+            Dict.keys state.requirements
+                |> Array.keepIf (\key -> not (Dict.member key state.selected))
+    in
+    if Array.isEmpty unresolved then
+        topologicalOrder options root state.selected
+            |> Result.map (\order -> { state = state, order = order })
+
+    else
+        unresolved
+            |> Array.foldl
+                (\key accumulated ->
+                    accumulated
+                        |> Result.andThen
+                            (\sets ->
+                                candidateSet catalog state key
+                                    |> Result.map (\set -> Array.pushLast set sets)
+                            )
+                )
+                (Ok [])
+            |> Result.andThen
+                (\candidateSets ->
+                    when Array.first (Array.sortWith compareCandidateSets candidateSets) is
+                        Nothing ->
+                            Err (InternalInvariant "The unresolved dependency set produced no candidate set.")
+
+                        Just selectedSet ->
+                            tryCandidates options catalog root state selectedSet Nothing selectedSet.candidates
+                )
+
+
+candidateSet : Catalog -> SolverState -> String -> Result Error CandidateSet
+candidateSet catalog state key =
+    let
+        requirements =
+            Dict.get key state.requirements |> Maybe.withDefault []
+    in
+    when Array.first requirements is
+        Nothing ->
+            Err (InternalInvariant ("Dependency '" ++ key ++ "' has no requirements."))
+
+        Just firstRequirement ->
+            when Dict.get key catalog is
+                Nothing ->
+                    Err
+                        (PackageUnavailable
+                            { packageName = firstRequirement.packageName
+                            , requirements = requirements
+                            }
+                        )
+
+                Just available ->
+                    let
+                        candidates =
+                            Array.keepIf
+                                (\manifest -> requirementsSatisfied manifest.version requirements)
+                                available
+
+                        availableVersions =
+                            Array.map .version available
+                    in
+                    if Array.isEmpty candidates then
+                        Err
+                            (NoCompatibleVersion
+                                { packageName = firstRequirement.packageName
+                                , requirements = requirements
+                                , availableVersions = availableVersions
+                                }
+                            )
+
+                    else
+                        Ok
+                            { key = key
+                            , packageName = firstRequirement.packageName
+                            , requirements = requirements
+                            , availableVersions = availableVersions
+                            , candidates = candidates
+                            }
+
+
+compareCandidateSets : CandidateSet -> CandidateSet -> Order
+compareCandidateSets left right =
+    when Basics.compare (Array.length left.candidates) (Array.length right.candidates) is
+        EQ ->
+            Basics.compare left.key right.key
+
+        other ->
+            other
+
+
+tryCandidates : Options -> Catalog -> Name -> SolverState -> CandidateSet -> Maybe Error -> Array Manifest -> Result Error SearchResult
+tryCandidates options catalog root state selectedSet firstFailure remaining =
+    when Array.first remaining is
+        Nothing ->
+            when firstFailure is
+                Just failure ->
+                    Err failure
+
+                Nothing ->
+                    Err
+                        (NoCompatibleVersion
+                            { packageName = selectedSet.packageName
+                            , requirements = selectedSet.requirements
+                            , availableVersions = selectedSet.availableVersions
+                            }
+                        )
+
+        Just candidate ->
+            let
+                branch =
+                    { selected = Dict.set selectedSet.key candidate state.selected
+                    , requirements = state.requirements
+                    }
+
+                attempt =
+                    addDependencies options candidate branch
+                        |> Result.andThen (search options catalog root)
+            in
+            when attempt is
+                Ok solved ->
+                    Ok solved
+
+                Err failure ->
+                    tryCandidates
+                        options
+                        catalog
+                        root
+                        state
+                        selectedSet
+                        (when firstFailure is
+                            Nothing ->
+                                Just failure
+
+                            Just earlier ->
+                                Just earlier
+                        )
+                        (Array.dropFirst 1 remaining)
+
+
+requirementsSatisfied : Version -> Array Requirement -> Bool
+requirementsSatisfied candidate requirements =
+    Array.all (\requirement -> Semver.satisfies requirement.constraint candidate) requirements
+
+
+compareRequirements : Requirement -> Requirement -> Order
+compareRequirements left right =
+    when Basics.compare (PackageName.toString left.requester) (PackageName.toString right.requester) is
+        EQ ->
+            when Basics.compare (PackageName.toString left.packageName) (PackageName.toString right.packageName) is
+                EQ ->
+                    Basics.compare
+                        (Semver.rangeToString left.constraint)
+                        (Semver.rangeToString right.constraint)
+
+                other ->
+                    other
+
+        other ->
+            other
+
+
+topologicalOrder : Options -> Name -> Dict String Manifest -> Result Error (Array Name)
+topologicalOrder options root selected =
+    visit options selected root
+        { permanent = Dict.empty
+        , visiting = Dict.empty
+        , stack = []
+        , order = []
+        }
+        |> Result.andThen
+            (\afterRoot ->
+                selected
+                    |> Dict.values
+                    |> Array.map .name
+                    |> Array.foldl
+                        (\packageName accumulated ->
+                            accumulated
+                                |> Result.andThen (visit options selected packageName)
+                        )
+                        (Ok afterRoot)
+            )
+        |> Result.map .order
+
+
+visit : Options -> Dict String Manifest -> Name -> TopologyState -> Result Error TopologyState
+visit options selected packageName state =
+    let
+        key =
+            PackageName.toString packageName
+    in
+    if Dict.member key state.permanent then
+        Ok state
+
+    else if Dict.member key state.visiting then
+        Err (DependencyCycle (cyclePath packageName state.stack))
+
+    else
+        when Dict.get key selected is
+            Nothing ->
+                Err (InternalInvariant ("Resolved package '" ++ key ++ "' is missing from the selected graph."))
+
+            Just manifest ->
+                let
+                    entered =
+                        { permanent = state.permanent
+                        , visiting = Dict.set key True state.visiting
+                        , stack = Array.pushLast packageName state.stack
+                        , order = state.order
+                        }
+
+                    dependencies =
+                        Manifest.dependencyNames manifest
+                            |> Array.keepIf (\dependency -> not (options.isMapped dependency))
+                in
+                dependencies
+                    |> Array.foldl
+                        (\dependency accumulated ->
+                            accumulated
+                                |> Result.andThen (visit options selected dependency)
+                        )
+                        (Ok entered)
+                    |> Result.map
+                        (\afterDependencies ->
+                            { permanent = Dict.set key True afterDependencies.permanent
+                            , visiting = Dict.remove key afterDependencies.visiting
+                            , stack = Array.dropLast 1 afterDependencies.stack
+                            , order = Array.pushLast packageName afterDependencies.order
+                            }
+                        )
+
+
+cyclePath : Name -> Array Name -> Array Name
+cyclePath repeated stack =
+    let
+        repeatedKey =
+            PackageName.toString repeated
+
+        suffix =
+            cycleSuffix repeatedKey stack
+    in
+    Array.pushLast repeated suffix
+
+
+cycleSuffix : String -> Array Name -> Array Name
+cycleSuffix repeatedKey stack =
+    when Array.first stack is
+        Nothing ->
+            []
+
+        Just packageName ->
+            if PackageName.toString packageName == repeatedKey then
+                stack
+
+            else
+                cycleSuffix repeatedKey (Array.dropFirst 1 stack)
+
+
+resolvedPackages : SolverState -> Dict String ResolvedPackage
+resolvedPackages state =
+    Dict.foldl
+        (\key manifest resolved ->
+            Dict.set key
+                { manifest = manifest
+                , requirements = Dict.get key state.requirements |> Maybe.withDefault []
+                }
+                resolved
+        )
+        Dict.empty
+        state.selected
+
+
+errorToString : Error -> String
+errorToString error =
+    when error is
+        CatalogNameMismatch details ->
+            "Dependency catalog entry '"
+                ++ details.key
+                ++ "' contains manifest '"
+                ++ PackageName.toString details.actual
+                ++ "@"
+                ++ Semver.versionToString details.version
+                ++ "'."
+
+        DuplicateCatalogVersion details ->
+            "Dependency catalog repeats '"
+                ++ PackageName.toString details.packageName
+                ++ "@"
+                ++ Semver.versionToString details.version
+                ++ "'."
+
+        PackageUnavailable details ->
+            "Elm package '"
+                ++ PackageName.toString details.packageName
+                ++ "' is absent from the dependency catalog. Required by "
+                ++ requirementsToString details.requirements
+                ++ "."
+
+        NoCompatibleVersion details ->
+            "No compatible version of Elm package '"
+                ++ PackageName.toString details.packageName
+                ++ "' exists. Required by "
+                ++ requirementsToString details.requirements
+                ++ "; available versions: ["
+                ++ String.join ", " (Array.map Semver.versionToString details.availableVersions)
+                ++ "]."
+
+        SelectedVersionConflict details ->
+            "Selected Elm package '"
+                ++ PackageName.toString details.packageName
+                ++ "@"
+                ++ Semver.versionToString details.selectedVersion
+                ++ "' violates constraints from "
+                ++ requirementsToString details.requirements
+                ++ "."
+
+        DependencyCycle cycle ->
+            "Elm package dependency cycle detected: "
+                ++ String.join " -> " (Array.map PackageName.toString cycle)
+                ++ "."
+
+        InternalInvariant message ->
+            "Internal dependency solver invariant failed: " ++ message
+
+
+requirementsToString : Array Requirement -> String
+requirementsToString requirements =
+    requirements
+        |> Array.map
+            (\requirement ->
+                PackageName.toString requirement.requester
+                    ++ " ("
+                    ++ Semver.rangeToString requirement.constraint
+                    ++ ")"
+            )
+        |> String.join ", "

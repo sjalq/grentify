@@ -1,0 +1,94 @@
+module Acquire.RegistryTest exposing (tests)
+
+import Acquire.Registry as Registry
+import Array exposing (Array)
+import Debug
+import Elm.PackageName as PackageName
+import Elm.Semver as Semver
+import Port.Error as PortError
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ acceptsMatchingManifest
+    , rejectsWrongPackage
+    , rejectsWrongVersion
+    ]
+
+
+acceptsMatchingManifest : TestResult
+acceptsMatchingManifest =
+    withCoordinate
+        (\packageName version ->
+            when Registry.validateManifest packageName version (manifestJson "author/package" "1.2.3") is
+                Ok manifest ->
+                    outcome "matching registry manifests are accepted" (manifest.version == version) "Unexpected version."
+
+                Err error ->
+                    outcome "matching registry manifests are accepted" False (PortError.toString error)
+        )
+
+
+rejectsWrongPackage : TestResult
+rejectsWrongPackage =
+    withCoordinate
+        (\packageName version ->
+            when Registry.validateManifest packageName version (manifestJson "other/package" "1.2.3") is
+                Err error ->
+                    outcome "registry manifests must match package name" (PortError.code error == "MANIFEST_COORDINATE_MISMATCH") (PortError.toString error)
+
+                Ok manifest ->
+                    outcome "registry manifests must match package name" False (Debug.toString manifest)
+        )
+
+
+rejectsWrongVersion : TestResult
+rejectsWrongVersion =
+    withCoordinate
+        (\packageName version ->
+            when Registry.validateManifest packageName version (manifestJson "author/package" "1.2.4") is
+                Err error ->
+                    outcome "registry manifests must match exact version" (PortError.code error == "MANIFEST_COORDINATE_MISMATCH") (PortError.toString error)
+
+                Ok manifest ->
+                    outcome "registry manifests must match exact version" False (Debug.toString manifest)
+        )
+
+
+withCoordinate : (PackageName.Name -> Semver.Version -> TestResult) -> TestResult
+withCoordinate continue =
+    when { name = PackageName.parse "author/package", version = Semver.parseVersion "1.2.3" } is
+        { name = Ok packageName, version = Ok version } ->
+            continue packageName version
+
+        other ->
+            outcome "test coordinate setup" False (Debug.toString other)
+
+
+manifestJson : String -> String -> String
+manifestJson name version =
+    "{\"type\":\"package\",\"name\":\""
+        ++ name
+        ++ "\",\"summary\":\"A package used by acquisition tests\",\"license\":\"BSD-3-Clause\",\"version\":\""
+        ++ version
+        ++ "\",\"exposed-modules\":[\"Example\"],\"elm-version\":\"0.19.0 <= v < 0.20.0\",\"dependencies\":{},\"test-dependencies\":{}}"
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed details =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            details
+    }

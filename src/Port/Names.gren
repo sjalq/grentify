@@ -1,0 +1,48 @@
+module Port.Names exposing (targetName)
+
+import Elm.Manifest exposing (Manifest)
+import Elm.PackageName
+import Mapping.Decode
+import Mapping.Registry
+import Mapping.Types exposing (PackageMapping(..), Registry)
+import Port.Error as PortError exposing (Error)
+
+
+targetName : Maybe String -> Registry -> Manifest -> Result Error String
+targetName namespace mappings manifest =
+    let
+        sourceName =
+            Elm.PackageName.toString manifest.name
+    in
+    when Mapping.Registry.mappingFor sourceName mappings is
+        Just (Transpile details) ->
+            valid details.grenPackage
+
+        Just (GrenAnalogue details) ->
+            valid details.grenPackage
+
+        Just (Absorbed details) ->
+            valid details.grenPackage
+
+        Nothing ->
+            let
+                author =
+                    namespace
+                        |> Maybe.withDefault (Elm.PackageName.author manifest.name)
+                        |> String.toLower
+
+                generated =
+                    author ++ "/" ++ Elm.PackageName.project manifest.name
+            in
+            valid generated
+
+
+valid : String -> Result Error String
+valid candidate =
+    if Mapping.Decode.isValidGrenPackageName candidate then
+        Ok candidate
+
+    else
+        Err <|
+            PortError.create "INVALID_GREN_PACKAGE_NAME"
+                ("Cannot derive a valid Gren package name from " ++ candidate ++ ". Use --namespace with a lowercase author.")

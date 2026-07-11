@@ -1,0 +1,86 @@
+module Elm.PackageNameTest exposing (tests)
+
+import Array exposing (Array)
+import Debug
+import Elm.PackageName as PackageName
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ acceptsRegistryNames
+    , rejectsMalformedNames
+    , exposesValidatedParts
+    ]
+
+
+acceptsRegistryNames : TestResult
+acceptsRegistryNames =
+    outcome
+        "Elm registry package names are accepted"
+        (PackageName.isValid "NoRedInk/elm-json-decode-pipeline"
+            && PackageName.isValid "elm/core"
+            && PackageName.isValid "author2/package-2"
+        )
+        "A valid author/project name was rejected."
+
+
+rejectsMalformedNames : TestResult
+rejectsMalformedNames =
+    let
+        malformed =
+            [ "elm"
+            , "elm/core/extra"
+            , "/core"
+            , "elm/"
+            , "-elm/core"
+            , "elm/Core"
+            , "elm/core_thing"
+            , "elm/core--thing"
+            , "elm/core-"
+            ]
+    in
+    outcome
+        "malformed package names are rejected"
+        (Array.all (PackageName.isValid >> not) malformed)
+        "At least one malformed name was accepted."
+
+
+exposesValidatedParts : TestResult
+exposesValidatedParts =
+    when PackageName.parse "NoRedInk/elm-json-decode-pipeline" is
+        Err error ->
+            outcome "validated package parts are available" False (PackageName.errorToString error)
+
+        Ok packageName ->
+            expectEqual
+                "validated package parts are available"
+                [ "NoRedInk", "elm-json-decode-pipeline", "NoRedInk/elm-json-decode-pipeline" ]
+                [ PackageName.author packageName
+                , PackageName.project packageName
+                , PackageName.toString packageName
+                ]
+
+
+expectEqual : String -> a -> a -> TestResult
+expectEqual name expected actual =
+    outcome name (expected == actual) ("Expected " ++ Debug.toString expected ++ ", got " ++ Debug.toString actual)
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed failureDetails =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            failureDetails
+    }

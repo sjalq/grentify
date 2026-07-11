@@ -1,0 +1,75 @@
+module Elm.AcquireRunner exposing (main)
+
+import ChildProcess
+import Elm.Acquire as Acquire
+import Elm.PackageName as PackageName
+import FileSystem
+import FileSystem.Path as Path
+import HttpClient
+import Init
+import Json.Encode as Encode
+import Node
+import Port.Error as PortError
+import Stream.Log
+import Task
+
+
+main : Node.SimpleProgram Never
+main =
+    Node.defineSimpleProgram <|
+        \environment ->
+            Init.await FileSystem.initialize <|
+                \fileSystem ->
+                    Init.await ChildProcess.initialize <|
+                        \childProcess ->
+                            Init.await HttpClient.initialize <|
+                                \http ->
+                                    Init.awaitTask (FileSystem.currentWorkingDirectory fileSystem) <|
+                                        \workingDirectory ->
+                                            Init.awaitTask (FileSystem.homeDirectory fileSystem) <|
+                                                \homeDirectory ->
+                                                    let
+                                                        input =
+                                                            Array.get 2 environment.args
+                                                                |> Maybe.withDefault "./test/fixtures/simple"
+
+                                                        cache =
+                                                            Path.join [ workingDirectory, Path.fromPosixString ".test-cache/elm-to-gren" ]
+
+                                                        permissions =
+                                                            { fileSystem = fileSystem
+                                                            , childProcess = childProcess
+                                                            , http = http
+                                                            }
+
+                                                        options =
+                                                            { cacheDirectory = cache
+                                                            , registryBaseUrl = "https://package.elm-lang.org"
+                                                            , offline = False
+                                                            }
+
+                                                        task =
+                                                            when Acquire.parseInput environment.platform workingDirectory homeDirectory input is
+                                                                Err error ->
+                                                                    Task.fail error
+
+                                                                Ok parsed ->
+                                                                    Acquire.acquire environment.platform permissions options parsed
+                                                    in
+                                                    task
+                                                        |> Task.andThen
+                                                            (\source ->
+                                                                Encode.object
+                                                                    [ { key = "name", value = Encode.string (PackageName.toString source.manifest.name) }
+                                                                    , { key = "version", value = Encode.string (String.fromInt source.manifest.version.major ++ "." ++ String.fromInt source.manifest.version.minor ++ "." ++ String.fromInt source.manifest.version.patch) }
+                                                                    , { key = "sourceFiles", value = Encode.int (Array.length source.sourceFiles) }
+                                                                    ]
+                                                                    |> Encode.encode 0
+                                                                    |> Stream.Log.line environment.stdout
+                                                            )
+                                                        |> Task.onError
+                                                            (\error ->
+                                                                Stream.Log.line environment.stderr (PortError.toString error)
+                                                                    |> Task.andThen (\_ -> Node.setExitCode 1)
+                                                            )
+                                                        |> Node.endSimpleProgram

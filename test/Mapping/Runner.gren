@@ -1,0 +1,22 @@
+module Mapping.Runner exposing (main)
+
+import Mapping.Tests
+import Node
+import Stream.Log
+import Task
+
+
+main : Node.SimpleProgram Never
+main =
+    Node.defineSimpleProgram <|
+        \environment ->
+            (if Mapping.Tests.allPassed then
+                Stream.Log.line environment.stdout "Mapping tests passed."
+
+             else
+                Stream.Log.line
+                    environment.stderr
+                    ("Mapping tests failed: " ++ String.join ", " Mapping.Tests.failures)
+                    |> Task.andThen (\_ -> Node.setExitCode 1)
+            )
+                |> Node.endSimpleProgram

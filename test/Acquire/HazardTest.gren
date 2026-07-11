@@ -1,0 +1,81 @@
+module Acquire.HazardTest exposing (tests)
+
+import Acquire.Hazard as Hazard exposing (Hazard(..))
+import Array exposing (Array)
+import Debug
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ detectsKernelImport
+    , detectsEffectModule
+    , detectsPortModule
+    , detectsGlsl
+    , ignoresProtectedText
+    , deduplicatesHazards
+    ]
+
+
+detectsKernelImport : TestResult
+detectsKernelImport =
+    Hazard.detect "module Example exposing (..)\nimport Elm.Kernel.Utils\n"
+        |> expectEqual "Elm.Kernel imports are rejected early" [ ElmKernel ]
+
+
+detectsEffectModule : TestResult
+detectsEffectModule =
+    Hazard.detect "effect module Platform.Cmd where { command = MyCmd } exposing (none)"
+        |> expectEqual "effect modules are rejected early" [ EffectModule ]
+
+
+detectsPortModule : TestResult
+detectsPortModule =
+    Hazard.detect "port module Main exposing (main)\nport send : String -> Cmd msg"
+        |> expectEqual "port modules are rejected early" [ PortModule ]
+
+
+detectsGlsl : TestResult
+detectsGlsl =
+    Hazard.detect "shader = [glsl| void main () {} |]"
+        |> expectEqual "GLSL blocks are rejected early" [ Glsl ]
+
+
+ignoresProtectedText : TestResult
+ignoresProtectedText =
+    let
+        source =
+            String.join "\n"
+                [ "-- import Elm.Kernel.Utils"
+                , "{- port module Fake exposing (..) -}"
+                , "text = \"effect module Fake [glsl| nope |]\""
+                , "character = 'p'"
+                ]
+    in
+    Hazard.detect source
+        |> expectEqual "comments and strings do not create acquisition hazards" []
+
+
+deduplicatesHazards : TestResult
+deduplicatesHazards =
+    Hazard.detect "import Elm.Kernel.A\nimport Elm.Kernel.B\n"
+        |> expectEqual "source hazards are reported once per kind" [ ElmKernel ]
+
+
+expectEqual : String -> a -> a -> TestResult
+expectEqual name expected actual =
+    { name = name
+    , passed = expected == actual
+    , details =
+        if expected == actual then
+            ""
+
+        else
+            "Expected " ++ Debug.toString expected ++ ", got " ++ Debug.toString actual
+    }

@@ -1,0 +1,401 @@
+module Mapping.Decode exposing
+    ( decodeString
+    , decoder
+    , isValidElmPackageName
+    , isValidGrenPackageName
+    , isValidModuleName
+    , isValidSemanticVersion
+    , isValidSourceSymbol
+    , isValidTargetSymbol
+    , packageDecoder
+    )
+
+import Array
+import Dict exposing (Dict)
+import Json.Decode as Decode exposing (Decoder, Value)
+import Mapping.Types exposing (MappingDocument, MappingError(..), ModuleMapping, PackageMapping(..), Platform(..))
+import Maybe exposing (Maybe(..))
+import Result exposing (Result(..))
+import String.Regex as Regex exposing (Regex)
+
+
+decoder : Decoder MappingDocument
+decoder =
+    Decode.dict Decode.value
+        |> Decode.andThen decodeDocumentObject
+
+
+decodeString : String -> String -> Result MappingError MappingDocument
+decodeString source contents =
+    Decode.decodeString decoder contents
+        |> Result.mapError
+            (\problem ->
+                InvalidMapping
+                    { source = source
+                    , path = "$"
+                    , message = Decode.errorToString problem
+                    }
+            )
+
+
+decodeDocumentObject : Dict String Value -> Decoder MappingDocument
+decodeDocumentObject object =
+    requiredField "schemaVersion" Decode.int object
+        |> Result.andThen
+            (\schemaVersion ->
+                if schemaVersion == 1 then
+                    requiredField "packages" (Decode.array packageDecoder) object
+                        |> Result.map
+                            (\packages ->
+                                { schemaVersion = schemaVersion
+                                , packages = packages
+                                }
+                            )
+
+                else
+                    Err "schemaVersion must be exactly 1."
+            )
+        |> resultDecoder
+
+
+packageDecoder : Decoder PackageMapping
+packageDecoder =
+    Decode.dict Decode.value
+        |> Decode.andThen decodePackageObject
+
+
+decodePackageObject : Dict String Value -> Decoder PackageMapping
+decodePackageObject object =
+    requiredString "kind" object
+        |> Result.andThen
+            (\kind ->
+                requiredString "elmPackage" object
+                    |> Result.andThen
+                        (\elmPackage ->
+                            validateElmPackageName elmPackage
+                                |> Result.andThen
+                                    (\_ ->
+                                        requiredString "grenPackage" object
+                                            |> Result.andThen
+                                                (\grenPackage ->
+                                                    validateGrenPackageName grenPackage
+                                                        |> Result.andThen
+                                                            (\_ ->
+                                                                decodePackageKind object kind elmPackage grenPackage
+                                                            )
+                                                )
+                                    )
+                        )
+            )
+        |> resultDecoder
+
+
+decodePackageKind : Dict String Value -> String -> String -> String -> Result String PackageMapping
+decodePackageKind object kind elmPackage grenPackage =
+    when kind is
+        "transpile" ->
+            Ok
+                (Transpile
+                    { elmPackage = elmPackage
+                    , grenPackage = grenPackage
+                    }
+                )
+
+        "gren-analogue" ->
+            decodeMappedDetails object elmPackage grenPackage
+                |> Result.map GrenAnalogue
+
+        "absorbed" ->
+            decodeMappedDetails object elmPackage grenPackage
+                |> Result.map Absorbed
+
+        _ ->
+            Err ("Mapping '" ++ elmPackage ++ "' has unknown kind '" ++ kind ++ "'.")
+
+
+decodeMappedDetails object elmPackage grenPackage =
+    Result.map3
+        (\grenVersion platform modules ->
+            { elmPackage = elmPackage
+            , grenPackage = grenPackage
+            , grenVersion = grenVersion
+            , platform = platform
+            , modules = modules
+            }
+        )
+        (requiredString "grenVersion" object
+            |> Result.andThen validateSemanticVersion
+        )
+        (requiredString "platform" object
+            |> Result.andThen decodePlatform
+        )
+        (requiredField "modules" (Decode.array moduleDecoder) object
+            |> Result.andThen (ensureUniqueModules elmPackage)
+        )
+
+
+decodePlatform : String -> Result String Platform
+decodePlatform value =
+    when value is
+        "common" ->
+            Ok Common
+
+        "browser" ->
+            Ok Browser
+
+        "node" ->
+            Ok Node
+
+        _ ->
+            Err ("Unknown Gren platform '" ++ value ++ "'. Expected common, browser, or node.")
+
+
+moduleDecoder : Decoder ModuleMapping
+moduleDecoder =
+    Decode.dict Decode.value
+        |> Decode.andThen decodeModuleObject
+
+
+decodeModuleObject : Dict String Value -> Decoder ModuleMapping
+decodeModuleObject object =
+    requiredString "source" object
+        |> Result.andThen
+            (\source ->
+                validateModuleName "source" source
+                    |> Result.andThen
+                        (\_ ->
+                            requiredString "target" object
+                                |> Result.andThen
+                                    (\target ->
+                                        validateModuleName "target" target
+                                            |> Result.andThen
+                                                (\_ ->
+                                                    Result.map2
+                                                        (\values types ->
+                                                            { source = source
+                                                            , target = target
+                                                            , values = values
+                                                            , types = types
+                                                            }
+                                                        )
+                                                        (optionalStringMap "values" object
+                                                            |> Result.andThen
+                                                                (validateStringMap ("Value mappings for '" ++ source ++ "'"))
+                                                        )
+                                                        (optionalStringMap "types" object
+                                                            |> Result.andThen
+                                                                (validateStringMap ("Type mappings for '" ++ source ++ "'"))
+                                                        )
+                                                )
+                                    )
+                        )
+            )
+        |> resultDecoder
+
+
+ensureUniqueModules : String -> Array ModuleMapping -> Result String (Array ModuleMapping)
+ensureUniqueModules elmPackage modules =
+    let
+        state =
+            Array.foldl
+                (\module_ current ->
+                    when current.duplicate is
+                        Just _ ->
+                            current
+
+                        Nothing ->
+                            if Dict.member module_.source current.seen then
+                                { current | duplicate = Just module_.source }
+
+                            else
+                                { current | seen = Dict.set module_.source True current.seen }
+                )
+                { seen = Dict.empty, duplicate = Nothing }
+                modules
+    in
+    when state.duplicate is
+        Just moduleName ->
+            Err ("Mapping '" ++ elmPackage ++ "' declares module '" ++ moduleName ++ "' more than once.")
+
+        Nothing ->
+            Ok modules
+
+
+requiredString : String -> Dict String Value -> Result String String
+requiredString fieldName object =
+    requiredField fieldName Decode.string object
+        |> Result.andThen
+            (\value ->
+                if String.isEmpty value then
+                    Err ("Field '" ++ fieldName ++ "' must be a non-empty string.")
+
+                else
+                    Ok value
+            )
+
+
+requiredField : String -> Decoder a -> Dict String Value -> Result String a
+requiredField fieldName fieldDecoder object =
+    when Dict.get fieldName object is
+        Nothing ->
+            Err ("Missing required field '" ++ fieldName ++ "'.")
+
+        Just rawValue ->
+            Decode.decodeValue fieldDecoder rawValue
+                |> Result.mapError
+                    (\problem ->
+                        "Invalid field '"
+                            ++ fieldName
+                            ++ "': "
+                            ++ Decode.errorToString problem
+                    )
+
+
+optionalStringMap : String -> Dict String Value -> Result String (Dict String String)
+optionalStringMap fieldName object =
+    when Dict.get fieldName object is
+        Nothing ->
+            Ok Dict.empty
+
+        Just rawValue ->
+            Decode.decodeValue (Decode.dict Decode.string) rawValue
+                |> Result.mapError
+                    (\problem ->
+                        "Invalid field '"
+                            ++ fieldName
+                            ++ "': expected an object of string values. "
+                            ++ Decode.errorToString problem
+                    )
+
+
+validateStringMap : String -> Dict String String -> Result String (Dict String String)
+validateStringMap description mappings =
+    Dict.foldl
+        (\source target validation ->
+            validation
+                |> Result.andThen
+                    (\_ ->
+                        if not (isValidSourceSymbol source) then
+                            Err (description ++ " contains invalid source symbol '" ++ source ++ "'.")
+
+                        else if not (isValidTargetSymbol target) then
+                            Err (description ++ " contains invalid target symbol for '" ++ source ++ "'.")
+
+                        else
+                            Ok {}
+                    )
+        )
+        (Ok {})
+        mappings
+        |> Result.map (\_ -> mappings)
+
+
+validateElmPackageName : String -> Result String {}
+validateElmPackageName value =
+    if isValidElmPackageName value then
+        Ok {}
+
+    else
+        Err ("Invalid Elm package name '" ++ value ++ "'.")
+
+
+validateGrenPackageName : String -> Result String {}
+validateGrenPackageName value =
+    if isValidGrenPackageName value then
+        Ok {}
+
+    else
+        Err ("Invalid Gren package name '" ++ value ++ "'.")
+
+
+validateModuleName : String -> String -> Result String {}
+validateModuleName side value =
+    if isValidModuleName value then
+        Ok {}
+
+    else
+        Err ("Invalid module " ++ side ++ " '" ++ value ++ "'.")
+
+
+validateSemanticVersion : String -> Result String String
+validateSemanticVersion value =
+    if isValidSemanticVersion value then
+        Ok value
+
+    else
+        Err ("Invalid Gren semantic version '" ++ value ++ "'.")
+
+
+resultDecoder : Result String a -> Decoder a
+resultDecoder result =
+    when result is
+        Ok value ->
+            Decode.succeed value
+
+        Err message ->
+            Decode.fail message
+
+
+isValidElmPackageName : String -> Bool
+isValidElmPackageName =
+    Regex.contains elmPackagePattern
+
+
+isValidGrenPackageName : String -> Bool
+isValidGrenPackageName =
+    Regex.contains grenPackagePattern
+
+
+isValidModuleName : String -> Bool
+isValidModuleName =
+    Regex.contains modulePattern
+
+
+isValidSourceSymbol : String -> Bool
+isValidSourceSymbol =
+    Regex.contains sourceSymbolPattern
+
+
+isValidTargetSymbol : String -> Bool
+isValidTargetSymbol =
+    Regex.contains targetSymbolPattern
+
+
+isValidSemanticVersion : String -> Bool
+isValidSemanticVersion =
+    Regex.contains semanticVersionPattern
+
+
+regex : String -> Regex
+regex pattern =
+    Maybe.withDefault Regex.never (Regex.fromString pattern)
+
+
+elmPackagePattern : Regex
+elmPackagePattern =
+    regex "^[A-Za-z0-9][A-Za-z0-9-]{0,39}/[a-z][a-z0-9-]{0,39}$"
+
+
+grenPackagePattern : Regex
+grenPackagePattern =
+    regex "^[a-z][a-z0-9-]{0,39}/[a-z][a-z0-9-]{0,39}$"
+
+
+modulePattern : Regex
+modulePattern =
+    regex "^[A-Z][A-Za-z0-9_]*(\\.[A-Z][A-Za-z0-9_]*)*$"
+
+
+sourceSymbolPattern : Regex
+sourceSymbolPattern =
+    regex "^([a-z][A-Za-z0-9_]*|[A-Z][A-Za-z0-9_]*|\\([^\\s()]+\\))$"
+
+
+targetSymbolPattern : Regex
+targetSymbolPattern =
+    regex "^([a-zA-Z][A-Za-z0-9_]*(\\.[a-zA-Z][A-Za-z0-9_]*)*|\\([^\\s()]+\\))$"
+
+
+semanticVersionPattern : Regex
+semanticVersionPattern =
+    regex "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"

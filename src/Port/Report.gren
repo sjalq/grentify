@@ -1,0 +1,91 @@
+module Port.Report exposing (lockfile, report)
+
+import Dict
+import Elm.Manifest exposing (Manifest)
+import Elm.PackageName
+import Elm.Semver
+import Json.Encode as Encode
+import Review.Protocol exposing (Diagnostic)
+
+
+report
+    : { rootElm : String
+      , rootGren : String
+      , outputDirectory : String
+      , verified : Bool
+      , diagnostics : Array Diagnostic
+      }
+    -> String
+report details =
+    Encode.object
+        [ { key = "schemaVersion", value = Encode.int 1 }
+        , { key = "toolVersion", value = Encode.string "0.1.0" }
+        , { key = "rootElm", value = Encode.string details.rootElm }
+        , { key = "rootGren", value = Encode.string details.rootGren }
+        , { key = "outputDirectory", value = Encode.string details.outputDirectory }
+        , { key = "verified", value = Encode.bool details.verified }
+        , { key = "diagnostics", value = Encode.array diagnosticToJson details.diagnostics }
+        ]
+        |> Encode.encode 2
+        |> (\encoded -> encoded ++ "\n")
+
+
+lockfile
+    : { source : Manifest
+      , targetName : String
+      , mappingFingerprint : String
+      }
+    -> String
+lockfile details =
+    let
+        sourceName =
+            Elm.PackageName.toString details.source.name
+
+        constraints =
+            Dict.map (\_ dependency -> Elm.Semver.rangeToString dependency.constraint) details.source.dependencies
+    in
+    Encode.object
+        [ { key = "schemaVersion", value = Encode.int 1 }
+        , { key = "root", value = Encode.string sourceName }
+        , { key = "grenCompiler", value = Encode.string "0.6.6" }
+        , { key = "mappingFingerprint", value = Encode.string details.mappingFingerprint }
+        , { key = "packages"
+          , value =
+                Encode.array identity
+                    [ Encode.object
+                        [ { key = "elmName", value = Encode.string sourceName }
+                        , { key = "elmVersion", value = Encode.string (Elm.Semver.versionToString details.source.version) }
+                        , { key = "grenName", value = Encode.string details.targetName }
+                        , { key = "strategy", value = Encode.string "transpile" }
+                        , { key = "dependencies", value = Encode.dict identity Encode.string constraints }
+                        ]
+                    ]
+          }
+        ]
+        |> Encode.encode 2
+        |> (\encoded -> encoded ++ "\n")
+
+
+diagnosticToJson : Diagnostic -> Encode.Value
+diagnosticToJson diagnostic =
+    Encode.object
+        [ { key = "code", value = Encode.string diagnostic.code }
+        , { key = "severity", value = Encode.string diagnostic.severity }
+        , { key = "message", value = Encode.string diagnostic.message }
+        , { key = "help", value = Maybe.map Encode.string diagnostic.help |> Maybe.withDefault Encode.null }
+        , { key = "range", value = Maybe.map rangeToJson diagnostic.range |> Maybe.withDefault Encode.null }
+        ]
+
+
+rangeToJson range =
+    Encode.object
+        [ { key = "start", value = positionToJson range.start }
+        , { key = "end", value = positionToJson range.end }
+        ]
+
+
+positionToJson position =
+    Encode.object
+        [ { key = "row", value = Encode.int position.row }
+        , { key = "column", value = Encode.int position.column }
+        ]

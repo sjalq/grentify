@@ -1,0 +1,80 @@
+module Emit.Bundle exposing (toCompilerPackage, write)
+
+import Compiler.Outline as Outline
+import Compiler.Package as CompilerPackage
+import Emit.Package exposing (Prepared)
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Json.Decode as Decode
+import Port.Error as PortError exposing (Error)
+import Stream
+import System.File
+import Task exposing (Task)
+
+
+toCompilerPackage : Prepared -> Result Error CompilerPackage.Package
+toCompilerPackage package =
+    Decode.decodeString Outline.pkgJsonDecoder package.manifestText
+        |> Result.map
+            (\outline ->
+                { outline = outline
+                , sources = package.sources
+                }
+            )
+        |> Result.mapError
+            (\problem ->
+                PortError.create "OUTPUT_FAILED"
+                    ("Could not construct the Gren bundle for "
+                        ++ package.manifest.name
+                        ++ ": "
+                        ++ Decode.errorToString problem
+                    )
+            )
+
+
+write : FileSystem.Permission -> Path -> Prepared -> Task Error Path
+write permission destination package =
+    when toCompilerPackage package is
+        Err error ->
+            Task.fail error
+
+        Ok compilerPackage ->
+            ensureParent permission destination
+                |> Task.andThen
+                    (\_ ->
+                        FileSystem.writeFileStream permission FileSystem.Replace destination
+                            |> Task.mapError
+                                (\error ->
+                                    PortError.create "OUTPUT_FAILED"
+                                        ("Could not create bundle "
+                                            ++ Path.toPosixString destination
+                                            ++ ": "
+                                            ++ FileSystem.errorToString error
+                                        )
+                                )
+                    )
+                |> Task.andThen
+                    (\stream ->
+                        CompilerPackage.saveToStream compilerPackage stream
+                            |> Task.mapError
+                                (\error ->
+                                    PortError.create "OUTPUT_FAILED"
+                                        ("Could not encode bundle "
+                                            ++ Path.toPosixString destination
+                                            ++ ": "
+                                            ++ Stream.errorToString error
+                                        )
+                                )
+                    )
+                |> Task.map (\_ -> destination)
+
+
+ensureParent : FileSystem.Permission -> Path -> Task Error {}
+ensureParent permission destination =
+    when Path.parentPath destination is
+        Nothing ->
+            Task.succeed {}
+
+        Just parent ->
+            System.File.ensureDirectory permission parent
+                |> Task.map (\_ -> {})

@@ -1,0 +1,848 @@
+module Port.Graph exposing
+    ( Options
+    , PackageSummary
+    , Permissions
+    , Result
+    , isMappedDependency
+    , run
+    )
+
+{-| Recursive, Gren-native Elm package graph porting.
+
+The graph boundary deliberately separates three dependency strategies:
+
+  - `GrenAnalogue` and `Absorbed` mappings are already available to Gren and
+    are omitted from the Elm solver graph.
+  - `Transpile` mappings and unmapped Elm packages are solved, acquired at an
+    exact version, transformed, and emitted as local Gren dependencies.
+  - The requested root is always transformed, even when a mapping exists for
+    its package name.
+
+Resolved packages are processed in the dependency-first order returned by the
+solver.  That makes every local dependency identity available before its
+dependant manifest is produced.  `Emit.Workspace` stages the entire graph and
+the root Gren package is compiled before the staging directory is committed.
+-}
+
+import Acquire.Coordinate as Coordinate
+import Acquire.Provider as Acquire
+import Acquire.Registry as RegistryProvider
+import Array exposing (Array)
+import ChildProcess
+import Cli
+import Dict exposing (Dict)
+import Elm.Manifest as ElmManifest exposing (Manifest)
+import Elm.PackageName as PackageName exposing (Name)
+import Elm.Registry as ElmRegistry
+import Elm.Semver as Semver
+import Emit.Workspace as Workspace
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import HttpClient
+import Json.Encode as Encode
+import Mapping.Adapter as Adapter exposing (AdapterError(..))
+import Mapping.Load
+import Mapping.Registry as MappingRegistry
+import Mapping.Types as Mapping exposing (MappingKind(..), Registry)
+import Node
+import Port.Error as PortError exposing (Error)
+import Port.Plan as Plan
+import Resolve.Online
+import Resolve.Solver as Solver exposing (Resolution)
+import Result as CoreResult
+import Review.Runner
+import System.File
+import Task exposing (Task)
+import Transform.Pipeline as Pipeline
+import Verify.Package
+
+
+type alias Permissions =
+    { fileSystem : FileSystem.Permission
+    , childProcess : ChildProcess.Permission
+    , http : HttpClient.Permission
+    }
+
+
+type alias Options =
+    { platform : Node.Platform
+    , workingDirectory : Path
+    , input : String
+    , output : Path
+    , cacheDirectory : Path
+    , builtinMapping : Path
+    , mappingOverlays : Array Path
+    , reviewConfig : Path
+    , elmReviewExecutable : String
+    , grenExecutable : String
+    , elmHome : Maybe Path
+    , namespace : Maybe String
+    , requestedPlatform : Cli.PlatformChoice
+    , offline : Bool
+    , verify : Bool
+    , toolVersion : String
+    }
+
+
+type alias PackageSummary =
+    { elmName : String
+    , elmVersion : String
+    , grenName : String
+    , grenVersion : String
+    , platform : String
+    , moduleCount : Int
+    , acquisition : String
+    }
+
+
+type alias Result =
+    { output : Path
+    , rootElmPackage : String
+    , rootGrenPackage : String
+    , packageCount : Int
+    , dependencyFirstOrder : Array String
+    , packages : Array PackageSummary
+    , verified : Bool
+    , workspace : Workspace.Result
+    , lockfile : String
+    , report : String
+    }
+
+
+type alias Draft =
+    { source : Acquire.AcquiredPackage
+    , modules : Array Mapping.GeneratedModule
+    , diagnostics : Array Pipeline.Diagnostic
+    , detectedPlatform : Mapping.Platform
+    }
+
+
+type alias Planned =
+    { identities : Dict String Plan.Identity
+    , targets : Dict String String
+    , packages : Array Workspace.Package
+    , diagnostics : Array Pipeline.Diagnostic
+    }
+
+
+run : Permissions -> Options -> Task Error Result
+run permissions options =
+    let
+        acquireOptions =
+            { platform = options.platform
+            , workingDirectory = options.workingDirectory
+            , cacheDirectory = options.cacheDirectory
+            , offline = options.offline
+            }
+    in
+    Mapping.Load.load permissions.fileSystem options.builtinMapping options.mappingOverlays
+        |> Task.andThen
+            (\registry ->
+                Acquire.acquire permissions acquireOptions options.input
+                    |> Task.andThen
+                        (\rootSource ->
+                            resolveGraph permissions acquireOptions registry rootSource
+                                |> Task.andThen
+                                    (\resolution ->
+                                        acquireResolvedSources permissions acquireOptions rootSource resolution
+                                            |> Task.andThen
+                                                (transformResolvedSources permissions options registry resolution)
+                                            |> Task.andThen
+                                                (\drafts ->
+                                                    planPackages options registry resolution drafts
+                                                        |> resultTask identity
+                                                        |> Task.andThen
+                                                            (emitGraph permissions options registry resolution drafts)
+                                                )
+                                    )
+                        )
+            )
+
+
+resolveGraph
+    : Permissions
+    -> Acquire.Options
+    -> Registry
+    -> Acquire.AcquiredPackage
+    -> Task Error Resolution
+resolveGraph permissions acquireOptions registry rootSource =
+    let
+        solverOptions =
+            { isMapped = isMappedDependency registry }
+
+        registryPermissions =
+            { fileSystem = permissions.fileSystem
+            , http = permissions.http
+            }
+
+        registryOptions =
+            { cacheDirectory = acquireOptions.cacheDirectory
+            , offline = acquireOptions.offline
+            }
+    in
+    if hasUnmappedDependencies registry rootSource.manifest then
+        RegistryProvider.loadIndex registryPermissions registryOptions
+            |> Task.andThen
+                (\index ->
+                    Resolve.Online.resolve solverOptions
+                        { versionsFor = versionsFor index
+                        , manifestFor = RegistryProvider.loadManifest registryPermissions registryOptions
+                        }
+                        rootSource.manifest
+                )
+
+    else
+        Solver.solveWith solverOptions Dict.empty rootSource.manifest
+            |> CoreResult.mapError solverFailure
+            |> resultTask identity
+
+
+{-| Whether the dependency is satisfied by a Gren package mapping and must not
+be acquired or transpiled. `Transpile` entries intentionally return `False`.
+-}
+isMappedDependency : Registry -> Name -> Bool
+isMappedDependency registry name =
+    when MappingRegistry.mappingFor (PackageName.toString name) registry is
+        Just mapping ->
+            Mapping.mappingKind mapping /= TranspileKind
+
+        Nothing ->
+            False
+
+
+hasUnmappedDependencies : Registry -> Manifest -> Bool
+hasUnmappedDependencies registry manifest =
+    ElmManifest.dependencyNames manifest
+        |> Array.any (not << isMappedDependency registry)
+
+
+versionsFor : ElmRegistry.Registry -> Name -> Task Error (Array Semver.Version)
+versionsFor registry name =
+    when ElmRegistry.versionsFor name registry is
+        Just versions ->
+            Task.succeed versions
+
+        Nothing ->
+            Task.fail <|
+                PortError.create "ELM_PACKAGE_NOT_FOUND"
+                    ("The Elm registry does not contain " ++ PackageName.toString name ++ ".")
+
+
+solverFailure : Solver.Error -> Error
+solverFailure problem =
+    PortError.create "DEPENDENCY_RESOLUTION_FAILED" (Solver.errorToString problem)
+
+
+acquireResolvedSources
+    : Permissions
+    -> Acquire.Options
+    -> Acquire.AcquiredPackage
+    -> Resolution
+    -> Task Error (Dict String Acquire.AcquiredPackage)
+acquireResolvedSources permissions options rootSource resolution =
+    resolution.order
+        |> Array.foldl
+            (acquireResolvedSource permissions options rootSource resolution)
+            (Task.succeed Dict.empty)
+
+
+acquireResolvedSource
+    : Permissions
+    -> Acquire.Options
+    -> Acquire.AcquiredPackage
+    -> Resolution
+    -> Name
+    -> Task Error (Dict String Acquire.AcquiredPackage)
+    -> Task Error (Dict String Acquire.AcquiredPackage)
+acquireResolvedSource permissions options rootSource resolution name pending =
+    pending
+        |> Task.andThen
+            (\sources ->
+                let
+                    key =
+                        PackageName.toString name
+
+                    rootKey =
+                        PackageName.toString resolution.root
+                in
+                if key == rootKey then
+                    Task.succeed (Dict.set key rootSource sources)
+
+                else
+                    when Dict.get key resolution.packages is
+                        Nothing ->
+                            Task.fail <|
+                                PortError.create "INTERNAL_ERROR"
+                                    ("Resolved package " ++ key ++ " has no selected manifest.")
+
+                        Just resolved ->
+                            acquireExact permissions options resolved.manifest
+                                |> Task.map (\source -> Dict.set key source sources)
+            )
+
+
+acquireExact : Permissions -> Acquire.Options -> Manifest -> Task Error Acquire.AcquiredPackage
+acquireExact permissions options expected =
+    let
+        coordinateString =
+            PackageName.toString expected.name
+                ++ "@"
+                ++ Semver.versionToString expected.version
+    in
+    Coordinate.parse coordinateString
+        |> CoreResult.mapError
+            (Coordinate.errorToString
+                >> PortError.create "INTERNAL_ERROR"
+            )
+        |> resultTask identity
+        |> Task.andThen (Acquire.acquireCoordinate permissions options)
+        |> Task.andThen
+            (\acquired ->
+                if acquired.manifest == expected then
+                    Task.succeed acquired
+
+                else
+                    Task.fail <|
+                        PortError.create "SOURCE_MANIFEST_MISMATCH"
+                            ("Acquired "
+                                ++ coordinateString
+                                ++ " but its manifest differs from the version selected by the dependency solver."
+                            )
+            )
+
+
+transformResolvedSources
+    : Permissions
+    -> Options
+    -> Registry
+    -> Resolution
+    -> Dict String Acquire.AcquiredPackage
+    -> Task Error (Dict String Draft)
+transformResolvedSources permissions options registry resolution sources =
+    ensureElmHome permissions.fileSystem options.elmHome
+        |> Task.andThen
+            (\_ ->
+                resolution.order
+                    |> Array.foldl
+                        (transformResolvedSource permissions options registry sources)
+                        (Task.succeed Dict.empty)
+            )
+
+
+ensureElmHome : FileSystem.Permission -> Maybe Path -> Task Error {}
+ensureElmHome permission elmHome =
+    when elmHome is
+        Nothing ->
+            Task.succeed {}
+
+        Just directory ->
+            System.File.ensureDirectory permission directory
+                |> Task.map (\_ -> {})
+
+
+transformResolvedSource
+    : Permissions
+    -> Options
+    -> Registry
+    -> Dict String Acquire.AcquiredPackage
+    -> Name
+    -> Task Error (Dict String Draft)
+    -> Task Error (Dict String Draft)
+transformResolvedSource permissions options registry sources name pending =
+    pending
+        |> Task.andThen
+            (\drafts ->
+                let
+                    key =
+                        PackageName.toString name
+                in
+                when Dict.get key sources is
+                    Nothing ->
+                        Task.fail <|
+                            PortError.create "INTERNAL_ERROR"
+                                ("Acquired source graph is missing " ++ key ++ ".")
+
+                    Just source ->
+                        transformOne permissions options registry source
+                            |> Task.map (\draft -> Dict.set key draft drafts)
+            )
+
+
+transformOne
+    : Permissions
+    -> Options
+    -> Registry
+    -> Acquire.AcquiredPackage
+    -> Task Error Draft
+transformOne permissions options registry source =
+    let
+        elmJson =
+            Path.append (Path.fromPosixString "elm.json") source.packageRoot
+
+        pipelineSources =
+            source.sources
+                |> Array.map
+                    (\sourceFile ->
+                        { path = sourcePath sourceFile.relativePath
+                        , source = sourceFile.contents
+                        }
+                    )
+    in
+    Review.Runner.run options.platform permissions.childProcess
+        { packageRoot = source.packageRoot
+        , elmJson = elmJson
+        , reviewConfig = options.reviewConfig
+        , executable = options.elmReviewExecutable
+        , elmHome = options.elmHome
+        , files = [ "src" ]
+        , offline = options.offline
+        }
+        |> Task.andThen
+            (\extraction ->
+                Pipeline.transform registry extraction pipelineSources
+                    |> resultTask identity
+            )
+        |> Task.andThen
+            (\transformed ->
+                let
+                    hardErrors =
+                        transformed.diagnostics
+                            |> Array.keepIf (\diagnostic -> diagnostic.severity == "error")
+
+                    packageName =
+                        PackageName.toString source.manifest.name
+                in
+                if not (Array.isEmpty hardErrors) then
+                    Task.fail <|
+                        PortError.create "UNSUPPORTED_FEATURE"
+                            (packageName
+                                ++ ":\n"
+                                ++ (hardErrors
+                                        |> Array.map .message
+                                        |> String.join "\n"
+                                   )
+                            )
+
+                else
+                    Adapter.generateFromRequirements transformed.requiredAdapters
+                        |> CoreResult.mapError adapterFailure
+                        |> CoreResult.andThen
+                            (\adapters ->
+                                parseDetectedPlatform transformed.detectedPlatform
+                                    |> CoreResult.map
+                                        (\detectedPlatform ->
+                                            { source = source
+                                            , modules = Array.append transformed.modules adapters
+                                            , diagnostics = transformed.diagnostics
+                                            , detectedPlatform = detectedPlatform
+                                            }
+                                        )
+                            )
+                        |> resultTask identity
+            )
+
+
+sourcePath : String -> String
+sourcePath relativePath =
+    let
+        normalized =
+            String.replace "\\" "/" relativePath
+    in
+    if String.startsWith "src/" normalized then
+        normalized
+
+    else
+        "src/" ++ normalized
+
+
+parseDetectedPlatform : String -> CoreResult.Result Error Mapping.Platform
+parseDetectedPlatform value =
+    when value is
+        "common" ->
+            Ok Mapping.Common
+
+        "browser" ->
+            Ok Mapping.Browser
+
+        "node" ->
+            Ok Mapping.Node
+
+        _ ->
+            Err <|
+                PortError.create "EXTRACTION_INVALID"
+                    ("Unknown detected platform " ++ value ++ ".")
+
+
+adapterFailure : AdapterError -> Error
+adapterFailure adapterError =
+    when adapterError is
+        UnknownAdapter details ->
+            PortError.create "INVALID_MAPPING"
+                ("Unknown compatibility adapter "
+                    ++ details.requirement
+                    ++ ". Available adapters: "
+                    ++ String.join ", " details.available
+                    ++ "."
+                )
+
+
+planPackages
+    : Options
+    -> Registry
+    -> Resolution
+    -> Dict String Draft
+    -> CoreResult.Result Error Planned
+planPackages options registry resolution drafts =
+    resolution.order
+        |> Array.foldl
+            (\name accumulated ->
+                accumulated
+                    |> CoreResult.andThen
+                        (\state -> planOne options registry resolution drafts name state)
+            )
+            (Ok
+                { identities = Dict.empty
+                , targets = Dict.empty
+                , packages = []
+                , diagnostics = []
+                }
+            )
+
+
+planOne
+    : Options
+    -> Registry
+    -> Resolution
+    -> Dict String Draft
+    -> Name
+    -> Planned
+    -> CoreResult.Result Error Planned
+planOne options registry resolution drafts name state =
+    let
+        key =
+            PackageName.toString name
+
+        rootKey =
+            PackageName.toString resolution.root
+    in
+    when Dict.get key drafts is
+        Nothing ->
+            Err <|
+                PortError.create "INTERNAL_ERROR"
+                    ("Transformed source graph is missing " ++ key ++ ".")
+
+        Just draft ->
+            let
+                dependencyPlatforms =
+                    draft.source.manifest.dependencies
+                        |> Dict.keys
+                        |> Array.mapAndKeepJust (\dependency -> Dict.get dependency state.identities)
+                        |> Array.map .platform
+            in
+            CoreResult.map2
+                (\grenName platform -> { grenName = grenName, platform = platform })
+                (Plan.targetName options.namespace registry draft.source.manifest)
+                (Plan.inferPackagePlatform
+                    options.requestedPlatform
+                    (key == rootKey)
+                    registry
+                    draft.source.manifest
+                    dependencyPlatforms
+                    draft.detectedPlatform
+                )
+                |> CoreResult.andThen
+                    (\plannedIdentity ->
+                        let
+                            identityRecord =
+                                { elmName = key
+                                , grenName = plannedIdentity.grenName
+                                , version = Semver.versionToString draft.source.manifest.version
+                                , platform = plannedIdentity.platform
+                                }
+                        in
+                        when Dict.get plannedIdentity.grenName state.targets is
+                            Just otherElmName ->
+                                Err <|
+                                    PortError.create "PACKAGE_NAME_COLLISION"
+                                        (key
+                                            ++ " and "
+                                            ++ otherElmName
+                                            ++ " both map to "
+                                            ++ plannedIdentity.grenName
+                                            ++ "."
+                                        )
+
+                            Nothing ->
+                                Plan.buildManifest
+                                    { source = draft.source.manifest
+                                    , identity = identityRecord
+                                    , registry = registry
+                                    , rootElmName = rootKey
+                                    , localDependencies = state.identities
+                                    }
+                                    |> CoreResult.map
+                                        (\manifest ->
+                                            { identities = Dict.set key identityRecord state.identities
+                                            , targets = Dict.set plannedIdentity.grenName key state.targets
+                                            , packages =
+                                                Array.pushLast
+                                                    { sourcePackage = key
+                                                    , sourceRoot = draft.source.packageRoot
+                                                    , manifest = manifest
+                                                    , modules = draft.modules
+                                                    }
+                                                    state.packages
+                                            , diagnostics = Array.append state.diagnostics draft.diagnostics
+                                            }
+                                        )
+                    )
+
+
+emitGraph
+    : Permissions
+    -> Options
+    -> Registry
+    -> Resolution
+    -> Dict String Draft
+    -> Planned
+    -> Task Error Result
+emitGraph permissions options registry resolution drafts planned =
+    let
+        rootKey =
+            PackageName.toString resolution.root
+    in
+    when Dict.get rootKey planned.identities is
+        Nothing ->
+            Task.fail <|
+                PortError.create "INTERNAL_ERROR"
+                    "The resolved root package has no generated Gren identity."
+
+        Just rootIdentity ->
+            let
+                summaries =
+                    packageSummaries resolution drafts planned
+
+                report =
+                    encodeReport options rootIdentity summaries planned.diagnostics
+
+                lockfile =
+                    encodeLock options registry resolution drafts planned rootIdentity
+
+                validate staging =
+                    if options.verify then
+                        Verify.Package.verify options.platform permissions.childProcess
+                            { packageDirectory = staging
+                            , grenExecutable = options.grenExecutable
+                            }
+
+                    else
+                        Task.succeed {}
+            in
+            Workspace.emit
+                { fileSystem = permissions.fileSystem }
+                { output = options.output
+                , rootPackage = rootIdentity.grenName
+                , packages = planned.packages
+                , lockfile = lockfile
+                , report = report
+                , validateBeforeCommit = validate
+                }
+                |> Task.map
+                    (\workspace ->
+                        { output = workspace.rootDirectory
+                        , rootElmPackage = rootKey
+                        , rootGrenPackage = rootIdentity.grenName
+                        , packageCount = Array.length planned.packages
+                        , dependencyFirstOrder = Array.map PackageName.toString resolution.order
+                        , packages = summaries
+                        , verified = options.verify
+                        , workspace = workspace
+                        , lockfile = lockfile
+                        , report = report
+                        }
+                    )
+
+
+packageSummaries : Resolution -> Dict String Draft -> Planned -> Array PackageSummary
+packageSummaries resolution drafts planned =
+    resolution.order
+        |> Array.mapAndKeepJust
+            (\name ->
+                let
+                    key =
+                        PackageName.toString name
+                in
+                Maybe.map2
+                    (\draft identityRecord ->
+                        { elmName = key
+                        , elmVersion = Semver.versionToString draft.source.manifest.version
+                        , grenName = identityRecord.grenName
+                        , grenVersion = identityRecord.version
+                        , platform = Mapping.platformName identityRecord.platform
+                        , moduleCount = Array.length draft.modules
+                        , acquisition = draft.source.provenance.strategy
+                        }
+                    )
+                    (Dict.get key drafts)
+                    (Dict.get key planned.identities)
+            )
+
+
+encodeReport : Options -> Plan.Identity -> Array PackageSummary -> Array Pipeline.Diagnostic -> String
+encodeReport options rootIdentity packages diagnostics =
+    Encode.object
+        [ { key = "schemaVersion", value = Encode.int 1 }
+        , { key = "root", value = Encode.string rootIdentity.grenName }
+        , { key = "sourceRoot", value = Encode.string rootIdentity.elmName }
+        , { key = "toolVersion", value = Encode.string options.toolVersion }
+        , { key = "output", value = Encode.string (Path.toPosixString options.output) }
+        , { key = "verified", value = Encode.bool options.verify }
+        , { key = "packages", value = Encode.array encodePackageSummary packages }
+        , { key = "diagnostics", value = Encode.array encodeDiagnostic diagnostics }
+        ]
+        |> Encode.encode 2
+
+
+encodePackageSummary : PackageSummary -> Encode.Value
+encodePackageSummary package =
+    Encode.object
+        [ { key = "elmName", value = Encode.string package.elmName }
+        , { key = "elmVersion", value = Encode.string package.elmVersion }
+        , { key = "grenName", value = Encode.string package.grenName }
+        , { key = "grenVersion", value = Encode.string package.grenVersion }
+        , { key = "platform", value = Encode.string package.platform }
+        , { key = "moduleCount", value = Encode.int package.moduleCount }
+        , { key = "acquisition", value = Encode.string package.acquisition }
+        ]
+
+
+encodeDiagnostic : Pipeline.Diagnostic -> Encode.Value
+encodeDiagnostic diagnostic =
+    Encode.object
+        [ { key = "code", value = Encode.string diagnostic.code }
+        , { key = "severity", value = Encode.string diagnostic.severity }
+        , { key = "message", value = Encode.string diagnostic.message }
+        , { key = "file", value = maybeString diagnostic.path }
+        , { key = "module", value = maybeString diagnostic.moduleName }
+        , { key = "help", value = maybeString diagnostic.help }
+        ]
+
+
+encodeLock
+    : Options
+    -> Registry
+    -> Resolution
+    -> Dict String Draft
+    -> Planned
+    -> Plan.Identity
+    -> String
+encodeLock options registry resolution drafts planned rootIdentity =
+    Encode.object
+        [ { key = "schemaVersion", value = Encode.int 1 }
+        , { key = "root", value = Encode.string (PackageName.toString resolution.root) }
+        , { key = "grenRoot", value = Encode.string rootIdentity.grenName }
+        , { key = "mappingSources"
+          , value =
+                Encode.array Encode.string
+                    (Array.map Path.toPosixString
+                        (Array.pushFirst options.builtinMapping options.mappingOverlays)
+                    )
+          }
+        , { key = "mappedPackages"
+          , value =
+                MappingRegistry.packagesInOrder registry
+                    |> Encode.array encodeMapping
+          }
+        , { key = "packages"
+          , value =
+                Encode.array
+                    (encodeLockPackage resolution drafts planned)
+                    resolution.order
+          }
+        ]
+        |> Encode.encode 2
+
+
+encodeMapping : Mapping.PackageMapping -> Encode.Value
+encodeMapping mapping =
+    Encode.object
+        [ { key = "elmName", value = Encode.string (Mapping.mappingElmPackage mapping) }
+        , { key = "grenName", value = Encode.string (Mapping.mappingGrenPackage mapping) }
+        , { key = "strategy", value = Encode.string (mappingKindName (Mapping.mappingKind mapping)) }
+        ]
+
+
+mappingKindName : MappingKind -> String
+mappingKindName kind =
+    when kind is
+        GrenAnalogueKind ->
+            "gren-analogue"
+
+        AbsorbedKind ->
+            "absorbed"
+
+        TranspileKind ->
+            "transpile"
+
+
+encodeLockPackage
+    : Resolution
+    -> Dict String Draft
+    -> Planned
+    -> Name
+    -> Encode.Value
+encodeLockPackage resolution drafts planned name =
+    let
+        key =
+            PackageName.toString name
+
+        elmVersion =
+            Dict.get key resolution.packages
+                |> Maybe.map (.manifest >> .version >> Semver.versionToString)
+                |> Maybe.withDefault ""
+
+        grenName =
+            Dict.get key planned.identities
+                |> Maybe.map .grenName
+                |> Maybe.withDefault ""
+
+        provenance =
+            Dict.get key drafts
+                |> Maybe.map .source
+                |> Maybe.map .provenance
+    in
+    Encode.object
+        [ { key = "elmName", value = Encode.string key }
+        , { key = "elmVersion", value = Encode.string elmVersion }
+        , { key = "grenName", value = Encode.string grenName }
+        , { key = "strategy", value = Encode.string "transpile" }
+        , { key = "sourceStrategy"
+          , value = provenance |> Maybe.map .strategy |> maybeString
+          }
+        , { key = "sourceUrl"
+          , value = provenance |> Maybe.map .sourceUrl |> maybeString
+          }
+        , { key = "revision"
+          , value = provenance |> Maybe.andThen .revision |> maybeString
+          }
+        ]
+
+
+maybeString : Maybe String -> Encode.Value
+maybeString value =
+    when value is
+        Just string ->
+            Encode.string string
+
+        Nothing ->
+            Encode.null
+
+
+resultTask : (problem -> Error) -> CoreResult.Result problem value -> Task Error value
+resultTask toError result =
+    when result is
+        Ok value ->
+            Task.succeed value
+
+        Err problem ->
+            Task.fail (toError problem)

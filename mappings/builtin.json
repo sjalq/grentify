@@ -1,0 +1,389 @@
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "kind": "gren-analogue",
+      "elmPackage": "elm/core",
+      "grenPackage": "gren-lang/core",
+      "grenVersion": "7.4.2",
+      "platform": "common",
+      "modules": [
+        {
+          "source": "Basics",
+          "target": "Basics",
+          "values": {
+            "round": "Math.round",
+            "floor": "Math.floor",
+            "ceiling": "Math.ceiling",
+            "truncate": "Math.truncate",
+            "modBy": "Math.modBy",
+            "remainderBy": "Math.remainderBy",
+            "abs": "Math.abs",
+            "sqrt": "Math.sqrt",
+            "logBase": "Math.logBase",
+            "e": "Math.e",
+            "pi": "Math.pi",
+            "cos": "Math.cos",
+            "sin": "Math.sin",
+            "tan": "Math.tan",
+            "acos": "Math.acos",
+            "asin": "Math.asin",
+            "atan": "Math.atan",
+            "atan2": "Math.atan2",
+            "degrees": "Math.degrees",
+            "radians": "Math.radians",
+            "turns": "Math.turns",
+            "always": "ElmToGren.Compat.Basics.always",
+            "toPolar": "ElmToGren.Compat.Basics.toPolar",
+            "fromPolar": "ElmToGren.Compat.Basics.fromPolar"
+          },
+          "types": {}
+        },
+        {
+          "source": "List",
+          "target": "Array",
+          "values": {
+            "(::)": "pushFirst",
+            "filter": "keepIf",
+            "filterMap": "mapAndKeepJust",
+            "sum": "ElmToGren.Compat.List.sum",
+            "product": "ElmToGren.Compat.List.product",
+            "concat": "flatten",
+            "concatMap": "mapAndFlatten",
+            "map4": "ElmToGren.Compat.List.map4",
+            "map5": "ElmToGren.Compat.List.map5",
+            "head": "first",
+            "tail": "ElmToGren.Compat.List.tail",
+            "take": "takeFirst",
+            "drop": "dropFirst",
+            "partition": "ElmToGren.Compat.List.partition",
+            "unzip": "ElmToGren.Compat.List.unzip"
+          },
+          "types": {
+            "List": "Array"
+          }
+        },
+        {
+          "source": "Array",
+          "target": "Array",
+          "values": {
+            "empty": "ElmToGren.Compat.Array.empty",
+            "initialize": "ElmToGren.Compat.Array.initialize",
+            "fromList": "ElmToGren.Compat.Array.fromList",
+            "push": "pushLast",
+            "toList": "ElmToGren.Compat.Array.toList",
+            "toIndexedList": "ElmToGren.Compat.Array.toIndexedList",
+            "filter": "keepIf"
+          },
+          "types": {
+            "Array": "Array"
+          }
+        },
+        {
+          "source": "Tuple",
+          "target": "ElmToGren.Compat.Tuple",
+          "values": {},
+          "types": {}
+        },
+        {
+          "source": "String",
+          "target": "String",
+          "values": {
+            "length": "count",
+            "concat": "ElmToGren.Compat.String.concat",
+            "left": "takeFirst",
+            "right": "takeLast",
+            "dropLeft": "dropFirst",
+            "dropRight": "dropLast",
+            "indexes": "indices",
+            "cons": "pushFirst",
+            "uncons": "ElmToGren.Compat.String.uncons",
+            "toList": "toArray",
+            "fromList": "fromArray",
+            "filter": "keepIf"
+          },
+          "types": {
+            "String": "String"
+          }
+        },
+        {
+          "source": "Dict",
+          "target": "Dict",
+          "values": {
+            "insert": "set",
+            "size": "count",
+            "toList": "ElmToGren.Compat.Dict.toList",
+            "fromList": "ElmToGren.Compat.Dict.fromList",
+            "filter": "keepIf",
+            "partition": "ElmToGren.Compat.Dict.partition"
+          },
+          "types": {
+            "Dict": "Dict"
+          }
+        },
+        {
+          "source": "Set",
+          "target": "Set",
+          "values": {
+            "insert": "set",
+            "size": "count",
+            "toList": "toArray",
+            "fromList": "fromArray",
+            "filter": "keepIf",
+            "partition": "ElmToGren.Compat.Set.partition"
+          },
+          "types": {
+            "Set": "Set"
+          }
+        },
+        {
+          "source": "Maybe",
+          "target": "Maybe",
+          "values": {
+            "map4": "ElmToGren.Compat.Maybe.map4",
+            "map5": "ElmToGren.Compat.Maybe.map5"
+          },
+          "types": {
+            "Maybe": "Maybe"
+          }
+        },
+        {
+          "source": "Result",
+          "target": "Result",
+          "values": {
+            "map4": "ElmToGren.Compat.Result.map4",
+            "map5": "ElmToGren.Compat.Result.map5"
+          },
+          "types": {
+            "Result": "Result"
+          }
+        },
+        {
+          "source": "Task",
+          "target": "Task",
+          "values": {
+            "map4": "ElmToGren.Compat.Task.map4",
+            "map5": "ElmToGren.Compat.Task.map5"
+          },
+          "types": {
+            "Task": "Task"
+          }
+        },
+        { "source": "Char", "target": "Char", "values": {}, "types": { "Char": "Char" } },
+        { "source": "Bitwise", "target": "Bitwise", "values": {}, "types": {} },
+        { "source": "Debug", "target": "Debug", "values": {}, "types": {} },
+        { "source": "Platform", "target": "Platform", "values": {}, "types": {} },
+        { "source": "Platform.Cmd", "target": "Platform.Cmd", "values": {}, "types": { "Cmd": "Cmd" } },
+        { "source": "Platform.Sub", "target": "Platform.Sub", "values": {}, "types": { "Sub": "Sub" } },
+        { "source": "Process", "target": "Process", "values": {}, "types": {} }
+      ]
+    },
+    {
+      "kind": "absorbed",
+      "elmPackage": "elm/json",
+      "grenPackage": "gren-lang/core",
+      "grenVersion": "7.4.2",
+      "platform": "common",
+      "modules": [
+        {
+          "source": "Json.Decode",
+          "target": "Json.Decode",
+          "values": {
+            "list": "array",
+            "keyValuePairs": "ElmToGren.Compat.Json.Decode.keyValuePairs"
+          },
+          "types": { "Decoder": "Decoder", "Value": "Value", "Error": "Error" }
+        },
+        {
+          "source": "Json.Encode",
+          "target": "Json.Encode",
+          "values": {
+            "list": "array",
+            "object": "ElmToGren.Compat.Json.Encode.object"
+          },
+          "types": { "Value": "Value" }
+        }
+      ]
+    },
+    {
+      "kind": "absorbed",
+      "elmPackage": "elm/time",
+      "grenPackage": "gren-lang/core",
+      "grenVersion": "7.4.2",
+      "platform": "common",
+      "modules": [
+        { "source": "Time", "target": "Time", "values": {}, "types": {} }
+      ]
+    },
+    {
+      "kind": "absorbed",
+      "elmPackage": "elm/random",
+      "grenPackage": "gren-lang/core",
+      "grenVersion": "7.4.2",
+      "platform": "common",
+      "modules": [
+        {
+          "source": "Random",
+          "target": "Random",
+          "values": {
+            "list": "array",
+            "weighted": "ElmToGren.Compat.Random.weighted",
+            "map4": "ElmToGren.Compat.Random.map4",
+            "map5": "ElmToGren.Compat.Random.map5"
+          },
+          "types": { "Generator": "Generator", "Seed": "Seed" }
+        }
+      ]
+    },
+    {
+      "kind": "absorbed",
+      "elmPackage": "elm/bytes",
+      "grenPackage": "gren-lang/core",
+      "grenVersion": "7.4.2",
+      "platform": "common",
+      "modules": [
+        { "source": "Bytes", "target": "Bytes", "values": { "width": "length" }, "types": {} },
+        { "source": "Bytes.Encode", "target": "Bytes.Encode", "values": {}, "types": {} },
+        { "source": "Bytes.Decode", "target": "Bytes.Decode", "values": {}, "types": {} }
+      ]
+    },
+    {
+      "kind": "absorbed",
+      "elmPackage": "elm/regex",
+      "grenPackage": "gren-lang/core",
+      "grenVersion": "7.4.2",
+      "platform": "common",
+      "modules": [
+        { "source": "Regex", "target": "String.Regex", "values": {}, "types": {} }
+      ]
+    },
+    {
+      "kind": "gren-analogue",
+      "elmPackage": "elm/browser",
+      "grenPackage": "gren-lang/browser",
+      "grenVersion": "6.0.2",
+      "platform": "browser",
+      "modules": [
+        { "source": "Browser", "target": "Browser", "values": {}, "types": {} },
+        { "source": "Browser.Dom", "target": "Browser.Dom", "values": {}, "types": {} },
+        { "source": "Browser.Events", "target": "Browser.Events", "values": {}, "types": {} },
+        { "source": "Browser.Navigation", "target": "Browser.Navigation", "values": {}, "types": {} }
+      ]
+    },
+    {
+      "kind": "absorbed",
+      "elmPackage": "elm/html",
+      "grenPackage": "gren-lang/browser",
+      "grenVersion": "6.0.2",
+      "platform": "browser",
+      "modules": [
+        { "source": "Html", "target": "Html", "values": {}, "types": {} },
+        { "source": "Html.Attributes", "target": "Html.Attributes", "values": {}, "types": {} },
+        { "source": "Html.Events", "target": "Html.Events", "values": {}, "types": {} },
+        { "source": "Html.Keyed", "target": "Html.Keyed", "values": {}, "types": {} },
+        { "source": "Html.Lazy", "target": "Html.Lazy", "values": {}, "types": {} }
+      ]
+    },
+    {
+      "kind": "absorbed",
+      "elmPackage": "elm/svg",
+      "grenPackage": "gren-lang/browser",
+      "grenVersion": "6.0.2",
+      "platform": "browser",
+      "modules": [
+        { "source": "Svg", "target": "Svg", "values": {}, "types": {} },
+        { "source": "Svg.Attributes", "target": "Svg.Attributes", "values": {}, "types": {} },
+        { "source": "Svg.Events", "target": "Svg.Events", "values": {}, "types": {} },
+        { "source": "Svg.Keyed", "target": "Svg.Keyed", "values": {}, "types": {} },
+        { "source": "Svg.Lazy", "target": "Svg.Lazy", "values": {}, "types": {} }
+      ]
+    },
+    {
+      "kind": "absorbed",
+      "elmPackage": "elm/virtual-dom",
+      "grenPackage": "gren-lang/browser",
+      "grenVersion": "6.0.2",
+      "platform": "browser",
+      "modules": [
+        { "source": "VirtualDom", "target": "VirtualDom", "values": {}, "types": {} }
+      ]
+    },
+    {
+      "kind": "absorbed",
+      "elmPackage": "elm/http",
+      "grenPackage": "gren-lang/browser",
+      "grenVersion": "6.0.2",
+      "platform": "browser",
+      "modules": [
+        { "source": "Http", "target": "Http", "values": {}, "types": {} }
+      ]
+    },
+    {
+      "kind": "absorbed",
+      "elmPackage": "elm/file",
+      "grenPackage": "gren-lang/browser",
+      "grenVersion": "6.0.2",
+      "platform": "browser",
+      "modules": [
+        { "source": "File", "target": "File", "values": {}, "types": {} },
+        { "source": "File.Select", "target": "File.Select", "values": {}, "types": {} },
+        { "source": "File.Download", "target": "File.Download", "values": {}, "types": {} }
+      ]
+    },
+    {
+      "kind": "gren-analogue",
+      "elmPackage": "elm/url",
+      "grenPackage": "gren-lang/url",
+      "grenVersion": "6.0.0",
+      "platform": "common",
+      "modules": [
+        { "source": "Url", "target": "Url", "values": {}, "types": {} },
+        { "source": "Url.Builder", "target": "Url.Builder", "values": {}, "types": {} },
+        { "source": "Url.Parser", "target": "Url.Parser", "values": {}, "types": {} },
+        { "source": "Url.Parser.Query", "target": "Url.Parser.Query", "values": {}, "types": {} }
+      ]
+    },
+    {
+      "kind": "gren-analogue",
+      "elmPackage": "elm/parser",
+      "grenPackage": "gren-lang/parser",
+      "grenVersion": "6.2.1",
+      "platform": "common",
+      "modules": [
+        { "source": "Parser", "target": "Parser", "values": {}, "types": {} },
+        { "source": "Parser.Advanced", "target": "Parser.Advanced", "values": {}, "types": {} }
+      ]
+    },
+    {
+      "kind": "gren-analogue",
+      "elmPackage": "elm-explorations/test",
+      "grenPackage": "gren-lang/test",
+      "grenVersion": "5.0.0",
+      "platform": "common",
+      "modules": [
+        { "source": "Test", "target": "Test", "values": {}, "types": {} },
+        { "source": "Test.Runner", "target": "Test.Runner", "values": {}, "types": {} },
+        { "source": "Test.Runner.Failure", "target": "Test.Runner.Failure", "values": {}, "types": {} },
+        { "source": "Test.Runner.String", "target": "Test.Runner.String", "values": {}, "types": {} },
+        { "source": "Test.Distribution", "target": "Test.Distribution", "values": {}, "types": {} },
+        { "source": "Expect", "target": "Expect", "values": {}, "types": {} },
+        { "source": "Fuzz", "target": "Fuzz", "values": {}, "types": {} }
+      ]
+    },
+    {
+      "kind": "gren-analogue",
+      "elmPackage": "avh4/elm-color",
+      "grenPackage": "aramiscd/gren-color",
+      "grenVersion": "1.0.1",
+      "platform": "common",
+      "modules": [
+        {
+          "source": "Color",
+          "target": "Color",
+          "values": {},
+          "types": { "Color": "Color" }
+        }
+      ]
+    }
+  ]
+}

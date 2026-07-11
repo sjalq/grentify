@@ -1,0 +1,835 @@
+module Port.Orchestrator exposing
+    ( Context
+    , Outcome
+    , Permissions
+    , run
+    )
+
+import Array exposing (Array)
+import Bytes
+import Bytes.Decode as BytesDecode
+import ChildProcess
+import Cli
+import Compiler.Platform as GrenPlatform
+import Crypto
+import Dict exposing (Dict)
+import Elm.Acquire as Acquire
+import Elm.Manifest exposing (Manifest)
+import Elm.PackageName as PackageName exposing (Name)
+import Elm.Semver as Semver
+import Emit.Workspace as Workspace
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import HttpClient
+import Json.Encode as Encode
+import Mapping.Adapter as Adapter exposing (AdapterError(..))
+import Mapping.Load
+import Mapping.Registry as MappingRegistry
+import Mapping.Types as Mapping exposing (MappingKind(..), Registry)
+import Math
+import Node
+import Port.Error as PortError exposing (Error)
+import Port.Plan as Plan
+import Resolve.Online
+import Resolve.Solver as Solver exposing (Resolution)
+import Review.Runner
+import System.File
+import System.Process
+import Task exposing (Task)
+import Transform.Pipeline as Pipeline
+import Verify.Package
+
+
+type alias Context =
+    { platform : Node.Platform
+    , workingDirectory : Path
+    , homeDirectory : Path
+    , applicationPath : Path
+    , toolVersion : String
+    }
+
+
+type alias Permissions =
+    { fileSystem : FileSystem.Permission
+    , childProcess : ChildProcess.Permission
+    , http : HttpClient.Permission
+    }
+
+
+type alias Outcome =
+    { output : Path
+    , rootPackage : String
+    , packageCount : Int
+    , report : String
+    }
+
+
+type alias Assets =
+    { root : Path
+    , mappings : Path
+    , review : Path
+    , elmReviewExecutable : String
+    , grenExecutable : String
+    }
+
+
+type alias Draft =
+    { source : Acquire.PackageSource
+    , modules : Array Mapping.GeneratedModule
+    , diagnostics : Array Pipeline.Diagnostic
+    , detectedPlatform : Mapping.Platform
+    }
+
+
+type alias Planned =
+    { identities : Dict String Plan.Identity
+    , targets : Dict String String
+    , packages : Array Workspace.Package
+    , diagnostics : Array Pipeline.Diagnostic
+    }
+
+
+run : Context -> Permissions -> Cli.Options -> Task Error Outcome
+run context permissions cliOptions =
+    let
+        output =
+            System.File.resolve context.platform context.workingDirectory cliOptions.outputDirectory
+
+        cache =
+            System.File.resolve context.platform context.workingDirectory cliOptions.cacheDirectory
+
+        acquireOptions =
+            { cacheDirectory = cache
+            , registryBaseUrl = "https://package.elm-lang.org"
+            , offline = cliOptions.offline
+            }
+    in
+    locateAssets context permissions.fileSystem
+        |> Task.andThen
+            (\assets ->
+                let
+                    overlays =
+                        Array.map
+                            (System.File.resolve context.platform context.workingDirectory)
+                            cliOptions.mappingFiles
+                in
+                Mapping.Load.load permissions.fileSystem assets.mappings overlays
+                    |> Task.andThen
+                        (\registry ->
+                            Acquire.parseInput context.platform context.workingDirectory context.homeDirectory cliOptions.input
+                                |> resultTask identity
+                                |> Task.andThen (Acquire.acquire context.platform permissions acquireOptions)
+                                |> Task.andThen
+                                    (\rootSource ->
+                                        resolveGraph permissions acquireOptions registry rootSource
+                                            |> Task.andThen
+                                                (\resolution ->
+                                                    acquireSources context.platform permissions acquireOptions rootSource resolution
+                                                        |> Task.andThen
+                                                            (transformSources context permissions cache cliOptions.offline assets registry resolution)
+                                                        |> Task.andThen
+                                                            (\drafts ->
+                                                                planPackages cliOptions registry resolution drafts
+                                                                    |> resultTask identity
+                                                            )
+                                                        |> Task.andThen
+                                                            (\planned ->
+                                                                finalize context permissions cliOptions output overlays assets registry resolution planned
+                                                            )
+                                                )
+                                    )
+                        )
+            )
+
+
+resolveGraph : Permissions -> Acquire.Options -> Registry -> Acquire.PackageSource -> Task Error Resolution
+resolveGraph permissions acquireOptions registry rootSource =
+    Resolve.Online.resolve
+        { isMapped =
+            \name ->
+                when MappingRegistry.mappingFor (PackageName.toString name) registry is
+                    Just mapping ->
+                        Mapping.mappingKind mapping /= TranspileKind
+
+                    Nothing ->
+                        False
+        }
+        { versionsFor = Acquire.loadVersions permissions acquireOptions
+        , manifestFor = Acquire.loadManifest permissions acquireOptions
+        }
+        rootSource.manifest
+
+
+acquireSources
+    : Node.Platform
+    -> Permissions
+    -> Acquire.Options
+    -> Acquire.PackageSource
+    -> Resolution
+    -> Task Error (Dict String Acquire.PackageSource)
+acquireSources platform permissions options rootSource resolution =
+    resolution.order
+        |> Array.foldl
+            (\name pending ->
+                pending
+                    |> Task.andThen
+                        (\sources ->
+                            let
+                                key =
+                                    PackageName.toString name
+                            in
+                            if key == PackageName.toString rootSource.manifest.name then
+                                Task.succeed (Dict.set key rootSource sources)
+
+                            else
+                                when Dict.get key resolution.packages is
+                                    Nothing ->
+                                        Task.fail <|
+                                            PortError.create "INTERNAL_ERROR"
+                                                ("Resolved package " ++ key ++ " has no manifest.")
+
+                                    Just resolved ->
+                                        Acquire.acquire platform permissions options
+                                            (Acquire.RegistryPackage
+                                                { name = resolved.manifest.name
+                                                , version = Just resolved.manifest.version
+                                                }
+                                            )
+                                            |> Task.map (\source -> Dict.set key source sources)
+                        )
+            )
+            (Task.succeed Dict.empty)
+
+
+transformSources
+    : Context
+    -> Permissions
+    -> Path
+    -> Bool
+    -> Assets
+    -> Registry
+    -> Resolution
+    -> Dict String Acquire.PackageSource
+    -> Task Error (Dict String Draft)
+transformSources context permissions cache offline assets registry resolution sources =
+    let
+        elmHome =
+            Path.join [ cache, Path.fromPosixString "elm-home" ]
+    in
+    System.File.ensureDirectory permissions.fileSystem elmHome
+        |> Task.andThen
+            (\_ ->
+                resolution.order
+                    |> Array.foldl
+                        (\name pending ->
+                            pending
+                                |> Task.andThen
+                                    (\drafts ->
+                                        let
+                                            key =
+                                                PackageName.toString name
+                                        in
+                                        when Dict.get key sources is
+                                            Nothing ->
+                                                Task.fail <|
+                                                    PortError.create "INTERNAL_ERROR"
+                                                        ("Acquired source set is missing " ++ key ++ ".")
+
+                                            Just source ->
+                                                transformOne context permissions elmHome offline assets registry source
+                                                    |> Task.map (\draft -> Dict.set key draft drafts)
+                                    )
+                        )
+                        (Task.succeed Dict.empty)
+            )
+
+
+transformOne
+    : Context
+    -> Permissions
+    -> Path
+    -> Bool
+    -> Assets
+    -> Registry
+    -> Acquire.PackageSource
+    -> Task Error Draft
+transformOne context permissions elmHome offline assets registry source =
+    Task.map2
+        (\extraction sourceFiles -> { extraction = extraction, sourceFiles = sourceFiles })
+        (Review.Runner.run context.platform permissions.childProcess
+            { packageRoot = source.root
+            , elmJson = Path.join [ source.root, Path.fromPosixString "elm.json" ]
+            , reviewConfig = assets.review
+            , executable = assets.elmReviewExecutable
+            , elmHome = Just elmHome
+            , files = [ "src" ]
+            , offline = offline
+            }
+        )
+        (readSources permissions.fileSystem source)
+        |> Task.andThen
+            (\inputs ->
+                Pipeline.transform registry inputs.extraction inputs.sourceFiles
+                    |> resultTask identity
+            )
+        |> Task.andThen
+            (\transformed ->
+                let
+                    hardErrors =
+                        Array.keepIf (\diagnostic -> diagnostic.severity == "error") transformed.diagnostics
+                in
+                if not (Array.isEmpty hardErrors) then
+                    Task.fail <|
+                        PortError.create "UNSUPPORTED_FEATURE"
+                            (hardErrors
+                                |> Array.map .message
+                                |> String.join "\n"
+                            )
+
+                else
+                    Adapter.generateFromRequirements transformed.requiredAdapters
+                        |> Result.mapError adapterFailure
+                        |> Result.andThen
+                            (\adapters ->
+                                parseDetectedPlatform transformed.detectedPlatform
+                                    |> Result.map
+                                        (\detectedPlatform ->
+                                            { source = source
+                                            , modules = Array.append transformed.modules adapters
+                                            , diagnostics = transformed.diagnostics
+                                            , detectedPlatform = detectedPlatform
+                                            }
+                                        )
+                            )
+                        |> resultTask identity
+            )
+
+
+readSources : FileSystem.Permission -> Acquire.PackageSource -> Task Error (Array Pipeline.SourceFile)
+readSources permission packageSource =
+    packageSource.sourceFiles
+        |> Array.foldl
+            (\filename pending ->
+                pending
+                    |> Task.andThen
+                        (\sources ->
+                            relativeSourcePath packageSource.root filename
+                                |> resultTask identity
+                                |> Task.andThen
+                                    (\relative ->
+                                        System.File.readText permission filename
+                                            |> Task.map
+                                                (\contents ->
+                                                    Array.pushLast
+                                                        { path = relative
+                                                        , source = contents
+                                                        }
+                                                        sources
+                                                )
+                                    )
+                        )
+            )
+            (Task.succeed [])
+
+
+relativeSourcePath : Path -> Path -> Result Error String
+relativeSourcePath root filename =
+    let
+        rootString =
+            String.trimRight (Path.toPosixString root) ++ "/"
+
+        filenameString =
+            Path.toPosixString filename
+    in
+    if String.startsWith rootString filenameString then
+        Ok (String.dropFirst (String.count rootString) filenameString)
+
+    else
+        Err <|
+            PortError.create "SOURCE_INVALID"
+                ("Elm source " ++ filenameString ++ " escapes " ++ rootString ++ ".")
+
+
+planPackages : Cli.Options -> Registry -> Resolution -> Dict String Draft -> Result Error Planned
+planPackages cliOptions registry resolution drafts =
+    resolution.order
+        |> Array.foldl
+            (\name accumulated ->
+                accumulated
+                    |> Result.andThen
+                        (\state -> planOne cliOptions registry resolution drafts name state)
+            )
+            (Ok
+                { identities = Dict.empty
+                , targets = Dict.empty
+                , packages = []
+                , diagnostics = []
+                }
+            )
+
+
+planOne : Cli.Options -> Registry -> Resolution -> Dict String Draft -> Name -> Planned -> Result Error Planned
+planOne cliOptions registry resolution drafts name state =
+    let
+        key =
+            PackageName.toString name
+
+        rootKey =
+            PackageName.toString resolution.root
+    in
+    when Dict.get key drafts is
+        Nothing ->
+            Err (PortError.create "INTERNAL_ERROR" ("Transformed source set is missing " ++ key ++ "."))
+
+        Just draft ->
+            let
+                dependencyPlatforms =
+                    draft.source.manifest.dependencies
+                        |> Dict.keys
+                        |> Array.mapAndKeepJust (\dependency -> Dict.get dependency state.identities)
+                        |> Array.map .platform
+            in
+            Result.map2
+                (\grenName platform -> { grenName = grenName, platform = platform })
+                (Plan.targetName cliOptions.namespace registry draft.source.manifest)
+                (Plan.inferPackagePlatform
+                    cliOptions.platform
+                    (key == rootKey)
+                    registry
+                    draft.source.manifest
+                    dependencyPlatforms
+                    draft.detectedPlatform
+                )
+                |> Result.andThen
+                    (\plannedIdentity ->
+                        let
+                            identityRecord =
+                                { elmName = key
+                                , grenName = plannedIdentity.grenName
+                                , version = Semver.versionToString draft.source.manifest.version
+                                , platform = plannedIdentity.platform
+                                }
+                        in
+                        when Dict.get plannedIdentity.grenName state.targets is
+                            Just otherElmName ->
+                                Err <|
+                                    PortError.create "PACKAGE_NAME_COLLISION"
+                                        (key ++ " and " ++ otherElmName ++ " map to " ++ plannedIdentity.grenName ++ ".")
+
+                            Nothing ->
+                                Plan.buildManifest
+                                    { source = draft.source.manifest
+                                    , identity = identityRecord
+                                    , registry = registry
+                                    , rootElmName = rootKey
+                                    , localDependencies = state.identities
+                                    }
+                                    |> Result.map
+                                        (\manifest ->
+                                            { identities = Dict.set key identityRecord state.identities
+                                            , targets = Dict.set plannedIdentity.grenName key state.targets
+                                            , packages =
+                                                Array.pushLast
+                                                    { sourcePackage = key
+                                                    , sourceRoot = draft.source.root
+                                                    , manifest = manifest
+                                                    , modules = draft.modules
+                                                    }
+                                                    state.packages
+                                            , diagnostics = Array.append state.diagnostics draft.diagnostics
+                                            }
+                                        )
+                    )
+
+
+finalize
+    : Context
+    -> Permissions
+    -> Cli.Options
+    -> Path
+    -> Array Path
+    -> Assets
+    -> Registry
+    -> Resolution
+    -> Planned
+    -> Task Error Outcome
+finalize context permissions cliOptions output overlayPaths assets registry resolution planned =
+    let
+        rootKey =
+            PackageName.toString resolution.root
+    in
+    when Dict.get rootKey planned.identities is
+        Nothing ->
+            Task.fail (PortError.create "INTERNAL_ERROR" "Root package identity was not planned.")
+
+        Just rootIdentity ->
+            Task.map2
+                (\resolvedCompilerVersion resolvedMappingDigest ->
+                    { compilerVersion = resolvedCompilerVersion
+                    , mappingDigest = resolvedMappingDigest
+                    }
+                )
+                (compilerVersion context.platform permissions.childProcess assets.grenExecutable)
+                (mappingDigest permissions.fileSystem assets.mappings overlayPaths)
+                |> Task.andThen
+                    (\metadata ->
+                        let
+                            report =
+                                encodeReport context cliOptions output rootIdentity metadata.compilerVersion planned
+
+                            lockfile =
+                                encodeLock resolution rootIdentity metadata.compilerVersion metadata.mappingDigest planned
+
+                            validate staging =
+                                if cliOptions.verify then
+                                    verifyStaging context.platform permissions.childProcess assets.grenExecutable rootIdentity planned staging
+
+                                else
+                                    Task.succeed {}
+                        in
+                        Workspace.emit
+                            { fileSystem = permissions.fileSystem }
+                            { output = output
+                            , rootPackage = rootIdentity.grenName
+                            , packages = planned.packages
+                            , lockfile = lockfile
+                            , report = report
+                            , validateBeforeCommit = validate
+                            }
+                            |> Task.map
+                                (\_ ->
+                                    { output = output
+                                    , rootPackage = rootIdentity.grenName
+                                    , packageCount = Array.length planned.packages
+                                    , report = report
+                                    }
+                                )
+                    )
+
+
+verifyStaging : Node.Platform -> ChildProcess.Permission -> String -> Plan.Identity -> Planned -> Path -> Task Error {}
+verifyStaging platform permission grenExecutable rootIdentity planned staging =
+    planned.packages
+        |> Array.foldl
+            (\package pending ->
+                pending
+                    |> Task.andThen
+                        (\_ ->
+                            let
+                                directory =
+                                    if package.manifest.name == rootIdentity.grenName then
+                                        staging
+
+                                    else
+                                        Path.join
+                                            [ staging
+                                            , Path.fromPosixString ".elm-to-gren/packages"
+                                            , Path.fromPosixString
+                                                (Workspace.packageDirectoryName
+                                                    { name = package.manifest.name
+                                                    , version = package.manifest.version
+                                                    }
+                                                )
+                                            ]
+                            in
+                            Verify.Package.verify platform permission
+                                { packageDirectory = directory
+                                , grenExecutable = grenExecutable
+                                }
+                        )
+            )
+            (Task.succeed {})
+
+
+locateAssets : Context -> FileSystem.Permission -> Task Error Assets
+locateAssets context permission =
+    let
+        applicationRoot =
+            context.applicationPath
+                |> Path.parentPath
+                |> Maybe.andThen Path.parentPath
+                |> Maybe.withDefault context.workingDirectory
+
+        candidates =
+            [ applicationRoot, context.workingDirectory ]
+    in
+    findAssetRoot permission candidates
+        |> Task.andThen
+            (\root ->
+                Task.map2
+                    (\elmReviewExecutable grenExecutable ->
+                        { root = root
+                        , mappings = Path.join [ root, Path.fromPosixString "mappings/builtin.json" ]
+                        , review = Path.join [ root, Path.fromPosixString "review" ]
+                        , elmReviewExecutable = elmReviewExecutable
+                        , grenExecutable = grenExecutable
+                        }
+                    )
+                    (binary context.platform permission root "elm-review")
+                    (binary context.platform permission root "gren")
+            )
+
+
+findAssetRoot : FileSystem.Permission -> Array Path -> Task Error Path
+findAssetRoot permission candidates =
+    when Array.popFirst candidates is
+        Nothing ->
+            Task.fail (PortError.create "ASSET_NOT_FOUND" "Could not locate bundled mappings and elm-review rules.")
+
+        Just { first = candidate, rest } ->
+            Task.map2 (&&)
+                (System.File.exists permission (Path.join [ candidate, Path.fromPosixString "mappings/builtin.json" ]))
+                (System.File.exists permission (Path.join [ candidate, Path.fromPosixString "review/elm.json" ]))
+                |> Task.andThen
+                    (\valid ->
+                        if valid then
+                            Task.succeed candidate
+
+                        else
+                            findAssetRoot permission rest
+                    )
+
+
+binary : Node.Platform -> FileSystem.Permission -> Path -> String -> Task error String
+binary platform permission root name =
+    let
+        binDirectory =
+            Path.join [ root, Path.fromPosixString "node_modules/.bin" ]
+
+        candidates =
+            when platform is
+                Node.Win32 ->
+                    -- npm installs Windows cmd shims as name.cmd; prefer those so
+                    -- ChildProcess.NoShell can spawn without a shell.
+                    [ Path.join [ binDirectory, Path.fromPosixString (name ++ ".cmd") ]
+                    , Path.join [ binDirectory, Path.fromPosixString name ]
+                    ]
+
+                _ ->
+                    [ Path.join [ binDirectory, Path.fromPosixString name ] ]
+    in
+    firstExistingBinary platform permission candidates name
+
+
+firstExistingBinary : Node.Platform -> FileSystem.Permission -> Array Path -> String -> Task error String
+firstExistingBinary platform permission candidates fallback =
+    when Array.popFirst candidates is
+        Nothing ->
+            Task.succeed fallback
+
+        Just { first = candidate, rest } ->
+            System.File.exists permission candidate
+                |> Task.andThen
+                    (\exists ->
+                        if exists then
+                            Task.succeed (System.File.pathToString platform candidate)
+
+                        else
+                            firstExistingBinary platform permission rest fallback
+                    )
+
+
+compilerVersion : Node.Platform -> ChildProcess.Permission -> String -> Task Error String
+compilerVersion platform permission executable =
+    System.Process.run permission
+        { program = executable
+        , arguments = [ "--version" ]
+        , workingDirectory = "."
+        , environment = Dict.empty
+        , allowedExitCodes = [ 0 ]
+        , timeoutMilliseconds = 30 * 1000
+        , maximumOutputBytes = 1024 * 1024
+        }
+        |> Task.andThen
+            (\output ->
+                let
+                    value =
+                        String.trim output.stdout
+                in
+                when Semver.parseVersion value is
+                    Ok _ ->
+                        Task.succeed value
+
+                    Err _ ->
+                        Task.fail (PortError.create "GREN_VERIFY_FAILED" "Gren returned an invalid version string.")
+            )
+
+
+mappingDigest : FileSystem.Permission -> Path -> Array Path -> Task Error String
+mappingDigest permission builtin overlays =
+    Array.pushFirst builtin overlays
+        |> Array.foldl
+            (\path pending ->
+                pending
+                    |> Task.andThen
+                        (\texts ->
+                            System.File.readText permission path
+                                |> Task.map (\text -> Array.pushLast (Path.toPosixString path ++ "\n" ++ text) texts)
+                        )
+            )
+            (Task.succeed [])
+        |> Task.andThen
+            (\texts ->
+                Crypto.getSecureContext
+                    |> Task.mapError (\_ -> PortError.create "CRYPTO_FAILED" "Could not initialize SHA-256.")
+                    |> Task.andThen
+                        (\context -> Crypto.digest context Crypto.Sha256 (Bytes.fromString (String.join "\n" texts)))
+                    |> Task.andThen
+                        (\digestBytes ->
+                            when bytesToHex digestBytes is
+                                Just hex ->
+                                    if String.isEmpty hex then
+                                        Task.fail (PortError.create "CRYPTO_FAILED" "SHA-256 digest was empty.")
+
+                                    else
+                                        Task.succeed hex
+
+                                Nothing ->
+                                    Task.fail (PortError.create "CRYPTO_FAILED" "Could not encode SHA-256 digest as hex.")
+                        )
+            )
+
+
+bytesToHex : Bytes.Bytes -> Maybe String
+bytesToHex bytes =
+    BytesDecode.decode
+        (BytesDecode.loop
+            { remaining = Bytes.length bytes, output = [] }
+            (\state ->
+                if state.remaining <= 0 then
+                    BytesDecode.succeed (BytesDecode.Done (String.join "" state.output))
+
+                else
+                    BytesDecode.unsignedInt8
+                        |> BytesDecode.map
+                            (\byte ->
+                                BytesDecode.Loop
+                                    { remaining = state.remaining - 1
+                                    , output = Array.pushLast (hexByte byte) state.output
+                                    }
+                            )
+            )
+        )
+        bytes
+
+
+hexByte value =
+    let
+        digits =
+            "0123456789abcdef"
+
+        high =
+            value // 16
+
+        low =
+            Math.modBy 16 value
+    in
+    String.slice high (high + 1) digits ++ String.slice low (low + 1) digits
+
+
+encodeReport context cliOptions output rootIdentity compiler planned =
+    Encode.object
+        [ { key = "schemaVersion", value = Encode.int 1 }
+        , { key = "root", value = Encode.string rootIdentity.grenName }
+        , { key = "toolVersion", value = Encode.string context.toolVersion }
+        , { key = "compilerVersion", value = Encode.string compiler }
+        , { key = "output", value = Encode.string (Path.toPosixString output) }
+        , { key = "verified", value = Encode.bool cliOptions.verify }
+        , { key = "packages", value = Encode.array encodePackage planned.packages }
+        , { key = "diagnostics", value = Encode.array encodeDiagnostic planned.diagnostics }
+        ]
+        |> Encode.encode 2
+
+
+encodeLock resolution rootIdentity compiler digest planned =
+    Encode.object
+        [ { key = "schemaVersion", value = Encode.int 1 }
+        , { key = "root", value = Encode.string (PackageName.toString resolution.root) }
+        , { key = "grenRoot", value = Encode.string rootIdentity.grenName }
+        , { key = "grenCompiler", value = Encode.string compiler }
+        , { key = "mappingDigest", value = Encode.string digest }
+        , { key = "packages", value = Encode.array (encodeLockPackage resolution planned) resolution.order }
+        ]
+        |> Encode.encode 2
+
+
+encodePackage package =
+    Encode.object
+        [ { key = "elmName", value = Encode.string package.sourcePackage }
+        , { key = "grenName", value = Encode.string package.manifest.name }
+        , { key = "version", value = Encode.string package.manifest.version }
+        , { key = "platform", value = GrenPlatform.toJson package.manifest.platform }
+        , { key = "moduleCount", value = Encode.int (Array.length package.modules) }
+        ]
+
+
+encodeLockPackage resolution planned name =
+    let
+        key =
+            PackageName.toString name
+
+        identityRecord =
+            Dict.get key planned.identities
+
+        version =
+            Dict.get key resolution.packages
+                |> Maybe.map (.manifest >> .version >> Semver.versionToString)
+                |> Maybe.withDefault ""
+    in
+    Encode.object
+        [ { key = "elmName", value = Encode.string key }
+        , { key = "elmVersion", value = Encode.string version }
+        , { key = "grenName", value = Encode.string (identityRecord |> Maybe.map .grenName |> Maybe.withDefault "") }
+        , { key = "strategy", value = Encode.string "transpile" }
+        ]
+
+
+encodeDiagnostic diagnostic =
+    Encode.object
+        [ { key = "code", value = Encode.string diagnostic.code }
+        , { key = "severity", value = Encode.string diagnostic.severity }
+        , { key = "message", value = Encode.string diagnostic.message }
+        , { key = "file", value = maybeString diagnostic.path }
+        , { key = "module", value = maybeString diagnostic.moduleName }
+        ]
+
+
+maybeString value =
+    when value is
+        Just string ->
+            Encode.string string
+
+        Nothing ->
+            Encode.null
+
+
+parseDetectedPlatform value =
+    when value is
+        "common" ->
+            Ok Mapping.Common
+
+        "browser" ->
+            Ok Mapping.Browser
+
+        "node" ->
+            Ok Mapping.Node
+
+        _ ->
+            Err (PortError.create "EXTRACTION_INVALID" ("Unknown detected platform " ++ value ++ "."))
+
+
+adapterFailure adapterError =
+    when adapterError is
+        UnknownAdapter details ->
+            PortError.create "INVALID_MAPPING"
+                ("Unknown compatibility adapter " ++ details.requirement ++ ".")
+
+
+resultTask : (problem -> Error) -> Result problem value -> Task Error value
+resultTask toError result =
+    when result is
+        Ok value ->
+            Task.succeed value
+
+        Err problem ->
+            Task.fail (toError problem)

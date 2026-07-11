@@ -1,0 +1,9 @@
+module ElmToGren.Compat.List exposing (sum)
+
+import Array exposing (Array)
+
+
+sum : Array number -> number
+sum values =
+    Array.foldl (+) 0 values
+

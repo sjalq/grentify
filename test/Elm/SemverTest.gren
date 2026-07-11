@@ -1,0 +1,99 @@
+module Elm.SemverTest exposing (tests)
+
+import Array exposing (Array)
+import Debug
+import Elm.Semver as Semver exposing (Bound(..))
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ parsesStrictVersions
+    , parsesCompactRanges
+    , evaluatesInclusiveAndExclusiveBounds
+    , intersectsRanges
+    , sortsNewestFirst
+    ]
+
+
+parsesCompactRanges : TestResult
+parsesCompactRanges =
+    Semver.parseRange "1.0.0<=v<2.0.0"
+        |> Result.map Semver.rangeToString
+        |> expectEqual "range parsing does not depend on whitespace" (Ok "1.0.0 <= v < 2.0.0")
+
+
+parsesStrictVersions : TestResult
+parsesStrictVersions =
+    let
+        valid =
+            Semver.parseVersion "12.3.40" == Ok { major = 12, minor = 3, patch = 40 }
+
+        invalid =
+            [ "1.2", "1.2.3.4", "01.2.3", "1.-2.3", "v1.2.3", "1.2.x" ]
+                |> Array.all (Semver.parseVersion >> Result.toMaybe >> (==) Nothing)
+    in
+    outcome "semantic versions use strict three-component syntax" (valid && invalid) "Strict version parsing did not match Elm semantics."
+
+
+evaluatesInclusiveAndExclusiveBounds : TestResult
+evaluatesInclusiveAndExclusiveBounds =
+    when { range = Semver.parseRange "1.0.0 <= v < 2.0.0", lower = Semver.parseVersion "1.0.0", upper = Semver.parseVersion "2.0.0" } is
+        { range = Ok range, lower = Ok lower, upper = Ok upper } ->
+            outcome
+                "range boundaries are evaluated exactly"
+                (Semver.satisfies range lower && not (Semver.satisfies range upper))
+                "An inclusive lower or exclusive upper bound was evaluated incorrectly."
+
+        values ->
+            outcome "range boundaries are evaluated exactly" False (Debug.toString values)
+
+
+intersectsRanges : TestResult
+intersectsRanges =
+    when { left = Semver.parseRange "1.0.0 <= v < 3.0.0", right = Semver.parseRange "2.0.0 <= v <= 4.0.0" } is
+        { left = Ok left, right = Ok right } ->
+            Semver.intersect left right
+                |> Maybe.map Semver.rangeToString
+                |> expectEqual "range intersection retains the strictest bounds" (Just "2.0.0 <= v < 3.0.0")
+
+        values ->
+            outcome "range intersection retains the strictest bounds" False (Debug.toString values)
+
+
+sortsNewestFirst : TestResult
+sortsNewestFirst =
+    let
+        versions =
+            [ { major = 1, minor = 0, patch = 2 }
+            , { major = 2, minor = 0, patch = 0 }
+            , { major = 1, minor = 9, patch = 0 }
+            ]
+    in
+    Semver.sortDescending versions
+        |> Array.map Semver.versionToString
+        |> expectEqual "versions are sorted newest-first" [ "2.0.0", "1.9.0", "1.0.2" ]
+
+
+expectEqual : String -> a -> a -> TestResult
+expectEqual name expected actual =
+    outcome name (expected == actual) ("Expected " ++ Debug.toString expected ++ ", got " ++ Debug.toString actual)
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed failureDetails =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            failureDetails
+    }

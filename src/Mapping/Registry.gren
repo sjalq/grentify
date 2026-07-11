@@ -1,0 +1,177 @@
+module Mapping.Registry exposing
+    ( empty
+    , fromDocument
+    , inferPlatform
+    , inferPlatformFromDependencyDicts
+    , mappingFor
+    , moduleMappingFor
+    , overlayDocument
+    , overlayDocuments
+    , packagesInOrder
+    )
+
+import Array
+import Dict exposing (Dict)
+import Mapping.Types exposing (MappingDocument, ModuleMapping, PackageMapping, Platform(..), PlatformInferenceError(..), Registry, mappingElmPackage, mappingModules, mappingPlatform, platformName)
+import Maybe exposing (Maybe(..))
+import Result exposing (Result(..))
+
+
+empty : Registry
+empty =
+    { packageOrder = []
+    , packages = Dict.empty
+    , modules = Dict.empty
+    }
+
+
+fromDocument : MappingDocument -> Registry
+fromDocument document =
+    overlayDocument document empty
+
+
+overlayDocuments : Array MappingDocument -> Registry
+overlayDocuments documents =
+    Array.foldl overlayDocument empty documents
+
+
+overlayDocument : MappingDocument -> Registry -> Registry
+overlayDocument document registry =
+    document.packages
+        |> Array.foldl overlayPackage registry
+        |> rebuildModules
+
+
+overlayPackage : PackageMapping -> Registry -> Registry
+overlayPackage mapping registry =
+    let
+        elmPackage =
+            mappingElmPackage mapping
+
+        nextOrder =
+            registry.packageOrder
+                |> Array.keepIf (\existing -> existing /= elmPackage)
+                |> Array.pushLast elmPackage
+    in
+    { registry
+        | packageOrder = nextOrder
+        , packages = Dict.set elmPackage mapping registry.packages
+    }
+
+
+rebuildModules : Registry -> Registry
+rebuildModules registry =
+    let
+        modules =
+            Array.foldl
+                (\elmPackage collected ->
+                    when Dict.get elmPackage registry.packages is
+                        Nothing ->
+                            collected
+
+                        Just mapping ->
+                            Array.foldl
+                                (\module_ current -> Dict.set module_.source module_ current)
+                                collected
+                                (mappingModules mapping)
+                )
+                Dict.empty
+                registry.packageOrder
+    in
+    { registry | modules = modules }
+
+
+mappingFor : String -> Registry -> Maybe PackageMapping
+mappingFor packageName registry =
+    Dict.get packageName registry.packages
+
+
+moduleMappingFor : String -> Registry -> Maybe ModuleMapping
+moduleMappingFor moduleName registry =
+    Dict.get moduleName registry.modules
+
+
+packagesInOrder : Registry -> Array PackageMapping
+packagesInOrder registry =
+    Array.mapAndKeepJust
+        (\packageName -> Dict.get packageName registry.packages)
+        registry.packageOrder
+
+
+inferPlatformFromDependencyDicts : Registry -> Dict String a -> Dict String b -> Array Platform -> Result PlatformInferenceError Platform
+inferPlatformFromDependencyDicts registry dependencies testDependencies inheritedPlatforms =
+    inferPlatform
+        registry
+        (Array.append (Dict.keys dependencies) (Dict.keys testDependencies))
+        inheritedPlatforms
+
+
+inferPlatform : Registry -> Array String -> Array Platform -> Result PlatformInferenceError Platform
+inferPlatform registry dependencyNames inheritedPlatforms =
+    let
+        inheritedEvidence =
+            inheritedPlatforms
+                |> Array.indexedMap
+                    (\index platform ->
+                        { platform = platform
+                        , source = "inherited[" ++ String.fromInt index ++ "]:" ++ platformName platform
+                        }
+                    )
+
+        mappedEvidence =
+            dependencyNames
+                |> uniqueSorted
+                |> Array.mapAndKeepJust
+                    (\dependencyName ->
+                        mappingFor dependencyName registry
+                            |> Maybe.andThen
+                                (\mapping ->
+                                    mappingPlatform mapping
+                                        |> Maybe.map
+                                            (\platform ->
+                                                { platform = platform
+                                                , source = dependencyName
+                                                }
+                                            )
+                                )
+                    )
+
+        evidence =
+            Array.append inheritedEvidence mappedEvidence
+
+        browserSources =
+            sourcesFor Browser evidence
+
+        nodeSources =
+            sourcesFor Node evidence
+    in
+    if not (Array.isEmpty browserSources) && not (Array.isEmpty nodeSources) then
+        Err
+            (BrowserAndNode
+                { browserSources = browserSources
+                , nodeSources = nodeSources
+                }
+            )
+
+    else if not (Array.isEmpty browserSources) then
+        Ok Browser
+
+    else if not (Array.isEmpty nodeSources) then
+        Ok Node
+
+    else
+        Ok Common
+
+
+sourcesFor platform evidence =
+    evidence
+        |> Array.keepIf (\item -> item.platform == platform)
+        |> Array.map .source
+        |> uniqueSorted
+
+
+uniqueSorted : Array String -> Array String
+uniqueSorted values =
+    values
+        |> Array.foldl (\value seen -> Dict.set value True seen) Dict.empty
+        |> Dict.keys

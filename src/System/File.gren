@@ -1,0 +1,153 @@
+module System.File exposing
+    ( ensureDirectory
+    , exists
+    , listFilesRecursively
+    , pathFromString
+    , pathToString
+    , readText
+    , resolve
+    , writeText
+    )
+
+import Bytes
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Node
+import Port.Error as PortError exposing (Error)
+import Task exposing (Task)
+
+
+pathFromString : Node.Platform -> String -> Path
+pathFromString platform value =
+    when platform is
+        Node.Win32 ->
+            Path.fromWin32String value
+
+        _ ->
+            Path.fromPosixString value
+
+
+pathToString : Node.Platform -> Path -> String
+pathToString platform path =
+    when platform is
+        Node.Win32 ->
+            Path.toWin32String path
+
+        _ ->
+            Path.toPosixString path
+
+
+resolve : Node.Platform -> Path -> String -> Path
+resolve platform workingDirectory value =
+    let
+        candidate =
+            pathFromString platform value
+    in
+    if String.isEmpty candidate.root then
+        Path.prepend workingDirectory candidate
+
+    else
+        candidate
+
+
+readText : FileSystem.Permission -> Path -> Task Error String
+readText permission path =
+    FileSystem.readFile permission path
+        |> Task.mapError
+            (\error ->
+                PortError.create "FILE_READ_FAILED"
+                    ("Could not read " ++ Path.toPosixString path ++ ": " ++ FileSystem.errorToString error)
+            )
+        |> Task.andThen
+            (\bytes ->
+                when Bytes.toString bytes is
+                    Just value ->
+                        Task.succeed value
+
+                    Nothing ->
+                        Task.fail <|
+                            PortError.create "FILE_READ_FAILED"
+                                (Path.toPosixString path ++ " is not valid UTF-8.")
+            )
+
+
+ensureDirectory : FileSystem.Permission -> Path -> Task Error Path
+ensureDirectory permission path =
+    FileSystem.makeDirectory permission { recursive = True } path
+        |> Task.onError
+            (\error ->
+                if FileSystem.errorIsFileExists error then
+                    Task.succeed path
+
+                else
+                    Task.fail <|
+                        PortError.create "DIRECTORY_CREATE_FAILED"
+                            ("Could not create " ++ Path.toPosixString path ++ ": " ++ FileSystem.errorToString error)
+            )
+
+
+exists : FileSystem.Permission -> Path -> Task x Bool
+exists permission path =
+    FileSystem.metadata permission { resolveLink = True } path
+        |> Task.map (\_ -> True)
+        |> Task.onError (\_ -> Task.succeed False)
+
+
+listFilesRecursively : FileSystem.Permission -> Path -> Task Error (Array Path)
+listFilesRecursively permission root =
+    FileSystem.listDirectory permission root
+        |> Task.mapError
+            (\error ->
+                PortError.create "DIRECTORY_READ_FAILED"
+                    ("Could not list " ++ Path.toPosixString root ++ ": " ++ FileSystem.errorToString error)
+            )
+        |> Task.andThen
+            (\entries ->
+                Array.foldl
+                    (\entry pending ->
+                        pending
+                            |> Task.andThen
+                                (\found ->
+                                    let
+                                        absolute =
+                                            Path.prepend root entry.path
+                                    in
+                                    when entry.entityType is
+                                        FileSystem.File ->
+                                            Task.succeed (Array.pushLast absolute found)
+
+                                        FileSystem.Directory ->
+                                            listFilesRecursively permission absolute
+                                                |> Task.map (Array.append found)
+
+                                        _ ->
+                                            Task.succeed found
+                                )
+                    )
+                    (Task.succeed [])
+                    entries
+            )
+
+
+writeText : FileSystem.Permission -> Path -> String -> Task Error Path
+writeText permission path contents =
+    let
+        ensureParent =
+            when Path.parentPath path is
+                Just parent ->
+                    ensureDirectory permission parent
+                        |> Task.map (\_ -> {})
+
+                Nothing ->
+                    Task.succeed {}
+    in
+    ensureParent
+        |> Task.andThen
+            (\_ ->
+                FileSystem.writeFile permission (Bytes.fromString contents) path
+                    |> Task.mapError
+                        (\error ->
+                            PortError.create "FILE_WRITE_FAILED"
+                                ("Could not write " ++ Path.toPosixString path ++ ": " ++ FileSystem.errorToString error)
+                        )
+            )

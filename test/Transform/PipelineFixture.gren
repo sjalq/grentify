@@ -1,0 +1,38 @@
+module Transform.PipelineFixture exposing (decode, magnitude, protected, select, unit)
+
+{-| This module is the compiler-backed form expected from PipelineTest's Elm fixture. -}
+
+import Array exposing (keepIf)
+import Json.Decode as Decode
+import Math
+
+
+decode : Decode.Decoder (Array String)
+decode =
+    Decode.array Decode.string
+
+
+select : Array Int -> Array Int
+select values =
+    when Array.keepIf (\value -> value > 0) values is
+        [] ->
+            []
+
+        kept ->
+            kept
+
+
+magnitude : Float -> Float
+magnitude value =
+    Math.sqrt value
+
+
+unit : {}
+unit =
+    {}
+
+
+protected : String
+protected =
+    "List.filter Basics.sqrt Json.Decode.list case of ()"
+

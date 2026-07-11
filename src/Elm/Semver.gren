@@ -1,0 +1,333 @@
+module Elm.Semver exposing
+    ( Version
+    , Range
+    , Bound(..)
+    , Error(..)
+    , parseVersion
+    , version
+    , versionToString
+    , compare
+    , parseRange
+    , rangeToString
+    , satisfies
+    , satisfiesVersion
+    , intersect
+    , sortDescending
+    , errorToString
+    )
+
+{-| Elm package versions and Elm's canonical package constraint syntax.
+-}
+
+import Array exposing (Array)
+import Char
+import String
+
+
+type alias Version =
+    { major : Int
+    , minor : Int
+    , patch : Int
+    }
+
+
+type Bound
+    = Inclusive
+    | Exclusive
+
+
+type alias Range =
+    { lower : Version
+    , lowerBound : Bound
+    , upper : Version
+    , upperBound : Bound
+    }
+
+
+type Error
+    = InvalidVersion String
+    | NegativeVersionComponent { component : String, value : Int }
+    | InvalidRange String
+    | EmptyRange String
+
+
+version : Int -> Int -> Int -> Result Error Version
+version major minor patch =
+    if major < 0 then
+        Err (NegativeVersionComponent { component = "major", value = major })
+
+    else if minor < 0 then
+        Err (NegativeVersionComponent { component = "minor", value = minor })
+
+    else if patch < 0 then
+        Err (NegativeVersionComponent { component = "patch", value = patch })
+
+    else
+        Ok { major = major, minor = minor, patch = patch }
+
+
+parseVersion : String -> Result Error Version
+parseVersion source =
+    let
+        pieces =
+            String.split "." source
+    in
+    if Array.length pieces /= 3 then
+        Err (InvalidVersion source)
+
+    else
+        when { major = Array.get 0 pieces, minor = Array.get 1 pieces, patch = Array.get 2 pieces } is
+            { major = Just major, minor = Just minor, patch = Just patch } ->
+                if validComponent major && validComponent minor && validComponent patch then
+                    when { major = String.toInt major, minor = String.toInt minor, patch = String.toInt patch } is
+                        { major = Just majorValue, minor = Just minorValue, patch = Just patchValue } ->
+                            version majorValue minorValue patchValue
+
+                        _ ->
+                            Err (InvalidVersion source)
+
+                else
+                    Err (InvalidVersion source)
+
+            _ ->
+                Err (InvalidVersion source)
+
+
+validComponent : String -> Bool
+validComponent component =
+    let
+        characters =
+            String.toArray component
+    in
+    not (Array.isEmpty characters)
+        && Array.all Char.isDigit characters
+        && (component == "0" || not (String.startsWith "0" component))
+
+
+versionToString : Version -> String
+versionToString semanticVersion =
+    String.fromInt semanticVersion.major
+        ++ "."
+        ++ String.fromInt semanticVersion.minor
+        ++ "."
+        ++ String.fromInt semanticVersion.patch
+
+
+compare : Version -> Version -> Order
+compare left right =
+    if left.major < right.major then
+        LT
+
+    else if left.major > right.major then
+        GT
+
+    else if left.minor < right.minor then
+        LT
+
+    else if left.minor > right.minor then
+        GT
+
+    else
+        Basics.compare left.patch right.patch
+
+
+parseRange : String -> Result Error Range
+parseRange source =
+    let
+        pieces =
+            source
+                |> String.replace "<=" " __ELM_LTE__ "
+                |> String.replace "<" " < "
+                |> String.replace "__ELM_LTE__" "<="
+                |> String.words
+    in
+    if Array.length pieces /= 5 then
+        Err (InvalidRange source)
+
+    else
+        when
+            { lower = Array.get 0 pieces
+            , lowerOperator = Array.get 1 pieces
+            , variable = Array.get 2 pieces
+            , upperOperator = Array.get 3 pieces
+            , upper = Array.get 4 pieces
+            }
+        is
+            { lower = Just lowerSource, lowerOperator = Just lowerOperator, variable = Just variable, upperOperator = Just upperOperator, upper = Just upperSource } ->
+                if variable /= "v" then
+                    Err (InvalidRange source)
+
+                else
+                    when { lower = parseBound lowerOperator, upper = parseBound upperOperator } is
+                        { lower = Just lowerBound, upper = Just upperBound } ->
+                            Result.map2
+                                (\lower upper ->
+                                    { lower = lower
+                                    , lowerBound = lowerBound
+                                    , upper = upper
+                                    , upperBound = upperBound
+                                    }
+                                )
+                                (parseVersion lowerSource)
+                                (parseVersion upperSource)
+                                |> Result.mapError (\_ -> InvalidRange source)
+                                |> Result.andThen (validateRange source)
+
+                        _ ->
+                            Err (InvalidRange source)
+
+            _ ->
+                Err (InvalidRange source)
+
+
+parseBound : String -> Maybe Bound
+parseBound operator =
+    if operator == "<=" then
+        Just Inclusive
+
+    else if operator == "<" then
+        Just Exclusive
+
+    else
+        Nothing
+
+
+validateRange : String -> Range -> Result Error Range
+validateRange source candidate =
+    when compare candidate.lower candidate.upper is
+        LT ->
+            Ok candidate
+
+        GT ->
+            Err (EmptyRange source)
+
+        EQ ->
+            if candidate.lowerBound == Inclusive && candidate.upperBound == Inclusive then
+                Ok candidate
+
+            else
+                Err (EmptyRange source)
+
+
+rangeToString : Range -> String
+rangeToString range =
+    versionToString range.lower
+        ++ " "
+        ++ boundToString range.lowerBound
+        ++ " v "
+        ++ boundToString range.upperBound
+        ++ " "
+        ++ versionToString range.upper
+
+
+boundToString : Bound -> String
+boundToString bound =
+    when bound is
+        Inclusive ->
+            "<="
+
+        Exclusive ->
+            "<"
+
+
+satisfies : Range -> Version -> Bool
+satisfies range candidate =
+    let
+        lowerComparison =
+            compare candidate range.lower
+
+        upperComparison =
+            compare candidate range.upper
+    in
+    (lowerComparison == GT || (lowerComparison == EQ && range.lowerBound == Inclusive))
+        && (upperComparison == LT || (upperComparison == EQ && range.upperBound == Inclusive))
+
+
+satisfiesVersion : Version -> Range -> Bool
+satisfiesVersion candidate range =
+    satisfies range candidate
+
+
+intersect : Range -> Range -> Maybe Range
+intersect left right =
+    let
+        lowerComparison =
+            compare left.lower right.lower
+
+        upperComparison =
+            compare left.upper right.upper
+
+        lower =
+            if lowerComparison == LT then
+                right.lower
+
+            else
+                left.lower
+
+        lowerBound =
+            if lowerComparison == LT then
+                right.lowerBound
+
+            else if lowerComparison == GT then
+                left.lowerBound
+
+            else if left.lowerBound == Inclusive && right.lowerBound == Inclusive then
+                Inclusive
+
+            else
+                Exclusive
+
+        upper =
+            if upperComparison == LT then
+                left.upper
+
+            else
+                right.upper
+
+        upperBound =
+            if upperComparison == LT then
+                left.upperBound
+
+            else if upperComparison == GT then
+                right.upperBound
+
+            else if left.upperBound == Inclusive && right.upperBound == Inclusive then
+                Inclusive
+
+            else
+                Exclusive
+
+        candidate =
+            { lower = lower
+            , lowerBound = lowerBound
+            , upper = upper
+            , upperBound = upperBound
+            }
+    in
+    when validateRange "intersection" candidate is
+        Ok valid ->
+            Just valid
+
+        Err _ ->
+            Nothing
+
+
+sortDescending : Array Version -> Array Version
+sortDescending =
+    Array.sortWith (\left right -> compare right left)
+
+
+errorToString : Error -> String
+errorToString error =
+    when error is
+        InvalidVersion source ->
+            "Invalid Elm semantic version '" ++ source ++ "'. Expected MAJOR.MINOR.PATCH without leading zeroes."
+
+        NegativeVersionComponent details ->
+            "Invalid " ++ details.component ++ " version component " ++ String.fromInt details.value ++ ": version components cannot be negative."
+
+        InvalidRange source ->
+            "Invalid Elm version range '" ++ source ++ "'. Expected 'x.y.z <= v < a.b.c'."
+
+        EmptyRange source ->
+            "Elm version range '" ++ source ++ "' is empty."

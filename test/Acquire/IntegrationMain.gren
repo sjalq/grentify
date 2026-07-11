@@ -1,0 +1,268 @@
+module Acquire.IntegrationMain exposing (main)
+
+import Acquire.Cache as Cache
+import Acquire.Provider as Provider
+import Array exposing (Array)
+import ChildProcess
+import Elm.PackageName as PackageName
+import Elm.Semver as Semver
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import HttpClient
+import Init
+import Node
+import Port.Error as PortError exposing (Error)
+import Stream.Log
+import System.File
+import Task exposing (Task)
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+main : Node.SimpleProgram Never
+main =
+    Node.defineSimpleProgram <|
+        \environment ->
+            Init.await FileSystem.initialize <|
+                \fileSystemPermission ->
+                    Init.await ChildProcess.initialize <|
+                        \childProcessPermission ->
+                            Init.await HttpClient.initialize <|
+                                \httpPermission ->
+                                    Init.awaitTask (FileSystem.currentWorkingDirectory fileSystemPermission) <|
+                                        \workingDirectory ->
+                                            let
+                                                permissions =
+                                                    { fileSystem = fileSystemPermission
+                                                    , childProcess = childProcessPermission
+                                                    , http = httpPermission
+                                                    }
+
+                                                base =
+                                                    Path.append (Path.fromPosixString ".acquire-integration-test") workingDirectory
+
+                                                options =
+                                                    { platform = environment.platform
+                                                    , workingDirectory = base
+                                                    , cacheDirectory = Path.append (Path.fromPosixString "cache") base
+                                                    , offline = True
+                                                    }
+                                            in
+                                            prepare fileSystemPermission base options.cacheDirectory
+                                                |> Task.andThen (\_ -> runChecks permissions options base)
+                                                |> Task.andThen
+                                                    (\results ->
+                                                        cleanup fileSystemPermission base
+                                                            |> Task.onError (\_ -> Task.succeed {})
+                                                            |> Task.map (\_ -> results)
+                                                    )
+                                                |> Task.andThen (report environment)
+                                                |> Task.onError
+                                                    (\error ->
+                                                        Stream.Log.line environment.stderr ("Acquire integration setup failed: " ++ PortError.toString error)
+                                                            |> Task.andThen (\_ -> Node.setExitCode 1)
+                                                    )
+                                                |> Node.endSimpleProgram
+
+
+runChecks : Provider.Permissions -> Provider.Options -> Path -> Task Error (Array TestResult)
+runChecks permissions options base =
+    let
+        pathString path =
+            System.File.pathToString options.platform path
+
+        localRoot =
+            Path.append (Path.fromPosixString "local") base
+
+        hazardRoot =
+            Path.append (Path.fromPosixString "hazard") base
+    in
+    Task.sequence
+        [ Provider.acquire permissions options (pathString localRoot)
+            |> Task.map
+                (\acquired ->
+                    outcome "local package directories are acquired recursively"
+                        (Array.map .relativePath acquired.sources == [ "Nested/Inner.elm", "Top.elm" ])
+                        "Unexpected local source listing."
+                )
+            |> asCheck "local package directories are acquired recursively"
+        , Provider.acquire permissions options (pathString (Path.append (Path.fromPosixString "elm.json") localRoot))
+            |> Task.map
+                (\acquired ->
+                    outcome "a direct local elm.json input resolves its package root"
+                        (PackageName.toString acquired.manifest.name == "author/local")
+                        "Unexpected local manifest."
+                )
+            |> asCheck "a direct local elm.json input resolves its package root"
+        , expectError "hazardous local source is rejected before transformation"
+            "UNSUPPORTED_ELM_SOURCE"
+            (Provider.acquire permissions options (pathString hazardRoot))
+        , Provider.acquire permissions options "author/cached@1.0.0"
+            |> Task.map
+                (\acquired ->
+                    outcome "offline exact coordinates use manifest and source caches"
+                        (acquired.provenance.fromCache
+                            && Array.map .relativePath acquired.sources
+                            == [ "Example.elm" ]
+                        )
+                        "Expected an exact cached acquisition."
+                )
+            |> asCheck "offline exact coordinates use manifest and source caches"
+        , Provider.acquire permissions options "author/latest"
+            |> Task.map
+                (\acquired ->
+                    outcome "offline latest coordinates resolve through cached all-packages"
+                        (Semver.versionToString acquired.manifest.version == "2.0.0")
+                        "Expected cached latest version 2.0.0."
+                )
+            |> asCheck "offline latest coordinates resolve through cached all-packages"
+        , expectError "offline cache misses are explicit"
+            "OFFLINE_MANIFEST_CACHE_MISS"
+            (Provider.acquire permissions options "author/missing@1.0.0")
+        ]
+
+
+asCheck : String -> Task Error TestResult -> Task Error TestResult
+asCheck name task =
+    task
+        |> Task.onError
+            (\error ->
+                Task.succeed (outcome name False (PortError.toString error))
+            )
+
+
+expectError : String -> String -> Task Error value -> Task Error TestResult
+expectError name expectedCode task =
+    task
+        |> Task.map (\_ -> outcome name False ("Expected " ++ expectedCode ++ "."))
+        |> Task.onError
+            (\error ->
+                Task.succeed <|
+                    outcome name
+                        (PortError.code error == expectedCode)
+                        ("Expected " ++ expectedCode ++ ", got " ++ PortError.toString error)
+            )
+
+
+prepare : FileSystem.Permission -> Path -> Path -> Task Error {}
+prepare permission base cacheDirectory =
+    cleanup permission base
+        |> Task.andThen (\_ -> System.File.ensureDirectory permission base)
+        |> Task.andThen
+            (\_ ->
+                fixtureFiles base cacheDirectory
+                    |> Array.foldl
+                        (\file pending ->
+                            pending
+                                |> Task.andThen (\_ -> System.File.writeText permission file.path file.contents)
+                                |> Task.map (\_ -> {})
+                        )
+                        (Task.succeed {})
+            )
+
+
+fixtureFiles : Path -> Path -> Array { path : Path, contents : String }
+fixtureFiles base cacheDirectory =
+    let
+        file relative contents =
+            { path = Path.append (Path.fromPosixString relative) base
+            , contents = contents
+            }
+
+        cached =
+            coordinatePaths cacheDirectory "author/cached" "1.0.0"
+
+        latest =
+            coordinatePaths cacheDirectory "author/latest" "2.0.0"
+    in
+    [ file "local/elm.json" (manifestJson "author/local" "1.0.0" "Top")
+    , file "local/src/Top.elm" "module Top exposing (answer)\nanswer = 42\n"
+    , file "local/src/Nested/Inner.elm" "module Nested.Inner exposing (value)\nvalue = True\n"
+    , file "hazard/elm.json" (manifestJson "author/hazard" "1.0.0" "Hazard")
+    , file "hazard/src/Hazard.elm" "port module Hazard exposing (main)\nport main : String -> Cmd msg\n"
+    , { path = Cache.allPackagesPath cacheDirectory
+      , contents = "{\"author/latest\":[\"1.0.0\",\"2.0.0\"]}"
+      }
+    , { path = cached.manifest, contents = manifestJson "author/cached" "1.0.0" "Example" }
+    , { path = Path.append (Path.fromPosixString "elm.json") cached.source, contents = manifestJson "author/cached" "1.0.0" "Example" }
+    , { path = Path.append (Path.fromPosixString "src/Example.elm") cached.source, contents = "module Example exposing (value)\nvalue = 1\n" }
+    , { path = latest.manifest, contents = manifestJson "author/latest" "2.0.0" "Example" }
+    , { path = Path.append (Path.fromPosixString "elm.json") latest.source, contents = manifestJson "author/latest" "2.0.0" "Example" }
+    , { path = Path.append (Path.fromPosixString "src/Example.elm") latest.source, contents = "module Example exposing (value)\nvalue = 2\n" }
+    ]
+
+
+coordinatePaths : Path -> String -> String -> { manifest : Path, source : Path }
+coordinatePaths cacheDirectory nameSource versionSource =
+    when { name = PackageName.parse nameSource, version = Semver.parseVersion versionSource } is
+        { name = Ok packageName, version = Ok version } ->
+            { manifest = Cache.manifestPath cacheDirectory packageName version
+            , source = Cache.sourcePath cacheDirectory packageName version
+            }
+
+        _ ->
+            { manifest = cacheDirectory, source = cacheDirectory }
+
+
+manifestJson : String -> String -> String -> String
+manifestJson name version exposedModule =
+    "{\"type\":\"package\",\"name\":\""
+        ++ name
+        ++ "\",\"summary\":\"A package used by acquisition tests\",\"license\":\"BSD-3-Clause\",\"version\":\""
+        ++ version
+        ++ "\",\"exposed-modules\":[\""
+        ++ exposedModule
+        ++ "\"],\"elm-version\":\"0.19.0 <= v < 0.20.0\",\"dependencies\":{},\"test-dependencies\":{}}"
+
+
+cleanup : FileSystem.Permission -> Path -> Task Error {}
+cleanup permission path =
+    System.File.exists permission path
+        |> Task.andThen
+            (\exists ->
+                if exists then
+                    FileSystem.remove permission { recursive = True } path
+                        |> Task.map (\_ -> {})
+                        |> Task.mapError
+                            (FileSystem.errorToString
+                                >> PortError.create "TEST_CLEANUP_FAILED"
+                            )
+
+                else
+                    Task.succeed {}
+            )
+
+
+report : Node.Environment -> Array TestResult -> Task error {}
+report environment results =
+    let
+        failures =
+            Array.keepIf (\test -> not test.passed) results
+    in
+    if Array.isEmpty failures then
+        Stream.Log.line environment.stdout "Acquire integration tests passed."
+
+    else
+        failures
+            |> Array.map (\failure -> failure.name ++ ": " ++ failure.details)
+            |> String.join "\n"
+            |> Stream.Log.line environment.stderr
+            |> Task.andThen (\_ -> Node.setExitCode 1)
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed details =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            details
+    }

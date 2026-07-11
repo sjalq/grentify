@@ -1,0 +1,573 @@
+module Mapping.Adapter exposing
+    ( AdapterError(..)
+    , adapterIdForTarget
+    , adapterModuleForTarget
+    , all
+    , generate
+    , generateFromRequirements
+    , moduleName
+    , normalize
+    , requiredForModules
+    , sourceFor
+    )
+
+import Array
+import Dict exposing (Dict)
+import Mapping.Types exposing (AdapterId(..), GeneratedModule, ModuleMapping, adapterIdName)
+import Maybe exposing (Maybe(..))
+import Result exposing (Result(..))
+
+
+type AdapterError
+    = UnknownAdapter
+        { requirement : String
+        , available : Array String
+        }
+
+
+prefix : String
+prefix =
+    "ElmToGren.Compat."
+
+
+all : Array AdapterId
+all =
+    [ ArrayAdapter
+    , BasicsAdapter
+    , DictAdapter
+    , JsonDecodeAdapter
+    , JsonEncodeAdapter
+    , ListAdapter
+    , MaybeAdapter
+    , RandomAdapter
+    , ResultAdapter
+    , SetAdapter
+    , StringAdapter
+    , TaskAdapter
+    , TupleAdapter
+    ]
+
+
+moduleName : AdapterId -> String
+moduleName adapterId =
+    prefix ++ adapterIdName adapterId
+
+
+adapterModuleForTarget : String -> Maybe String
+adapterModuleForTarget target =
+    all
+        |> Array.map moduleName
+        |> Array.findFirst
+            (\candidate ->
+                target == candidate
+                    || String.startsWith (candidate ++ ".") target
+            )
+        |> Maybe.map .value
+
+
+adapterIdForTarget : String -> Maybe AdapterId
+adapterIdForTarget target =
+    adapterModuleForTarget target
+        |> Maybe.andThen
+            (\foundModule ->
+                all
+                    |> Array.findFirst (\adapterId -> moduleName adapterId == foundModule)
+                    |> Maybe.map .value
+            )
+
+
+normalize : String -> Result AdapterError AdapterId
+normalize requirement =
+    let
+        candidate =
+            when adapterModuleForTarget requirement is
+                Just foundModule ->
+                    String.dropFirst (String.count prefix) foundModule
+
+                Nothing ->
+                    if String.startsWith prefix requirement then
+                        String.dropFirst (String.count prefix) requirement
+
+                    else
+                        requirement
+
+        lowered =
+            String.toLower candidate
+    in
+    when Array.findFirst (\adapterId -> String.toLower (adapterIdName adapterId) == lowered) all is
+        Just adapterId ->
+            Ok adapterId.value
+
+        Nothing ->
+            Err
+                (UnknownAdapter
+                    { requirement = requirement
+                    , available = Array.map adapterIdName all
+                    }
+                )
+
+
+requiredForModules : Array ModuleMapping -> Array AdapterId
+requiredForModules modules =
+    modules
+        |> Array.foldl collectModuleAdapters Dict.empty
+        |> Dict.values
+
+
+collectModuleAdapters : ModuleMapping -> Dict String AdapterId -> Dict String AdapterId
+collectModuleAdapters mapping found =
+    let
+        targets =
+            [ mapping.target ]
+                |> Array.append (Dict.values mapping.values)
+                |> Array.append (Dict.values mapping.types)
+    in
+    Array.foldl
+        (\target current ->
+            when adapterIdForTarget target is
+                Just adapterId ->
+                    Dict.set (adapterIdName adapterId) adapterId current
+
+                Nothing ->
+                    current
+        )
+        found
+        targets
+
+
+generateFromRequirements : Array String -> Result AdapterError (Array GeneratedModule)
+generateFromRequirements requirements =
+    requirements
+        |> Array.foldl
+            (\requirement accumulated ->
+                accumulated
+                    |> Result.andThen
+                        (\byName ->
+                            normalize requirement
+                                |> Result.map
+                                    (\adapterId ->
+                                        Dict.set (adapterIdName adapterId) adapterId byName
+                                    )
+                        )
+            )
+            (Ok Dict.empty)
+        |> Result.map (Dict.values >> generate)
+
+
+generate : Array AdapterId -> Array GeneratedModule
+generate adapterIds =
+    adapterIds
+        |> Array.foldl
+            (\adapterId byName -> Dict.set (adapterIdName adapterId) adapterId byName)
+            Dict.empty
+        |> Dict.values
+        |> Array.map generateOne
+
+
+generateOne : AdapterId -> GeneratedModule
+generateOne adapterId =
+    let
+        generatedModuleName =
+            moduleName adapterId
+    in
+    { moduleName = generatedModuleName
+    , relativePath = String.replace "." "/" generatedModuleName ++ ".gren"
+    , source = sourceFor adapterId
+    }
+
+
+sourceFor : AdapterId -> String
+sourceFor adapterId =
+    when adapterId is
+        ArrayAdapter ->
+            arraySource
+
+        BasicsAdapter ->
+            basicsSource
+
+        DictAdapter ->
+            dictSource
+
+        JsonDecodeAdapter ->
+            jsonDecodeSource
+
+        JsonEncodeAdapter ->
+            jsonEncodeSource
+
+        ListAdapter ->
+            listSource
+
+        MaybeAdapter ->
+            maybeSource
+
+        RandomAdapter ->
+            randomSource
+
+        ResultAdapter ->
+            resultSource
+
+        SetAdapter ->
+            setSource
+
+        StringAdapter ->
+            stringSource
+
+        TaskAdapter ->
+            taskSource
+
+        TupleAdapter ->
+            tupleSource
+
+
+arraySource : String
+arraySource =
+    """
+module ElmToGren.Compat.Array exposing (empty, initialize, fromList, toList, toIndexedList)
+
+import Array exposing (Array)
+
+
+empty : Array a
+empty =
+    []
+
+
+initialize : Int -> (Int -> a) -> Array a
+initialize count make =
+    Array.initialize count 0 make
+
+
+fromList : Array a -> Array a
+fromList values =
+    values
+
+
+toList : Array a -> Array a
+toList values =
+    values
+
+
+toIndexedList : Array a -> Array { first : Int, second : a }
+toIndexedList values =
+    Array.indexedMap (\\index value -> { first = index, second = value }) values
+"""
+
+
+basicsSource : String
+basicsSource =
+    """
+module ElmToGren.Compat.Basics exposing (always, toPolar, fromPolar)
+
+import Math
+
+
+always : a -> b -> a
+always value _ =
+    value
+
+
+toPolar : { first : Float, second : Float } -> { first : Float, second : Float }
+toPolar point =
+    { first = Math.sqrt (point.first * point.first + point.second * point.second)
+    , second = Math.atan2 point.second point.first
+    }
+
+
+fromPolar : { first : Float, second : Float } -> { first : Float, second : Float }
+fromPolar polar =
+    { first = polar.first * Math.cos polar.second
+    , second = polar.first * Math.sin polar.second
+    }
+"""
+
+
+listSource : String
+listSource =
+    """
+module ElmToGren.Compat.List exposing (sum, product, map4, map5, tail, partition, unzip)
+
+import Array exposing (Array)
+import Maybe exposing (Maybe(..))
+
+
+sum : Array number -> number
+sum values =
+    Array.foldl (+) 0 values
+
+
+product : Array number -> number
+product values =
+    Array.foldl (*) 1 values
+
+
+map4 : (a -> b -> c -> d -> value) -> Array a -> Array b -> Array c -> Array d -> Array value
+map4 fn as_ bs cs ds =
+    Array.map2 (\\partial d -> partial d) (Array.map3 fn as_ bs cs) ds
+
+
+map5 : (a -> b -> c -> d -> e -> value) -> Array a -> Array b -> Array c -> Array d -> Array e -> Array value
+map5 fn as_ bs cs ds es =
+    Array.map2 (\\partial e -> partial e) (map4 fn as_ bs cs ds) es
+
+
+tail : Array a -> Maybe (Array a)
+tail values =
+    when Array.popFirst values is
+        Just { rest } ->
+            Just rest
+
+        Nothing ->
+            Nothing
+
+
+partition : (a -> Bool) -> Array a -> { first : Array a, second : Array a }
+partition predicate values =
+    let
+        parts =
+            Array.partition predicate values
+    in
+    { first = parts.trues, second = parts.falses }
+
+
+unzip : Array { first : a, second : b } -> { first : Array a, second : Array b }
+unzip pairs =
+    Array.foldr
+        (\\pair result ->
+            { first = Array.pushFirst pair.first result.first
+            , second = Array.pushFirst pair.second result.second
+            }
+        )
+        { first = [], second = [] }
+        pairs
+"""
+
+
+tupleSource : String
+tupleSource =
+    """
+module ElmToGren.Compat.Tuple exposing (pair, first, second, mapFirst, mapSecond, mapBoth)
+
+
+pair : a -> b -> { first : a, second : b }
+pair firstValue secondValue =
+    { first = firstValue, second = secondValue }
+
+
+first : { pair | first : a } -> a
+first value =
+    value.first
+
+
+second : { pair | second : b } -> b
+second value =
+    value.second
+
+
+mapFirst : (a -> x) -> { first : a, second : b } -> { first : x, second : b }
+mapFirst fn value =
+    { first = fn value.first, second = value.second }
+
+
+mapSecond : (b -> y) -> { first : a, second : b } -> { first : a, second : y }
+mapSecond fn value =
+    { first = value.first, second = fn value.second }
+
+
+mapBoth : (a -> x) -> (b -> y) -> { first : a, second : b } -> { first : x, second : y }
+mapBoth fnFirst fnSecond value =
+    { first = fnFirst value.first, second = fnSecond value.second }
+"""
+
+
+stringSource : String
+stringSource =
+    """
+module ElmToGren.Compat.String exposing (concat, uncons)
+
+import Array exposing (Array)
+import Maybe exposing (Maybe(..))
+import String
+
+
+concat : Array String -> String
+concat strings =
+    String.join "" strings
+
+
+uncons : String -> Maybe { first : Char, second : String }
+uncons string =
+    when String.popFirst string is
+        Just { first, rest } ->
+            Just { first = first, second = rest }
+
+        Nothing ->
+            Nothing
+"""
+
+
+dictSource : String
+dictSource =
+    """
+module ElmToGren.Compat.Dict exposing (toList, fromList, partition)
+
+import Array exposing (Array)
+import Dict exposing (Dict)
+
+
+toList : Dict k v -> Array { first : k, second : v }
+toList dictionary =
+    Dict.foldr
+        (\\key value pairs -> Array.pushFirst { first = key, second = value } pairs)
+        []
+        dictionary
+
+
+fromList : Array { first : comparable, second : v } -> Dict comparable v
+fromList pairs =
+    Array.foldl (\\pair dictionary -> Dict.set pair.first pair.second dictionary) Dict.empty pairs
+
+
+partition : (comparable -> v -> Bool) -> Dict comparable v -> { first : Dict comparable v, second : Dict comparable v }
+partition predicate dictionary =
+    let
+        parts =
+            Dict.partition predicate dictionary
+    in
+    { first = parts.trues, second = parts.falses }
+"""
+
+
+setSource : String
+setSource =
+    """
+module ElmToGren.Compat.Set exposing (partition)
+
+import Set exposing (Set)
+
+
+partition : (comparable -> Bool) -> Set comparable -> { first : Set comparable, second : Set comparable }
+partition predicate values =
+    let
+        parts =
+            Set.partition predicate values
+    in
+    { first = parts.trues, second = parts.falses }
+"""
+
+
+maybeSource : String
+maybeSource =
+    """
+module ElmToGren.Compat.Maybe exposing (map4, map5)
+
+import Maybe exposing (Maybe)
+
+
+map4 : (a -> b -> c -> d -> value) -> Maybe a -> Maybe b -> Maybe c -> Maybe d -> Maybe value
+map4 fn ma mb mc md =
+    Maybe.andMap md (Maybe.map3 fn ma mb mc)
+
+
+map5 : (a -> b -> c -> d -> e -> value) -> Maybe a -> Maybe b -> Maybe c -> Maybe d -> Maybe e -> Maybe value
+map5 fn ma mb mc md me =
+    Maybe.andMap me (map4 fn ma mb mc md)
+"""
+
+
+resultSource : String
+resultSource =
+    """
+module ElmToGren.Compat.Result exposing (map4, map5)
+
+import Result exposing (Result)
+
+
+map4 : (a -> b -> c -> d -> value) -> Result error a -> Result error b -> Result error c -> Result error d -> Result error value
+map4 fn ra rb rc rd =
+    Result.andMap rd (Result.map3 fn ra rb rc)
+
+
+map5 : (a -> b -> c -> d -> e -> value) -> Result error a -> Result error b -> Result error c -> Result error d -> Result error e -> Result error value
+map5 fn ra rb rc rd re =
+    Result.andMap re (map4 fn ra rb rc rd)
+"""
+
+
+taskSource : String
+taskSource =
+    """
+module ElmToGren.Compat.Task exposing (map4, map5)
+
+import Task exposing (Task)
+
+
+map4 : (a -> b -> c -> d -> value) -> Task error a -> Task error b -> Task error c -> Task error d -> Task error value
+map4 fn ta tb tc td =
+    Task.andMap td (Task.map3 fn ta tb tc)
+
+
+map5 : (a -> b -> c -> d -> e -> value) -> Task error a -> Task error b -> Task error c -> Task error d -> Task error e -> Task error value
+map5 fn ta tb tc td te =
+    Task.andMap te (map4 fn ta tb tc td)
+"""
+
+
+randomSource : String
+randomSource =
+    """
+module ElmToGren.Compat.Random exposing (weighted, map4, map5)
+
+import Array exposing (Array)
+import Random exposing (Generator)
+
+
+weighted : { first : Float, second : a } -> Array { first : Float, second : a } -> Generator a
+weighted first rest =
+    Random.weighted
+        { weight = first.first, value = first.second }
+        (Array.map (\\item -> { weight = item.first, value = item.second }) rest)
+
+
+map4 : (a -> b -> c -> d -> value) -> Generator a -> Generator b -> Generator c -> Generator d -> Generator value
+map4 fn ga gb gc gd =
+    Random.andMap gd (Random.map3 fn ga gb gc)
+
+
+map5 : (a -> b -> c -> d -> e -> value) -> Generator a -> Generator b -> Generator c -> Generator d -> Generator e -> Generator value
+map5 fn ga gb gc gd ge =
+    Random.andMap ge (map4 fn ga gb gc gd)
+"""
+
+
+jsonDecodeSource : String
+jsonDecodeSource =
+    """
+module ElmToGren.Compat.Json.Decode exposing (keyValuePairs)
+
+import Array exposing (Array)
+import Json.Decode exposing (Decoder)
+import Json.Decode as Decode
+
+
+keyValuePairs : Decoder a -> Decoder (Array { first : String, second : a })
+keyValuePairs decoder =
+    Decode.map
+        (Array.map (\\pair -> { first = pair.key, second = pair.value }))
+        (Decode.keyValuePairs decoder)
+"""
+
+
+jsonEncodeSource : String
+jsonEncodeSource =
+    """
+module ElmToGren.Compat.Json.Encode exposing (object)
+
+import Array exposing (Array)
+import Json.Encode exposing (Value)
+import Json.Encode as Encode
+
+
+object : Array { first : String, second : Value } -> Value
+object pairs =
+    Encode.object (Array.map (\\pair -> { key = pair.first, value = pair.second }) pairs)
+"""

@@ -1,0 +1,73 @@
+module Port.Error exposing
+    ( Error
+    , create
+    , withHint
+    , code
+    , message
+    , toString
+    , toJson
+    )
+
+{-| Stable, user-facing failures from the porting pipeline.
+
+The payload intentionally stays serializable so the CLI can emit the same
+diagnostic in text and `--json` modes.
+-}
+
+import Json.Encode as Encode
+
+
+type Error
+    = Error
+        { code : String
+        , message : String
+        , hints : Array String
+        }
+
+
+create : String -> String -> Error
+create errorCode errorMessage =
+    Error
+        { code = errorCode
+        , message = errorMessage
+        , hints = []
+        }
+
+
+withHint : String -> Error -> Error
+withHint hint (Error details) =
+    Error { details | hints = Array.pushLast hint details.hints }
+
+
+code : Error -> String
+code (Error details) =
+    details.code
+
+
+message : Error -> String
+message (Error details) =
+    details.message
+
+
+toString : Error -> String
+toString (Error details) =
+    let
+        renderedHints =
+            details.hints
+                |> Array.map (\hint -> "  - " ++ hint)
+                |> String.join "\n"
+    in
+    if Array.isEmpty details.hints then
+        details.code ++ ": " ++ details.message
+
+    else
+        details.code ++ ": " ++ details.message ++ "\n" ++ renderedHints
+
+
+toJson : Error -> Encode.Value
+toJson (Error details) =
+    Encode.object
+        [ { key = "code", value = Encode.string details.code }
+        , { key = "message", value = Encode.string details.message }
+        , { key = "hints", value = Encode.array Encode.string details.hints }
+        ]

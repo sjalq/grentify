@@ -1,0 +1,298 @@
+module Port.Local exposing (Options, PortResult, run)
+
+import ChildProcess
+import Cli
+import Dict
+import Elm.Manifest
+import Elm.PackageName
+import Emit.Workspace
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Mapping.Adapter as Adapter exposing (AdapterError(..))
+import Mapping.Types as Mapping
+import Node
+import Port.Error as PortError exposing (Error)
+import Port.Manifest
+import Port.Mapping
+import Port.Names
+import Port.Report
+import Review.Protocol as Review
+import Review.Runner
+import System.File
+import Task exposing (Task)
+import Transform.Pipeline as TransformPipeline
+import Verify.Package
+
+
+type alias Options =
+    { platform : Node.Platform
+    , fileSystem : FileSystem.Permission
+    , childProcess : ChildProcess.Permission
+    , sourceRoot : Path
+    , destination : Path
+    , cacheDirectory : Path
+    , reviewConfig : Path
+    , builtinMapping : Path
+    , overlayMappings : Array Path
+    , elmReviewExecutable : String
+    , grenExecutable : String
+    , namespace : Maybe String
+    , requestedPlatform : Cli.PlatformChoice
+    , offline : Bool
+    , verify : Bool
+    }
+
+
+type alias PortResult =
+    { sourceName : String
+    , targetName : String
+    , destination : Path
+    , verified : Bool
+    , report : String
+    }
+
+
+run : Options -> Task Error PortResult
+run options =
+    let
+        elmJson =
+            Path.append (Path.fromPosixString "elm.json") options.sourceRoot
+    in
+    System.File.readText options.fileSystem elmJson
+        |> Task.andThen decodeManifest
+        |> Task.andThen
+            (\manifest ->
+                Port.Mapping.load options.fileSystem options.builtinMapping options.overlayMappings
+                    |> Task.andThen
+                        (\loadedMappings ->
+                            Port.Names.targetName options.namespace loadedMappings.registry manifest
+                                |> taskFromResult
+                                |> Task.andThen
+                                    (\targetName ->
+                                        Review.Runner.run options.platform options.childProcess
+                                            { packageRoot = options.sourceRoot
+                                            , elmJson = elmJson
+                                            , reviewConfig = options.reviewConfig
+                                            , executable = options.elmReviewExecutable
+                                            , elmHome = Nothing
+                                            , files = []
+                                            , offline = options.offline
+                                            }
+                                            |> Task.andThen (ensureNoGlobalErrors >> taskFromResult)
+                                            |> Task.andThen
+                                                (\extraction ->
+                                                    transformModules options loadedMappings.registry extraction
+                                                        |> Task.andThen
+                                                            (\modules ->
+                                                                let
+                                                                    detectedPlatforms =
+                                                                        [ modules.detectedPlatform ]
+                                                                            |> Array.mapAndKeepJust mappingPlatform
+                                                                in
+                                                                Port.Manifest.build
+                                                                    { source = manifest
+                                                                    , targetName = targetName
+                                                                    , mappings = loadedMappings.registry
+                                                                    , localDependencies = Dict.empty
+                                                                    , detectedPlatforms = detectedPlatforms
+                                                                    , requestedPlatform = options.requestedPlatform
+                                                                    }
+                                                                    |> taskFromResult
+                                                                    |> Task.andThen
+                                                                        (\builtManifest ->
+                                                                            emit options loadedMappings.fingerprint manifest targetName builtManifest modules extraction
+                                                                        )
+                                                            )
+                                                )
+                                    )
+                        )
+            )
+
+
+decodeManifest : String -> Task Error Elm.Manifest.Manifest
+decodeManifest contents =
+    when Elm.Manifest.decodeString contents is
+        Ok manifest ->
+            Task.succeed manifest
+
+        Err manifestError ->
+            Task.fail <|
+                PortError.create "ELM_MANIFEST_INVALID" (Elm.Manifest.errorToString manifestError)
+
+
+ensureNoGlobalErrors : Review.Extraction -> Result Error Review.Extraction
+ensureNoGlobalErrors extraction =
+    let
+        fatal =
+            extraction.diagnostics
+                |> Array.keepIf (\diagnostic -> diagnostic.severity == "error")
+    in
+    if Array.isEmpty fatal then
+        Ok extraction
+
+    else
+        Err <|
+            PortError.create "ELM_REVIEW_FAILED"
+                (fatal |> Array.map .message |> String.join "\n")
+
+
+transformModules : Options -> Mapping.Registry -> Review.Extraction -> Task Error TransformPipeline.TransformResult
+transformModules options registry extraction =
+    extraction.modules
+        |> Array.foldl
+            (\moduleExtraction pending ->
+                pending
+                    |> Task.andThen
+                        (\sources ->
+                            let
+                                sourcePath =
+                                    Path.append (Path.fromPosixString moduleExtraction.path) options.sourceRoot
+                            in
+                            System.File.readText options.fileSystem sourcePath
+                                |> Task.map
+                                    (\source ->
+                                        Array.pushLast
+                                            { path = moduleExtraction.path
+                                            , source = source
+                                            }
+                                            sources
+                                    )
+                        )
+            )
+            (Task.succeed [])
+        |> Task.andThen
+            (\sources -> TransformPipeline.transform registry extraction sources |> taskFromResult)
+
+
+emit
+    : Options
+    -> String
+    -> Elm.Manifest.Manifest
+    -> String
+    -> Port.Manifest.Built
+    -> TransformPipeline.TransformResult
+    -> Review.Extraction
+    -> Task Error PortResult
+emit options mappingFingerprint manifest targetName builtManifest transformed extraction =
+    let
+        adapterRequirements =
+            transformed.requiredAdapters
+
+        sourceName =
+            Elm.PackageName.toString manifest.name
+
+        diagnostics =
+            transformed.diagnostics
+                |> Array.map
+                    (\diagnostic ->
+                        { code = diagnostic.code
+                        , severity = diagnostic.severity
+                        , message = diagnostic.message
+                        , range = diagnostic.range
+                        , help = diagnostic.help
+                        }
+                    )
+
+        report =
+            Port.Report.report
+                { rootElm = sourceName
+                , rootGren = targetName
+                , outputDirectory = System.File.pathToString options.platform options.destination
+                , verified = options.verify
+                , diagnostics = diagnostics
+                }
+
+        lockfile =
+            Port.Report.lockfile
+                { source = manifest
+                , targetName = targetName
+                , mappingFingerprint = mappingFingerprint
+                }
+    in
+    when Adapter.generateFromRequirements adapterRequirements is
+        Err adapterError ->
+            Task.fail (adapterErrorToPortError adapterError)
+
+        Ok adapters ->
+            let
+                packageModules =
+                    Array.append
+                        transformed.modules
+                        (adapters
+                            |> Array.map
+                                (\adapter ->
+                                    { moduleName = adapter.moduleName
+                                    , relativePath = adapter.relativePath
+                                    , source = adapter.source
+                                    }
+                                )
+                        )
+
+                validate staging =
+                    if options.verify then
+                        Verify.Package.verify options.platform options.childProcess
+                            { packageDirectory = staging
+                            , grenExecutable = options.grenExecutable
+                            }
+
+                    else
+                        Task.succeed {}
+            in
+            Emit.Workspace.emit
+                { fileSystem = options.fileSystem }
+                { output = options.destination
+                , packages =
+                    [ { sourcePackage = sourceName
+                      , sourceRoot = options.sourceRoot
+                      , manifest = builtManifest.spec
+                      , modules = packageModules
+                      }
+                    ]
+                , lockfile = lockfile
+                , report = report
+                , rootPackage = targetName
+                , validateBeforeCommit = validate
+                }
+                |> Task.map
+                    (\workspace ->
+                        { sourceName = sourceName
+                        , targetName = targetName
+                        , destination = workspace.rootDirectory
+                        , verified = options.verify
+                        , report = report
+                        }
+                    )
+
+
+adapterErrorToPortError : AdapterError -> Error
+adapterErrorToPortError adapterError =
+    when adapterError is
+        UnknownAdapter details ->
+            PortError.create "UNKNOWN_ADAPTER"
+                ("Unknown adapter " ++ details.requirement ++ ". Available: " ++ String.join ", " details.available)
+
+
+mappingPlatform : String -> Maybe Mapping.Platform
+mappingPlatform value =
+    when value is
+        "common" ->
+            Just Mapping.Common
+
+        "browser" ->
+            Just Mapping.Browser
+
+        "node" ->
+            Just Mapping.Node
+
+        _ ->
+            Nothing
+
+
+taskFromResult : Result Error a -> Task Error a
+taskFromResult result =
+    when result is
+        Ok value ->
+            Task.succeed value
+
+        Err error ->
+            Task.fail error

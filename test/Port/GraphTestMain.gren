@@ -1,0 +1,218 @@
+module Port.GraphTestMain exposing (main)
+
+{-| Standalone integration test for the recursive graph boundary.
+
+Compile and run with:
+
+    gren make Port.GraphTestMain --output=.test-cache/graph-test.js
+    node -e 'require("./.test-cache/graph-test.js").Gren.Port.GraphTestMain.init()'
+
+The regular test aggregator intentionally does not import this module because
+the recursive case exercises the Elm registry and a real Gren compiler.
+-}
+
+import ChildProcess
+import Cli
+import Elm.PackageName as PackageName
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import HttpClient
+import Init
+import Mapping.Registry as MappingRegistry
+import Mapping.Types exposing (PackageMapping(..), Platform(..))
+import Node
+import Port.Error as PortError
+import Port.Graph as Graph
+import Stream.Log
+import Task exposing (Task)
+
+
+main : Node.SimpleProgram Never
+main =
+    Node.defineSimpleProgram <|
+        \environment ->
+            Init.await FileSystem.initialize <|
+                \fileSystem ->
+                    Init.await ChildProcess.initialize <|
+                        \childProcess ->
+                            Init.await HttpClient.initialize <|
+                                \http ->
+                                    Init.awaitTask (FileSystem.currentWorkingDirectory fileSystem) <|
+                                        \workingDirectory ->
+                                            let
+                                                permissions =
+                                                    { fileSystem = fileSystem
+                                                    , childProcess = childProcess
+                                                    , http = http
+                                                    }
+                                            in
+                                            checkDependencyStrategies
+                                                |> taskFromResult
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        Graph.run permissions
+                                                            (fixtureOptions environment.platform workingDirectory "simple")
+                                                    )
+                                                |> Task.andThen (checkSimple >> taskFromResult)
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        Graph.run permissions
+                                                            (fixtureOptions environment.platform workingDirectory "transitive")
+                                                    )
+                                                |> Task.andThen (checkTransitive >> taskFromResult)
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        Stream.Log.line environment.stdout
+                                                            "PASS: Gren graph orchestrator ported direct and recursive fixtures."
+                                                    )
+                                                |> Task.onError
+                                                    (PortError.toString
+                                                        >> fail environment
+                                                    )
+                                                |> Node.endSimpleProgram
+
+
+fixtureOptions : Node.Platform -> Path -> String -> Graph.Options
+fixtureOptions platform workingDirectory fixture =
+    let
+        inProject relative =
+            Path.append (Path.fromPosixString relative) workingDirectory
+
+        cacheDirectory =
+            inProject ".test-cache/graph"
+    in
+    { platform = platform
+    , workingDirectory = workingDirectory
+    , input = "test/fixtures/" ++ fixture
+    , output = inProject (".test-cache/graph-output-" ++ fixture)
+    , cacheDirectory = cacheDirectory
+    , builtinMapping = inProject "mappings/builtin.json"
+    , mappingOverlays = []
+    , reviewConfig = inProject "review"
+    , elmReviewExecutable = Path.toPosixString (inProject "node_modules/.bin/elm-review")
+    , grenExecutable = Path.toPosixString (inProject "node_modules/.bin/gren")
+    , elmHome = Just (Path.append (Path.fromPosixString "elm-home") cacheDirectory)
+    , namespace = Nothing
+    , requestedPlatform = Cli.Auto
+    , offline = False
+    , verify = True
+    , toolVersion = "integration-test"
+    }
+
+
+checkSimple : Graph.Result -> Result PortError.Error {}
+checkSimple result =
+    if result.rootElmPackage /= "example/simple" then
+        failure "Direct fixture returned the wrong Elm root."
+
+    else if result.packageCount /= 1 then
+        failure "Direct fixture should emit exactly one package."
+
+    else if not result.verified then
+        failure "Direct fixture was not verified."
+
+    else
+        Ok {}
+
+
+checkDependencyStrategies : Result PortError.Error {}
+checkDependencyStrategies =
+    let
+        details elmPackage grenPackage =
+            { elmPackage = elmPackage
+            , grenPackage = grenPackage
+            , grenVersion = "1.0.0"
+            , platform = Common
+            , modules = []
+            }
+
+        registry =
+            MappingRegistry.fromDocument
+                { schemaVersion = 1
+                , packages =
+                    [ GrenAnalogue (details "test/analogue" "test/analogue")
+                    , Absorbed (details "test/absorbed" "gren-lang/core")
+                    , Transpile
+                        { elmPackage = "test/transpile"
+                        , grenPackage = "test/transpile"
+                        }
+                    ]
+                }
+    in
+    parsePackageName "test/analogue"
+        |> Result.andThen
+            (\analogue ->
+                parsePackageName "test/absorbed"
+                    |> Result.andThen
+                        (\absorbed ->
+                            parsePackageName "test/transpile"
+                                |> Result.andThen
+                                    (\transpile ->
+                                        if not (Graph.isMappedDependency registry analogue) then
+                                            failure "A Gren analogue entered the transpilation graph."
+
+                                        else if not (Graph.isMappedDependency registry absorbed) then
+                                            failure "An absorbed package entered the transpilation graph."
+
+                                        else if Graph.isMappedDependency registry transpile then
+                                            failure "A Transpile mapping was incorrectly skipped."
+
+                                        else
+                                            Ok {}
+                                    )
+                        )
+            )
+
+
+parsePackageName : String -> Result PortError.Error PackageName.Name
+parsePackageName source =
+    PackageName.parse source
+        |> Result.mapError
+            (PackageName.errorToString
+                >> PortError.create "GRAPH_TEST_FAILED"
+            )
+
+
+checkTransitive : Graph.Result -> Result PortError.Error {}
+checkTransitive result =
+    if result.rootElmPackage /= "example/transitive" then
+        failure "Recursive fixture returned the wrong Elm root."
+
+    else if result.packageCount < 2 then
+        failure "Recursive fixture did not emit its transpiled dependency."
+
+    else if Array.last result.dependencyFirstOrder /= Just "example/transitive" then
+        failure "The root was not last in dependency-first graph order."
+
+    else if not (Array.member "elm-community/maybe-extra" result.dependencyFirstOrder) then
+        failure "The recursively resolved dependency is absent from graph order."
+
+    else if Array.isEmpty result.workspace.bundleFiles then
+        failure "The recursively emitted dependency has no canonical package bundle."
+
+    else if not result.verified then
+        failure "Recursive fixture was not verified through its root."
+
+    else
+        Ok {}
+
+
+failure : String -> Result PortError.Error a
+failure message =
+    Err (PortError.create "GRAPH_TEST_FAILED" message)
+
+
+taskFromResult : Result PortError.Error a -> Task PortError.Error a
+taskFromResult result =
+    when result is
+        Ok value ->
+            Task.succeed value
+
+        Err error ->
+            Task.fail error
+
+
+fail : Node.Environment -> String -> Task Never {}
+fail environment message =
+    Stream.Log.line environment.stderr message
+        |> Task.andThen (\_ -> Node.setExitCode 1)

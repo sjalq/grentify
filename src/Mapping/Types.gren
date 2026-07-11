@@ -1,0 +1,236 @@
+module Mapping.Types exposing
+    ( AdapterId(..)
+    , GeneratedModule
+    , MappingDocument
+    , MappingError(..)
+    , MappingKind(..)
+    , ModuleMapping
+    , PackageDetails
+    , PackageMapping(..)
+    , Platform(..)
+    , PlatformInferenceError(..)
+    , Registry
+    , TranspileDetails
+    , adapterIdName
+    , mappingElmPackage
+    , mappingGrenPackage
+    , mappingKind
+    , mappingModules
+    , mappingPlatform
+    , platformName
+    )
+
+import Dict exposing (Dict)
+
+
+type Platform
+    = Common
+    | Browser
+    | Node
+
+
+platformName : Platform -> String
+platformName platform =
+    when platform is
+        Common ->
+            "common"
+
+        Browser ->
+            "browser"
+
+        Node ->
+            "node"
+
+
+type MappingKind
+    = GrenAnalogueKind
+    | AbsorbedKind
+    | TranspileKind
+
+
+type alias ModuleMapping =
+    { source : String
+    , target : String
+    , values : Dict String String
+    , types : Dict String String
+    }
+
+
+type alias PackageDetails =
+    { elmPackage : String
+    , grenPackage : String
+    , grenVersion : String
+    , platform : Platform
+    , modules : Array ModuleMapping
+    }
+
+
+type alias TranspileDetails =
+    { elmPackage : String
+    , grenPackage : String
+    }
+
+
+type PackageMapping
+    = GrenAnalogue PackageDetails
+    | Absorbed PackageDetails
+    | Transpile TranspileDetails
+
+
+mappingKind : PackageMapping -> MappingKind
+mappingKind mapping =
+    when mapping is
+        GrenAnalogue _ ->
+            GrenAnalogueKind
+
+        Absorbed _ ->
+            AbsorbedKind
+
+        Transpile _ ->
+            TranspileKind
+
+
+mappingElmPackage : PackageMapping -> String
+mappingElmPackage mapping =
+    when mapping is
+        GrenAnalogue details ->
+            details.elmPackage
+
+        Absorbed details ->
+            details.elmPackage
+
+        Transpile details ->
+            details.elmPackage
+
+
+mappingGrenPackage : PackageMapping -> String
+mappingGrenPackage mapping =
+    when mapping is
+        GrenAnalogue details ->
+            details.grenPackage
+
+        Absorbed details ->
+            details.grenPackage
+
+        Transpile details ->
+            details.grenPackage
+
+
+mappingModules : PackageMapping -> Array ModuleMapping
+mappingModules mapping =
+    when mapping is
+        GrenAnalogue details ->
+            details.modules
+
+        Absorbed details ->
+            details.modules
+
+        Transpile _ ->
+            []
+
+
+mappingPlatform : PackageMapping -> Maybe Platform
+mappingPlatform mapping =
+    when mapping is
+        GrenAnalogue details ->
+            Just details.platform
+
+        Absorbed details ->
+            Just details.platform
+
+        Transpile _ ->
+            Nothing
+
+
+type alias MappingDocument =
+    { schemaVersion : Int
+    , packages : Array PackageMapping
+    }
+
+
+type MappingError
+    = InvalidMapping
+        { source : String
+        , path : String
+        , message : String
+        }
+
+
+type alias Registry =
+    { packageOrder : Array String
+    , packages : Dict String PackageMapping
+    , modules : Dict String ModuleMapping
+    }
+
+
+type PlatformInferenceError
+    = BrowserAndNode
+        { browserSources : Array String
+        , nodeSources : Array String
+        }
+
+
+type AdapterId
+    = ArrayAdapter
+    | BasicsAdapter
+    | DictAdapter
+    | JsonDecodeAdapter
+    | JsonEncodeAdapter
+    | ListAdapter
+    | MaybeAdapter
+    | RandomAdapter
+    | ResultAdapter
+    | SetAdapter
+    | StringAdapter
+    | TaskAdapter
+    | TupleAdapter
+
+
+adapterIdName : AdapterId -> String
+adapterIdName adapterId =
+    when adapterId is
+        ArrayAdapter ->
+            "Array"
+
+        BasicsAdapter ->
+            "Basics"
+
+        DictAdapter ->
+            "Dict"
+
+        JsonDecodeAdapter ->
+            "Json.Decode"
+
+        JsonEncodeAdapter ->
+            "Json.Encode"
+
+        ListAdapter ->
+            "List"
+
+        MaybeAdapter ->
+            "Maybe"
+
+        RandomAdapter ->
+            "Random"
+
+        ResultAdapter ->
+            "Result"
+
+        SetAdapter ->
+            "Set"
+
+        StringAdapter ->
+            "String"
+
+        TaskAdapter ->
+            "Task"
+
+        TupleAdapter ->
+            "Tuple"
+
+
+type alias GeneratedModule =
+    { moduleName : String
+    , relativePath : String
+    , source : String
+    }

@@ -1,0 +1,117 @@
+module Port.Transform exposing (Module, applyReviewAndLexical, toGrenPath)
+
+import Port.Error as PortError exposing (Error)
+import Review.Protocol as Review
+import Transform.Lexical
+import Transform.SourceEdit as SourceEdit exposing (EditKind(..))
+
+
+type alias Module =
+    { moduleName : String
+    , relativePath : String
+    , source : String
+    , requiredAdapters : Array String
+    , diagnostics : Array Review.Diagnostic
+    }
+
+
+applyReviewAndLexical : String -> Review.ModuleExtraction -> Result Error Module
+applyReviewAndLexical source extraction =
+    let
+        fatalDiagnostics =
+            extraction.diagnostics
+                |> Array.keepIf (\diagnostic -> diagnostic.severity == "error")
+    in
+    if not (Array.isEmpty fatalDiagnostics) then
+        Err <|
+            PortError.create "ELM_REVIEW_FAILED"
+                (fatalDiagnostics
+                    |> Array.map .message
+                    |> String.join "\n"
+                )
+
+    else
+        extraction.edits
+            |> Array.map fromReviewEdit
+            |> SourceEdit.applyEdits source
+            |> Result.mapError sourceError
+            |> Result.andThen
+                (\reviewed ->
+                    Transform.Lexical.transform reviewed
+                        |> Result.mapError sourceError
+                )
+            |> Result.map
+                (\finalized ->
+                    { moduleName = extraction.moduleName
+                    , relativePath = toGrenPath extraction.path
+                    , source = finalized.source
+                    , requiredAdapters = extraction.requiredAdapters
+                    , diagnostics = extraction.diagnostics
+                    }
+                )
+
+
+fromReviewEdit : Review.SourceEdit -> SourceEdit.SourceEdit
+fromReviewEdit edit =
+    { range = edit.range
+    , replacement = edit.replacement
+    , kind = editKind edit.kind
+    , rule = edit.rule
+    }
+
+
+editKind : String -> EditKind
+editKind kind =
+    when kind is
+        "unit" ->
+            UnitEdit
+
+        "tuple-expression" ->
+            TupleEdit
+
+        "tuple-pattern" ->
+            TupleEdit
+
+        "tuple-type" ->
+            TupleEdit
+
+        "list-cons-expression" ->
+            ListEdit
+
+        "list-cons-pattern" ->
+            ListEdit
+
+        "module-reference" ->
+            ModuleEdit
+
+        "symbol-reference" ->
+            SymbolEdit
+
+        "custom-type" ->
+            ConstructorEdit
+
+        "custom-constructor" ->
+            ConstructorEdit
+
+        "record-alias-constructor" ->
+            ConstructorEdit
+
+        _ ->
+            CustomEdit kind
+
+
+sourceError : SourceEdit.SourceError -> Error
+sourceError error =
+    PortError.create "SOURCE_TRANSFORM_FAILED" (SourceEdit.describeError error)
+
+
+toGrenPath : String -> String
+toGrenPath sourcePath =
+    if String.endsWith ".elm" sourcePath then
+        String.dropLast 4 sourcePath ++ ".gren"
+
+    else if String.endsWith ".gren" sourcePath then
+        sourcePath
+
+    else
+        sourcePath ++ ".gren"

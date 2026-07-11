@@ -1,0 +1,38 @@
+module Resolve.SolverTestMain exposing (main)
+
+import Array
+import Debug
+import Elm.ManifestTest
+import Elm.PackageNameTest
+import Elm.RegistryTest
+import Elm.SemverTest
+import Node
+import Resolve.SolverTest
+import Stream.Log
+import Task
+
+
+main : Node.SimpleProgram Never
+main =
+    Node.defineSimpleProgram <|
+        \environment ->
+            let
+                failures =
+                    Array.flatten
+                        [ Elm.PackageNameTest.tests
+                        , Elm.SemverTest.tests
+                        , Elm.ManifestTest.tests
+                        , Elm.RegistryTest.tests
+                        , Resolve.SolverTest.tests
+                        ]
+                        |> Array.keepIf (\test -> not test.passed)
+
+                report =
+                    if Array.isEmpty failures then
+                        Stream.Log.line environment.stdout "Elm manifest and dependency solver tests passed."
+
+                    else
+                        Stream.Log.line environment.stderr (Debug.toString failures)
+                            |> Task.andThen (\_ -> Node.setExitCode 1)
+            in
+            Node.endSimpleProgram report

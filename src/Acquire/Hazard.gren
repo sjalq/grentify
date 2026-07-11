@@ -1,0 +1,322 @@
+module Acquire.Hazard exposing
+    ( Hazard(..)
+    , detect
+    , errorToString
+    )
+
+{-| Early detection for Elm constructs which cannot be transformed as an
+ordinary Gren package. Protected regions are skipped, except for actual GLSL
+blocks which are themselves a compatibility hazard.
+-}
+
+import Array exposing (Array)
+import Char
+
+
+type Hazard
+    = ElmKernel
+    | EffectModule
+    | PortModule
+    | Glsl
+
+
+type alias Scan =
+    { tokens : Array String
+    , glsl : Bool
+    }
+
+
+type alias Findings =
+    { elmKernel : Bool
+    , effectModule : Bool
+    , portModule : Bool
+    , glsl : Bool
+    }
+
+
+detect : String -> Array Hazard
+detect source =
+    let
+        scan =
+            scanFrom (String.toArray source) 0 { tokens = [], glsl = False }
+
+        findings =
+            inspectTokens scan.tokens
+                { elmKernel = False
+                , effectModule = False
+                , portModule = False
+                , glsl = scan.glsl
+                }
+    in
+    [ if findings.elmKernel then
+        Just ElmKernel
+
+      else
+        Nothing
+    , if findings.effectModule then
+        Just EffectModule
+
+      else
+        Nothing
+    , if findings.portModule then
+        Just PortModule
+
+      else
+        Nothing
+    , if findings.glsl then
+        Just Glsl
+
+      else
+        Nothing
+    ]
+        |> Array.mapAndKeepJust identity
+
+
+scanFrom : Array Char -> Int -> Scan -> Scan
+scanFrom characters offset scan =
+    when Array.get offset characters is
+        Nothing ->
+            scan
+
+        Just character ->
+            if matchesAt characters offset lineCommentStart then
+                scanFrom characters (skipLineComment characters (offset + 2)) scan
+
+            else if matchesAt characters offset blockCommentStart then
+                scanFrom characters (skipBlockComment characters (offset + 2) 1) scan
+
+            else if matchesAt characters offset glslStart then
+                scanFrom characters (skipGlsl characters (offset + 6)) { scan | glsl = True }
+
+            else if matchesAt characters offset multilineQuote then
+                scanFrom characters (skipMultilineString characters (offset + 3)) scan
+
+            else if character == '"' then
+                scanFrom characters (skipQuoted characters '"' (offset + 1)) scan
+
+            else if character == '\'' then
+                scanFrom characters (skipQuoted characters '\'' (offset + 1)) scan
+
+            else if isIdentifierStart character then
+                let
+                    tokenEnd =
+                        scanIdentifierEnd characters (offset + 1)
+
+                    token =
+                        characters
+                            |> Array.slice offset tokenEnd
+                            |> String.fromArray
+                in
+                scanFrom characters tokenEnd { scan | tokens = Array.pushLast token scan.tokens }
+
+            else
+                scanFrom characters (offset + 1) scan
+
+
+inspectTokens : Array String -> Findings -> Findings
+inspectTokens tokens findings =
+    when Array.popFirst tokens is
+        Nothing ->
+            findings
+
+        Just { first, rest } ->
+            let
+                next =
+                    Array.first rest
+
+                updated =
+                    { findings
+                        | elmKernel =
+                            findings.elmKernel
+                                || first
+                                == "Elm.Kernel"
+                                || String.startsWith "Elm.Kernel." first
+                        , effectModule =
+                            findings.effectModule
+                                || (first == "effect" && next == Just "module")
+                        , portModule =
+                            findings.portModule
+                                || (first == "port" && next == Just "module")
+                    }
+            in
+            inspectTokens rest updated
+
+
+skipLineComment : Array Char -> Int -> Int
+skipLineComment characters offset =
+    when Array.get offset characters is
+        Nothing ->
+            Array.length characters
+
+        Just '\n' ->
+            offset
+
+        Just '\r' ->
+            offset
+
+        Just _ ->
+            skipLineComment characters (offset + 1)
+
+
+skipBlockComment : Array Char -> Int -> Int -> Int
+skipBlockComment characters offset depth =
+    if depth == 0 then
+        offset
+
+    else
+        when Array.get offset characters is
+            Nothing ->
+                Array.length characters
+
+            Just _ ->
+                if matchesAt characters offset blockCommentStart then
+                    skipBlockComment characters (offset + 2) (depth + 1)
+
+                else if matchesAt characters offset blockCommentEnd then
+                    skipBlockComment characters (offset + 2) (depth - 1)
+
+                else
+                    skipBlockComment characters (offset + 1) depth
+
+
+skipQuoted : Array Char -> Char -> Int -> Int
+skipQuoted characters delimiter offset =
+    when Array.get offset characters is
+        Nothing ->
+            Array.length characters
+
+        Just '\\' ->
+            if offset + 1 < Array.length characters then
+                skipQuoted characters delimiter (offset + 2)
+
+            else
+                Array.length characters
+
+        Just character ->
+            if character == delimiter then
+                offset + 1
+
+            else
+                skipQuoted characters delimiter (offset + 1)
+
+
+skipMultilineString : Array Char -> Int -> Int
+skipMultilineString characters offset =
+    when Array.get offset characters is
+        Nothing ->
+            Array.length characters
+
+        Just '\\' ->
+            if offset + 1 < Array.length characters then
+                skipMultilineString characters (offset + 2)
+
+            else
+                Array.length characters
+
+        Just _ ->
+            if matchesAt characters offset multilineQuote then
+                offset + 3
+
+            else
+                skipMultilineString characters (offset + 1)
+
+
+skipGlsl : Array Char -> Int -> Int
+skipGlsl characters offset =
+    when Array.get offset characters is
+        Nothing ->
+            Array.length characters
+
+        Just _ ->
+            if matchesAt characters offset glslEnd then
+                offset + 2
+
+            else
+                skipGlsl characters (offset + 1)
+
+
+scanIdentifierEnd : Array Char -> Int -> Int
+scanIdentifierEnd characters offset =
+    when Array.get offset characters is
+        Just character ->
+            if isIdentifierContinuation character then
+                scanIdentifierEnd characters (offset + 1)
+
+            else
+                offset
+
+        Nothing ->
+            offset
+
+
+isIdentifierStart : Char -> Bool
+isIdentifierStart character =
+    Char.isAlpha character || character == '_'
+
+
+isIdentifierContinuation : Char -> Bool
+isIdentifierContinuation character =
+    isIdentifierStart character
+        || Char.isDigit character
+        || character
+        == '\''
+        || character
+        == '.'
+
+
+matchesAt : Array Char -> Int -> Array Char -> Bool
+matchesAt characters offset expected =
+    Array.indexedFoldl
+        (\relativeIndex expectedCharacter matches ->
+            matches
+                && Array.get (offset + relativeIndex) characters
+                == Just expectedCharacter
+        )
+        True
+        expected
+
+
+lineCommentStart : Array Char
+lineCommentStart =
+    [ '-', '-' ]
+
+
+blockCommentStart : Array Char
+blockCommentStart =
+    [ '{', '-' ]
+
+
+blockCommentEnd : Array Char
+blockCommentEnd =
+    [ '-', '}' ]
+
+
+glslStart : Array Char
+glslStart =
+    [ '[', 'g', 'l', 's', 'l', '|' ]
+
+
+glslEnd : Array Char
+glslEnd =
+    [ '|', ']' ]
+
+
+multilineQuote : Array Char
+multilineQuote =
+    [ '"', '"', '"' ]
+
+
+errorToString : Hazard -> String
+errorToString hazard =
+    when hazard is
+        ElmKernel ->
+            "references Elm.Kernel, whose native Elm kernel code cannot be emitted as Gren package source"
+
+        EffectModule ->
+            "declares an Elm effect module, which is reserved for core/runtime packages"
+
+        PortModule ->
+            "declares an Elm port module; Gren packages cannot expose application ports"
+
+        Glsl ->
+            "contains an Elm [glsl|...|] shader block, which needs an explicit compatibility mapping"

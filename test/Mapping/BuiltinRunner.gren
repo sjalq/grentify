@@ -1,0 +1,65 @@
+module Mapping.BuiltinRunner exposing (main)
+
+import Bytes
+import Dict
+import FileSystem
+import FileSystem.Path as Path
+import Init
+import Mapping.Adapter as Adapter
+import Mapping.Decode as MappingDecode
+import Mapping.Registry as Registry
+import Node
+import Stream.Log
+import Task
+
+
+main : Node.SimpleProgram Never
+main =
+    Node.defineSimpleProgram <|
+        \environment ->
+            Init.await FileSystem.initialize <|
+                \permission ->
+                    Init.awaitTask
+                        (FileSystem.readFile permission (Path.fromPosixString "mappings/builtin.json")
+                            |> Task.map Just
+                            |> Task.onError (\_ -> Task.succeed Nothing)
+                        )
+                    <|
+                        \maybeBytes ->
+                            verifyBuiltin environment maybeBytes
+                                |> Node.endSimpleProgram
+
+
+verifyBuiltin environment maybeBytes =
+    when maybeBytes |> Maybe.andThen Bytes.toString is
+        Nothing ->
+            fail environment "Could not read mappings/builtin.json as UTF-8."
+
+        Just contents ->
+            when MappingDecode.decodeString "mappings/builtin.json" contents is
+                Err _ ->
+                    fail environment "The built-in mapping registry did not decode."
+
+                Ok document ->
+                    let
+                        registry =
+                            Registry.fromDocument document
+
+                        adapters =
+                            registry.modules
+                                |> Dict.values
+                                |> Adapter.requiredForModules
+                                |> Adapter.generate
+                    in
+                    if Array.length document.packages >= 10
+                        && Array.length adapters >= 4
+                    then
+                        Stream.Log.line environment.stdout "Built-in mapping registry passed."
+
+                    else
+                        fail environment "The built-in mapping registry decoded incompletely."
+
+
+fail environment message =
+    Stream.Log.line environment.stderr message
+        |> Task.andThen (\_ -> Node.setExitCode 1)

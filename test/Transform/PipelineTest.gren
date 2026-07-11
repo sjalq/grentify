@@ -1,0 +1,878 @@
+module Transform.PipelineTest exposing (tests)
+
+import Array exposing (Array)
+import Debug
+import Dict exposing (Dict)
+import Mapping.Registry as Registry
+import Mapping.Types exposing (PackageMapping(..), Platform(..), Registry)
+import Port.Error as PortError
+import Review.Protocol as Protocol
+import String
+import Transform.Pipeline as Pipeline
+import Transform.AdapterUseFixture as CompiledAdapterUse
+import Transform.PipelineFixture as CompiledFixture
+import Transform.SimpleStructuralFixture as CompiledStructuralFixture
+import Transform.SourceEdit exposing (EditKind(..))
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ transformsCompilerBackedFixture
+    , appliesRealStructuralFixtureExtraction
+    , mapsExposedAdaptersWithoutTouchingComments
+    , detectsMappedAdapterImports
+    , appliesDecodedReviewProtocol
+    , appliesAndClassifiesReviewEdits
+    , convertsEveryReviewEditKind
+    , rejectsInvalidExtractionData
+    , reportsUnsupportedRuntimeBoundaries
+    , convertsSourcePathsSafely
+    , compiledFixtureHasExpectedBehavior
+    ]
+
+
+transformsCompilerBackedFixture : TestResult
+transformsCompilerBackedFixture =
+    when Pipeline.transform registry fixtureExtraction [ { path = fixturePath, source = fixtureSource } ] is
+        Err error ->
+            outcome "pipeline transforms the simple fixture" False (PortError.toString error)
+
+        Ok transformed ->
+            when Array.first transformed.modules is
+                Nothing ->
+                    outcome "pipeline transforms the simple fixture" False "No generated module was returned."
+
+                Just generated ->
+                    let
+                        protectedText =
+                            "List.filter Basics.sqrt Json.Decode.list case of ()"
+
+                        passed =
+                            generated.moduleName == fixtureModule
+                                && generated.relativePath == "src/Transform/PipelineFixture.gren"
+                                && String.contains "import Array exposing (keepIf)" generated.source
+                                && String.contains "import Math" generated.source
+                                && String.contains "-}\n\nimport Math\n\nimport Json.Decode" generated.source
+                                && String.contains "Decode.Decoder (Array String)" generated.source
+                                && String.contains "Decode.array Decode.string" generated.source
+                                && String.contains "when Array.keepIf" generated.source
+                                && String.contains "Math.sqrt value" generated.source
+                                && String.contains "unit : {}" generated.source
+                                && String.contains protectedText generated.source
+                                && String.contains ("-- " ++ protectedText) generated.source
+                                && not (String.contains "import List" generated.source)
+                                && transformed.requiredAdapters == []
+                                && transformed.detectedPlatform == "common"
+                                && Array.isEmpty transformed.diagnostics
+                    in
+                    outcome
+                        "pipeline transforms the simple fixture"
+                        passed
+                        ("Unexpected generated source:\n" ++ generated.source)
+
+
+appliesRealStructuralFixtureExtraction : TestResult
+appliesRealStructuralFixtureExtraction =
+    when Pipeline.transform registry structuralExtraction [ { path = structuralPath, source = structuralSource } ] is
+        Err error ->
+            outcome "pipeline applies the real structural fixture extraction" False (PortError.toString error)
+
+        Ok transformed ->
+            when Array.first transformed.modules is
+                Nothing ->
+                    outcome "pipeline applies the real structural fixture extraction" False "No structural fixture module was generated."
+
+                Just generated ->
+                    outcome
+                        "pipeline applies the real structural fixture extraction"
+                        (String.contains "swap : { first :" generated.source
+                            && String.contains "second : b" generated.source
+                            && String.contains "swap { first =" generated.source
+                            && String.contains "second = second" generated.source
+                            && String.contains "{ first =" generated.source
+                            && String.contains "second = first" generated.source
+                            && String.contains "when maybeValue is" generated.source
+                            && String.contains "prepend : a -> Array a -> Array a" generated.source
+                            && String.contains "Array.pushFirst (first" generated.source
+                            && String.contains "unit : {}" generated.source
+                            && transformed.requiredAdapters == [ "List", "Tuple" ]
+                        )
+                        generated.source
+
+
+mapsExposedAdaptersWithoutTouchingComments : TestResult
+mapsExposedAdaptersWithoutTouchingComments =
+    let
+        path =
+            "src/AdapterUse.elm"
+
+        source =
+            String.join "\n"
+                [ "module AdapterUse exposing (total)"
+                , ""
+                , "import List exposing (sum {- keep List.sum -}, filter)"
+                , ""
+                , "total values ="
+                , "    sum (filter (\\value -> value > 0) values)"
+                , ""
+                , "note = \"List.sum List.filter\""
+                , "-- List.sum List.filter"
+                , ""
+                ]
+
+        base =
+            extractionFor path "AdapterUse"
+
+        extraction =
+            { base
+                | modules =
+                    Array.map
+                        (\module_ ->
+                            { module_
+                                | references =
+                                    [ reference 6 5 6 8 "List" "sum" "sum" False
+                                    , reference 6 10 6 16 "List" "filter" "filter" False
+                                    ]
+                                , importFacts =
+                                    [ { range = protocolRange 3 1 3 55
+                                      , moduleName = "List"
+                                      , alias = Nothing
+                                      , exposingAll = False
+                                      , exposed =
+                                            [ { name = "sum", text = "sum" }
+                                            , { name = "filter", text = "filter" }
+                                            ]
+                                      }
+                                    ]
+                            }
+                        )
+                        base.modules
+            }
+    in
+    when Pipeline.transform registry extraction [ { path = path, source = source } ] is
+        Err error ->
+            outcome "adapter mappings preserve protected regions" False (PortError.toString error)
+
+        Ok transformed ->
+            when Array.first transformed.modules is
+                Nothing ->
+                    outcome "adapter mappings preserve protected regions" False "No generated adapter-use module was returned."
+
+                Just generated ->
+                    let
+                        passed =
+                            transformed.requiredAdapters == [ "List" ]
+                                && String.contains "import ElmToGren.Compat.List" generated.source
+                                && String.contains "import Array exposing (keepIf)" generated.source
+                                && String.contains "ElmToGren.Compat.List.sum (Array.keepIf" generated.source
+                                && String.contains "note = \"List.sum List.filter\"" generated.source
+                                && String.contains "-- List.sum List.filter" generated.source
+                    in
+                    outcome
+                        "adapter mappings preserve protected regions"
+                        passed
+                        ("Unexpected adapter mapping output:\n" ++ generated.source)
+
+
+detectsMappedAdapterImports : TestResult
+detectsMappedAdapterImports =
+    let
+        path =
+            "src/TupleUse.elm"
+
+        source =
+            String.join "\n"
+                [ "module TupleUse exposing (pair)"
+                , ""
+                , "import Tuple"
+                , ""
+                , "pair = Tuple.pair"
+                , ""
+                ]
+
+        base =
+            extractionFor path "TupleUse"
+
+        extraction =
+            { base
+                | modules =
+                    Array.map
+                        (\module_ ->
+                            { module_
+                                | references =
+                                    [ reference 5 8 5 18 "Tuple" "pair" "Tuple.pair" False ]
+                                , importFacts =
+                                    [ { range = protocolRange 3 1 3 13
+                                      , moduleName = "Tuple"
+                                      , alias = Nothing
+                                      , exposingAll = False
+                                      , exposed = []
+                                      }
+                                    ]
+                            }
+                        )
+                        base.modules
+            }
+    in
+    when Pipeline.transform registry extraction [ { path = path, source = source } ] is
+        Err error ->
+            outcome "mapped adapter imports are detected" False (PortError.toString error)
+
+        Ok transformed ->
+            when Array.first transformed.modules is
+                Nothing ->
+                    outcome "mapped adapter imports are detected" False "No tuple-use module was generated."
+
+                Just generated ->
+                    outcome
+                        "mapped adapter imports are detected"
+                        (transformed.requiredAdapters == [ "Tuple" ]
+                            && String.contains "import ElmToGren.Compat.Tuple" generated.source
+                            && String.contains "pair = ElmToGren.Compat.Tuple.pair" generated.source
+                        )
+                        generated.source
+
+
+appliesDecodedReviewProtocol : TestResult
+appliesDecodedReviewProtocol =
+    let
+        source =
+            "module ProtocolFixture exposing (value)\n\nvalue = old\n"
+
+        report =
+            """
+{"type":"review-errors","extracts":{"ElmToGren":{"schemaVersion":1,"modules":[{"path":"src/ProtocolFixture.elm","moduleName":"ProtocolFixture","edits":[{"range":{"start":{"row":3,"column":9},"end":{"row":3,"column":12}},"replacement":"new","kind":"symbol-reference","rule":"protocol-fixture"}],"diagnostics":[],"importedModules":[],"requiredAdapters":[],"detectedPlatform":"common"}],"diagnostics":[]}}}
+"""
+    in
+    when Protocol.decode report is
+        Err error ->
+            outcome "decoded review protocol drives the pipeline" False (PortError.toString error)
+
+        Ok extraction ->
+            when Pipeline.transform registry extraction [ { path = "src/ProtocolFixture.elm", source = source } ] is
+                Err error ->
+                    outcome "decoded review protocol drives the pipeline" False (PortError.toString error)
+
+                Ok transformed ->
+                    when Array.first transformed.modules is
+                        Just generated ->
+                            outcome
+                                "decoded review protocol drives the pipeline"
+                                (String.contains "value = new" generated.source)
+                                generated.source
+
+                        Nothing ->
+                            outcome "decoded review protocol drives the pipeline" False "No protocol fixture module was generated."
+
+
+appliesAndClassifiesReviewEdits : TestResult
+appliesAndClassifiesReviewEdits =
+    let
+        path =
+            "src/Edited.elm"
+
+        source =
+            "module Edited exposing (value)\n\nvalue = old\n"
+
+        reviewEdit =
+            { range =
+                { start = { row = 3, column = 9 }
+                , end = { row = 3, column = 12 }
+                }
+            , replacement = "new"
+            , kind = "symbol-reference"
+            , rule = "fixture/rewrite"
+            }
+
+        extraction =
+            { schemaVersion = 1
+            , modules =
+                [ { path = path
+                  , moduleName = "Edited"
+                  , edits = [ reviewEdit ]
+                  , diagnostics = []
+                  , importedModules = []
+                  , requiredAdapters = []
+                  , references = []
+          , importFacts = []
+          , detectedPlatform = "common"
+                  }
+                ]
+            , diagnostics = []
+            }
+    in
+    when Pipeline.transform registry extraction [ { path = path, source = source } ] is
+        Err error ->
+            outcome "review edits are classified and applied" False (PortError.toString error)
+
+        Ok transformed ->
+            when Array.first transformed.transformedModules is
+                Nothing ->
+                    outcome "review edits are classified and applied" False "No transformed module was returned."
+
+                Just module_ ->
+                    let
+                        kindIsSymbol =
+                            when Array.first module_.reviewEdits is
+                                Just edit ->
+                                    edit.kind == SymbolEdit
+
+                                Nothing ->
+                                    False
+                    in
+                    outcome
+                        "review edits are classified and applied"
+                        (kindIsSymbol && String.contains "value = new" module_.generated.source)
+                        module_.generated.source
+
+
+convertsEveryReviewEditKind : TestResult
+convertsEveryReviewEditKind =
+    let
+        cases =
+            [ { source = "case-keyword", expected = SyntaxEdit }
+            , { source = "of-keyword", expected = SyntaxEdit }
+            , { source = "unit", expected = UnitEdit }
+            , { source = "tuple-expression", expected = TupleEdit }
+            , { source = "tuple-pattern", expected = TupleEdit }
+            , { source = "tuple-type", expected = TupleEdit }
+            , { source = "list-cons-expression", expected = ListEdit }
+            , { source = "list-cons-pattern", expected = ListEdit }
+            , { source = "module-reference", expected = ModuleEdit }
+            , { source = "symbol-reference", expected = SymbolEdit }
+            , { source = "custom-type", expected = ConstructorEdit }
+            , { source = "custom-constructor", expected = ConstructorEdit }
+            , { source = "record-alias-constructor", expected = ConstructorEdit }
+            , { source = "manual", expected = CustomEdit "manual" }
+            ]
+
+        passed =
+            Array.all
+                (\item -> Pipeline.convertEditKind item.source == Ok item.expected)
+                cases
+    in
+    outcome
+        "every elm-review edit kind maps to a typed source edit"
+        passed
+        "At least one review edit kind was mapped incorrectly."
+
+
+rejectsInvalidExtractionData : TestResult
+rejectsInvalidExtractionData =
+    let
+        path =
+            "src/Bad.elm"
+
+        source =
+            "module Bad exposing (value)\n\nvalue = 1\n"
+
+        base =
+            extractionFor path "Bad"
+
+        unknownKind =
+            { range =
+                { start = { row = 3, column = 9 }
+                , end = { row = 3, column = 10 }
+                }
+            , replacement = "2"
+            , kind = "invented"
+            , rule = "bad"
+            }
+
+        badKind =
+            { base
+                | modules =
+                    Array.map
+                        (\module_ -> { module_ | edits = [ unknownKind ] })
+                        base.modules
+            }
+
+        wrongName =
+            extractionFor path "Other"
+
+        invalidSeverity =
+            { base
+                | diagnostics =
+                    [ { code = "BAD"
+                      , severity = "fatal"
+                      , message = "bad severity"
+                      , range = Nothing
+                      , help = Nothing
+                      }
+                    ]
+            }
+
+        invalidRange =
+            { base
+                | modules =
+                    Array.map
+                        (\module_ ->
+                            { module_
+                                | edits =
+                                    [ { range =
+                                            { start = { row = 99, column = 1 }
+                                            , end = { row = 99, column = 2 }
+                                            }
+                                      , replacement = "2"
+                                      , kind = "symbol-reference"
+                                      , rule = "bad-range"
+                                      }
+                                    ]
+                            }
+                        )
+                        base.modules
+            }
+
+        failures =
+            [ Pipeline.transform registry badKind [ { path = path, source = source } ]
+            , Pipeline.transform registry wrongName [ { path = path, source = source } ]
+            , Pipeline.transform registry invalidSeverity [ { path = path, source = source } ]
+            ]
+
+        allRejected =
+            Array.all
+                (\result ->
+                    when result is
+                        Err error ->
+                            PortError.code error == "EXTRACTION_INVALID"
+
+                        Ok _ ->
+                            False
+                )
+                failures
+
+        rangeRejected =
+            when Pipeline.transform registry invalidRange [ { path = path, source = source } ] is
+                Err error ->
+                    PortError.code error == "SOURCE_EDIT_INVALID"
+
+                Ok _ ->
+                    False
+    in
+    outcome
+        "invalid extraction data and source ranges are rejected before emission"
+        (allRejected && rangeRejected)
+        (Debug.toString failures)
+
+
+reportsUnsupportedRuntimeBoundaries : TestResult
+reportsUnsupportedRuntimeBoundaries =
+    let
+        portPath =
+            "src/Ports.elm"
+
+        portSource =
+            String.join "\n"
+                [ "port module Ports exposing (send)"
+                , ""
+                , "port send : String -> Cmd msg"
+                , ""
+                ]
+
+        kernelPath =
+            "src/KernelUser.elm"
+
+        kernelSource =
+            "module KernelUser exposing (value)\n\nvalue = 1\n"
+
+        kernelExtraction =
+            extractionFor kernelPath "KernelUser"
+                |> withImportedModules [ "Elm.Kernel.Utils" ]
+
+        effectPath =
+            "src/Effects.elm"
+
+        effectSource =
+            String.join "\n"
+                [ "effect module Effects where { command = MyCmd } exposing (value)"
+                , ""
+                , "value = 1"
+                , ""
+                ]
+
+        portCodes =
+            diagnosticCodes (Pipeline.transform registry (extractionFor portPath "Ports") [ { path = portPath, source = portSource } ])
+
+        kernelCodes =
+            diagnosticCodes (Pipeline.transform registry kernelExtraction [ { path = kernelPath, source = kernelSource } ])
+
+        effectMessages =
+            diagnosticMessages
+                (Pipeline.transform registry
+                    (extractionFor effectPath "Effects")
+                    [ { path = effectPath, source = effectSource } ]
+                )
+    in
+    outcome
+        "port, effect, and kernel boundaries produce hard diagnostics"
+        (Array.member "UNSUPPORTED_PORT" portCodes
+            && Array.member "UNSUPPORTED_KERNEL" kernelCodes
+            && Array.any (String.contains "effect modules") effectMessages
+        )
+        ("Port codes: "
+            ++ Debug.toString portCodes
+            ++ ", kernel codes: "
+            ++ Debug.toString kernelCodes
+            ++ ", effect messages: "
+            ++ Debug.toString effectMessages
+        )
+
+
+convertsSourcePathsSafely : TestResult
+convertsSourcePathsSafely =
+    let
+        invalid =
+            [ "../Escape.elm", "/tmp/Absolute.elm", "src/NotElm.txt", "C:/Drive.elm" ]
+
+        rejects path =
+            when Pipeline.toGrenSourcePath path is
+                Err _ ->
+                    True
+
+                Ok _ ->
+                    False
+    in
+    outcome
+        "only safe relative .elm paths become .gren paths"
+        (Pipeline.toGrenSourcePath "src/Nested/Valid.elm" == Ok "src/Nested/Valid.gren"
+            && Array.all rejects invalid
+        )
+        "A source path was converted incorrectly."
+
+
+compiledFixtureHasExpectedBehavior : TestResult
+compiledFixtureHasExpectedBehavior =
+    outcome
+        "the expected transformed fixture compiles and behaves"
+        (CompiledFixture.magnitude 9 == 3
+            && CompiledFixture.select [ -1, 2, 0, 4 ] == [ 2, 4 ]
+            && CompiledFixture.unit == {}
+            && CompiledAdapterUse.total [ -1, 2, 3 ] == 5
+            && CompiledStructuralFixture.prepend 1 [ 2, 3 ] == [ 1, 2, 3 ]
+            && CompiledStructuralFixture.swap { first = 1, second = "two" }
+                == { first = "two", second = 1 }
+        )
+        "The compiler-backed transformed fixture returned an unexpected value."
+
+
+diagnosticCodes : Result PortError.Error Pipeline.TransformResult -> Array String
+diagnosticCodes result =
+    when result is
+        Err _ ->
+            []
+
+        Ok transformed ->
+            Array.map .code transformed.diagnostics
+
+
+diagnosticMessages : Result PortError.Error Pipeline.TransformResult -> Array String
+diagnosticMessages result =
+    when result is
+        Err _ ->
+            []
+
+        Ok transformed ->
+            Array.map .message transformed.diagnostics
+
+
+withImportedModules : Array String -> Protocol.Extraction -> Protocol.Extraction
+withImportedModules imported extraction =
+    { extraction
+        | modules = Array.map (\module_ -> { module_ | importedModules = imported }) extraction.modules
+    }
+
+
+extractionFor : String -> String -> Protocol.Extraction
+extractionFor path moduleName =
+    { schemaVersion = 1
+    , modules =
+        [ { path = "/workspace/package/" ++ path
+          , moduleName = moduleName
+          , edits = []
+          , diagnostics = []
+          , importedModules = []
+          , requiredAdapters = []
+          , references = []
+          , importFacts = []
+          , detectedPlatform = "common"
+          }
+        ]
+    , diagnostics = []
+    }
+
+
+fixtureExtraction : Protocol.Extraction
+fixtureExtraction =
+    let
+        base =
+            extractionFor fixturePath fixtureModule
+
+        references =
+            [ reference 8 26 8 30 "List" "List" "List" True
+            , reference 8 31 8 37 "String" "String" "String" True
+            , reference 10 5 10 16 "Json.Decode" "list" "Decode.list" False
+            , reference 10 17 10 30 "Json.Decode" "string" "Decode.string" False
+            , reference 12 10 12 14 "List" "List" "List" True
+            , reference 12 22 12 26 "List" "List" "List" True
+            , reference 14 10 14 21 "List" "filter" "List.filter" False
+            , reference 23 5 23 16 "Basics" "sqrt" "Basics.sqrt" False
+            ]
+
+        importFacts =
+            [ { range = protocolRange 5 1 5 29
+              , moduleName = "Json.Decode"
+              , alias = Just "Decode"
+              , exposingAll = False
+              , exposed = []
+              }
+            , { range = protocolRange 6 1 6 30
+              , moduleName = "List"
+              , alias = Nothing
+              , exposingAll = False
+              , exposed = [ { name = "filter", text = "filter" } ]
+              }
+            ]
+    in
+    { base
+        | modules =
+            Array.map
+                (\module_ -> { module_ | references = references, importFacts = importFacts })
+                base.modules
+    }
+
+
+reference : Int -> Int -> Int -> Int -> String -> String -> String -> Bool -> Protocol.ResolvedReference
+reference startRow startColumn endRow endColumn moduleName name text isType =
+    { range = protocolRange startRow startColumn endRow endColumn
+    , moduleName = moduleName
+    , name = name
+    , text = text
+    , isType = isType
+    }
+
+
+protocolRange : Int -> Int -> Int -> Int -> Protocol.Range
+protocolRange startRow startColumn endRow endColumn =
+    { start = { row = startRow, column = startColumn }
+    , end = { row = endRow, column = endColumn }
+    }
+
+
+fixturePath : String
+fixturePath =
+    "src/Transform/PipelineFixture.elm"
+
+
+fixtureModule : String
+fixtureModule =
+    "Transform.PipelineFixture"
+
+
+fixtureSource : String
+fixtureSource =
+    String.join "\n"
+        [ "module Transform.PipelineFixture exposing (decode, magnitude, protected, select, unit)"
+        , ""
+        , "{-| This module is the compiler-backed form expected from PipelineTest's Elm fixture. -}"
+        , ""
+        , "import Json.Decode as Decode"
+        , "import List exposing (filter)"
+        , ""
+        , "decode : Decode.Decoder (List String)"
+        , "decode ="
+        , "    Decode.list Decode.string"
+        , ""
+        , "select : List Int -> List Int"
+        , "select values ="
+        , "    case List.filter (\\value -> value > 0) values of"
+        , "        [] ->"
+        , "            []"
+        , ""
+        , "        kept ->"
+        , "            kept"
+        , ""
+        , "magnitude : Float -> Float"
+        , "magnitude value ="
+        , "    Basics.sqrt value"
+        , ""
+        , "unit : ()"
+        , "unit ="
+        , "    ()"
+        , ""
+        , "protected : String"
+        , "protected ="
+        , "    \"List.filter Basics.sqrt Json.Decode.list case of ()\""
+        , "-- List.filter Basics.sqrt Json.Decode.list case of ()"
+        , ""
+        ]
+
+
+structuralPath : String
+structuralPath =
+    "src/Transform/SimpleStructuralFixture.elm"
+
+
+structuralSource : String
+structuralSource =
+    String.join "\n"
+        [ "module Transform.SimpleStructuralFixture exposing (orElse, prepend, swap, unit)"
+        , ""
+        , "{-| A small package used to validate syntax translation."
+        , ""
+        , "@docs orElse, prepend, swap, unit"
+        , ""
+        , "-}"
+        , ""
+        , "{-| Swap both fields of a pair. -}"
+        , "swap : ( a, b ) -> ( b, a )"
+        , "swap ( first, second ) ="
+        , "    ( second, first )"
+        , ""
+        , ""
+        , "{-| Extract a value or use a fallback. -}"
+        , "orElse : a -> Maybe a -> a"
+        , "orElse fallback maybeValue ="
+        , "    case maybeValue of"
+        , "        Just value ->"
+        , "            value"
+        , ""
+        , "        Nothing ->"
+        , "            fallback"
+        , ""
+        , ""
+        , "{-| Put a value at the beginning. -}"
+        , "prepend : a -> List a -> List a"
+        , "prepend first rest ="
+        , "    first :: rest"
+        , ""
+        , ""
+        , "{-| The unit value. -}"
+        , "unit : ()"
+        , "unit ="
+        , "    ()"
+        , ""
+        ]
+
+
+structuralExtraction : Protocol.Extraction
+structuralExtraction =
+    { schemaVersion = 1
+    , modules =
+        [ { path = structuralPath
+          , moduleName = "Transform.SimpleStructuralFixture"
+          , edits =
+                [ protocolEdit 10 8 10 9 "{ first : " "tuple-type"
+                , protocolEdit 10 13 10 13 "second : " "tuple-type"
+                , protocolEdit 10 15 10 16 " }" "tuple-type"
+                , protocolEdit 10 20 10 21 "{ first : " "tuple-type"
+                , protocolEdit 10 25 10 25 "second : " "tuple-type"
+                , protocolEdit 10 27 10 28 " }" "tuple-type"
+                , protocolEdit 11 6 11 7 "{ first = " "tuple-pattern"
+                , protocolEdit 11 15 11 15 "second = " "tuple-pattern"
+                , protocolEdit 11 22 11 23 " }" "tuple-pattern"
+                , protocolEdit 12 5 12 6 "{ first = " "tuple-expression"
+                , protocolEdit 12 15 12 15 "second = " "tuple-expression"
+                , protocolEdit 12 21 12 22 " }" "tuple-expression"
+                , protocolEdit 18 5 18 9 "when" "case-keyword"
+                , protocolEdit 29 5 29 5 "Array.pushFirst (" "list-cons-expression"
+                , protocolEdit 29 11 29 13 ") (" "list-cons-expression"
+                , protocolEdit 29 18 29 18 ")" "list-cons-expression"
+                , protocolEdit 33 8 33 10 "{}" "unit"
+                , protocolEdit 35 5 35 7 "{}" "unit"
+                ]
+          , diagnostics = []
+          , importedModules = [ "List" ]
+          , requiredAdapters = [ "List", "Tuple" ]
+          , references =
+                [ reference 27 16 27 20 "List" "List" "List" True
+                , reference 27 26 27 30 "List" "List" "List" True
+                ]
+          , importFacts = []
+          , detectedPlatform = "common"
+          }
+        ]
+    , diagnostics = []
+    }
+
+
+protocolEdit : Int -> Int -> Int -> Int -> String -> String -> Protocol.SourceEdit
+protocolEdit startRow startColumn endRow endColumn replacement kind =
+    { range =
+        { start = { row = startRow, column = startColumn }
+        , end = { row = endRow, column = endColumn }
+        }
+    , replacement = replacement
+    , kind = kind
+    , rule = "ElmToGren"
+    }
+
+
+registry : Registry
+registry =
+    Registry.fromDocument
+        { schemaVersion = 1
+        , packages =
+            [ GrenAnalogue
+                { elmPackage = "elm/core"
+                , grenPackage = "gren-lang/core"
+                , grenVersion = "7.4.2"
+                , platform = Common
+                , modules =
+                    [ { source = "List"
+                      , target = "Array"
+                      , values =
+                            stringDict
+                                [ { key = "filter", value = "keepIf" }
+                                , { key = "sum", value = "ElmToGren.Compat.List.sum" }
+                                ]
+                      , types = Dict.singleton "List" "Array"
+                      }
+                    , { source = "Basics"
+                      , target = "Basics"
+                      , values = Dict.singleton "sqrt" "Math.sqrt"
+                      , types = Dict.empty
+                      }
+                    , { source = "Json.Decode"
+                      , target = "Json.Decode"
+                      , values = Dict.singleton "list" "array"
+                      , types = Dict.singleton "Decoder" "Decoder"
+                      }
+                    , { source = "Tuple"
+                      , target = "ElmToGren.Compat.Tuple"
+                      , values = Dict.empty
+                      , types = Dict.empty
+                      }
+                    ]
+                }
+            ]
+        }
+
+
+stringDict : Array { key : String, value : String } -> Dict String String
+stringDict entries =
+    Array.foldl (\entry dictionary -> Dict.set entry.key entry.value dictionary) Dict.empty entries
+
+
+expectEqual : String -> a -> a -> TestResult
+expectEqual name expected actual =
+    outcome name (expected == actual) ("Expected " ++ Debug.toString expected ++ ", got " ++ Debug.toString actual)
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed failureDetails =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            failureDetails
+    }

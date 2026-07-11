@@ -1,0 +1,82 @@
+module Review.Runner exposing (Options, run)
+
+import ChildProcess
+import Dict
+import FileSystem.Path as Path exposing (Path)
+import Node
+import Port.Error as PortError exposing (Error)
+import Review.Protocol as Protocol exposing (Extraction)
+import System.File
+import System.Process
+import Task exposing (Task)
+
+
+type alias Options =
+    { packageRoot : Path
+    , elmJson : Path
+    , reviewConfig : Path
+    , executable : String
+    , elmHome : Maybe Path
+    , files : Array String
+    , offline : Bool
+    }
+
+
+run : Node.Platform -> ChildProcess.Permission -> Options -> Task Error Extraction
+run platform permission options =
+    let
+        baseArguments =
+            Array.append options.files
+            [ "--elmjson"
+            , System.File.pathToString platform options.elmJson
+            , "--config"
+            , System.File.pathToString platform options.reviewConfig
+            , "--report=json"
+            , "--extract"
+            , "--no-color"
+            ]
+
+        arguments =
+            if options.offline then
+                Array.pushLast "--offline" baseArguments
+
+            else
+                baseArguments
+
+        environment =
+            when options.elmHome is
+                Nothing ->
+                    Dict.empty
+
+                Just elmHome ->
+                    Dict.singleton "ELM_HOME" (System.File.pathToString platform elmHome)
+    in
+    System.Process.run permission
+        { program = options.executable
+        , arguments = arguments
+        , workingDirectory = System.File.pathToString platform options.packageRoot
+        , environment = environment
+        , allowedExitCodes = [ 0, 1 ]
+        , timeoutMilliseconds = 10 * 60 * 1000
+        , maximumOutputBytes = 64 * 1024 * 1024
+        }
+        |> Task.andThen
+            (\output ->
+                when Protocol.decode output.stdout is
+                    Ok extraction ->
+                        Task.succeed extraction
+
+                    Err error ->
+                        let
+                            stderr =
+                                String.trim output.stderr
+
+                            enriched =
+                                if String.isEmpty stderr then
+                                    error
+
+                                else
+                                    PortError.withHint ("elm-review stderr:\n" ++ stderr) error
+                        in
+                        Task.fail enriched
+            )

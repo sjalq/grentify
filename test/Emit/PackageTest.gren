@@ -1,0 +1,210 @@
+module Emit.PackageTest exposing (tests)
+
+import Compiler.Platform as CompilerPlatform
+import Debug
+import Dict
+import Emit.Bundle as Bundle
+import Emit.Manifest as Manifest
+import Emit.Package as Package
+import FileSystem.Path as Path
+import Port.Error as PortError
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ namesAreStable
+    , pathsAreNormalized
+    , unsafePathsAreRejected
+    , packagesArePreparedDeterministically
+    , duplicateModulesAreRejected
+    , compilerBundlesUsePreparedSources
+    ]
+
+
+namesAreStable : TestResult
+namesAreStable =
+    let
+        identity =
+            { name = "ported/source-library"
+            , version = "2.3.4"
+            }
+    in
+    expectEqual
+        "package and bundle storage names are deterministic"
+        { directory = "ported_source-library__2_3_4"
+        , bundle = "ported_source-library__2_3_4.pkg.gz"
+        }
+        { directory = Package.packageDirectoryName identity
+        , bundle = Package.bundleFileName identity
+        }
+
+
+pathsAreNormalized : TestResult
+pathsAreNormalized =
+    expectEqual
+        "Elm and Windows-style source paths become Gren package paths"
+        [ Ok "Example.gren"
+        , Ok "Nested/Example.gren"
+        , Ok "Nested/Already.gren"
+        ]
+        [ Package.moduleRelativePath "src/Example.elm"
+        , Package.moduleRelativePath "src\\Nested\\Example.elm"
+        , Package.moduleRelativePath "Nested/Already.gren"
+        ]
+
+
+unsafePathsAreRejected : TestResult
+unsafePathsAreRejected =
+    let
+        paths =
+            [ "../Escape.elm"
+            , "/tmp/Escape.elm"
+            , "src/../Escape.elm"
+            , "src/not-a-module.elm"
+            ]
+
+        rejected path =
+            when Package.moduleRelativePath path is
+                Err error ->
+                    PortError.code error == "OUTPUT_FAILED"
+
+                Ok _ ->
+                    False
+    in
+    outcome
+        "unsafe or invalid generated module paths are rejected"
+        (Array.all rejected paths)
+        "At least one unsafe path was accepted."
+
+
+packagesArePreparedDeterministically : TestResult
+packagesArePreparedDeterministically =
+    let
+        package =
+            fixturePackage
+                [ { moduleName = "Nested.Zed"
+                  , relativePath = "src/Nested/Zed.elm"
+                  , source = "module Nested.Zed exposing (zed)\n\nzed = 2"
+                  }
+                , { moduleName = "Alpha"
+                  , relativePath = "src/Alpha.elm"
+                  , source = "module Alpha exposing (alpha)\n\nalpha = 1"
+                  }
+                ]
+    in
+    when { first = Package.prepare package, second = Package.prepare package } is
+        { first = Ok first, second = Ok second } ->
+            let
+                actual =
+                    { paths = Array.map .relativePath first.modules
+                    , sources = Dict.keys first.sources
+                    , alpha = Dict.get "Alpha" first.sources
+                    , stableManifest = first.manifestText == second.manifestText
+                    }
+
+                expected =
+                    { paths = [ "Alpha.gren", "Nested/Zed.gren" ]
+                    , sources = [ "Alpha", "Nested.Zed" ]
+                    , alpha = Just "module Alpha exposing (alpha)\n\nalpha = 1\n"
+                    , stableManifest = True
+                    }
+            in
+            expectEqual "package sources are normalized and sorted deterministically" expected actual
+
+        result ->
+            outcome
+                "package sources are normalized and sorted deterministically"
+                False
+                (Debug.toString result)
+
+
+duplicateModulesAreRejected : TestResult
+duplicateModulesAreRejected =
+    let
+        module_ =
+            { moduleName = "Fixture"
+            , relativePath = "src/Fixture.elm"
+            , source = "module Fixture exposing (value)\n\nvalue = 1\n"
+            }
+    in
+    outcome
+        "duplicate generated modules are rejected before writing"
+        (when Package.prepare (fixturePackage [ module_, module_ ]) is
+            Err error ->
+                PortError.code error == "OUTPUT_FAILED"
+
+            Ok _ ->
+                False
+        )
+        "A duplicate module was accepted."
+
+
+compilerBundlesUsePreparedSources : TestResult
+compilerBundlesUsePreparedSources =
+    let
+        prepared =
+            fixturePackage
+                [ { moduleName = "Fixture"
+                  , relativePath = "src/Fixture.elm"
+                  , source = "module Fixture exposing (value)\n\nvalue = 42"
+                  }
+                ]
+                |> Package.prepare
+                |> Result.andThen Bundle.toCompilerPackage
+    in
+    outcome
+        "official compiler bundle values contain normalized generated sources"
+        (when prepared is
+            Ok bundle ->
+                Dict.get "Fixture" bundle.sources
+                    == Just "module Fixture exposing (value)\n\nvalue = 42\n"
+
+            Err _ ->
+                False
+        )
+        (Debug.toString prepared)
+
+
+fixturePackage modules =
+    { sourcePackage = "source/library"
+    , sourceRoot = Path.fromPosixString "/tmp/source-library"
+    , manifest =
+        { platform = CompilerPlatform.Common
+        , name = "ported/source-library"
+        , summary = "A generated fixture"
+        , license = "BSD-3-Clause"
+        , version = "2.3.4"
+        , exposedModules = Manifest.ExposedArray (Array.map .moduleName modules)
+        , grenVersion = "0.6.0 <= v < 0.7.0"
+        , dependencies = Dict.empty
+        }
+    , modules = modules
+    }
+
+
+expectEqual : String -> a -> a -> TestResult
+expectEqual name expected actual =
+    outcome
+        name
+        (expected == actual)
+        ("Expected " ++ Debug.toString expected ++ ", got " ++ Debug.toString actual)
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed failureDetails =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            failureDetails
+    }

@@ -1,0 +1,36 @@
+module Verify.Package exposing (verify)
+
+import ChildProcess
+import Dict
+import FileSystem.Path exposing (Path)
+import Node
+import Port.Error as PortError exposing (Error)
+import System.File
+import System.Process
+import Task exposing (Task)
+
+
+verify
+    : Node.Platform
+    -> ChildProcess.Permission
+    ->
+        { packageDirectory : Path
+        , grenExecutable : String
+        }
+    -> Task Error {}
+verify platform permission options =
+    System.Process.run permission
+        { program = options.grenExecutable
+        , arguments = [ "docs", "--output=/dev/null", "--report=json" ]
+        , workingDirectory = System.File.pathToString platform options.packageDirectory
+        , environment = Dict.empty
+        , allowedExitCodes = [ 0 ]
+        , timeoutMilliseconds = 10 * 60 * 1000
+        , maximumOutputBytes = 64 * 1024 * 1024
+        }
+        |> Task.map (\_ -> {})
+        |> Task.mapError
+            (\error ->
+                PortError.create "GREN_VERIFY_FAILED" (PortError.message error)
+                    |> PortError.withHint "Inspect elm-to-gren.report.json for the transformed package diagnostics."
+            )

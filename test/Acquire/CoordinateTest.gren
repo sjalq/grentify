@@ -1,0 +1,109 @@
+module Acquire.CoordinateTest exposing (tests)
+
+import Acquire.Coordinate as Coordinate exposing (Selector(..))
+import Array exposing (Array)
+import Debug
+import Elm.PackageName as PackageName
+import Elm.Semver as Semver
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ parsesBareAsLatest
+    , parsesExplicitLatest
+    , parsesExactVersion
+    , rejectsEmptySelector
+    , rejectsInvalidVersion
+    , rejectsMultipleSelectors
+    ]
+
+
+parsesBareAsLatest : TestResult
+parsesBareAsLatest =
+    signature "author/package"
+        |> expectEqual "bare coordinates select latest" (Ok "author/package@latest")
+
+
+parsesExplicitLatest : TestResult
+parsesExplicitLatest =
+    signature "author/package@latest"
+        |> expectEqual "explicit latest coordinates are accepted" (Ok "author/package@latest")
+
+
+parsesExactVersion : TestResult
+parsesExactVersion =
+    signature "author/package@12.3.4"
+        |> expectEqual "exact coordinates retain semantic version" (Ok "author/package@12.3.4")
+
+
+rejectsEmptySelector : TestResult
+rejectsEmptySelector =
+    when Coordinate.parse "author/package@" is
+        Err (Coordinate.EmptySelector _) ->
+            outcome "empty coordinate selectors are rejected" True ""
+
+        other ->
+            outcome "empty coordinate selectors are rejected" False (Debug.toString other)
+
+
+rejectsInvalidVersion : TestResult
+rejectsInvalidVersion =
+    when Coordinate.parse "author/package@1.2" is
+        Err (Coordinate.InvalidSelector _) ->
+            outcome "non-semantic coordinate selectors are rejected" True ""
+
+        other ->
+            outcome "non-semantic coordinate selectors are rejected" False (Debug.toString other)
+
+
+rejectsMultipleSelectors : TestResult
+rejectsMultipleSelectors =
+    when Coordinate.parse "author/package@1.2.3@latest" is
+        Err (Coordinate.TooManySelectors _) ->
+            outcome "multiple coordinate selectors are rejected" True ""
+
+        other ->
+            outcome "multiple coordinate selectors are rejected" False (Debug.toString other)
+
+
+signature : String -> Result Coordinate.Error String
+signature source =
+    Coordinate.parse source
+        |> Result.map
+            (\coordinate ->
+                let
+                    selected =
+                        when Coordinate.selector coordinate is
+                            Latest ->
+                                "latest"
+
+                            Exact version ->
+                                Semver.versionToString version
+                in
+                PackageName.toString (Coordinate.packageName coordinate) ++ "@" ++ selected
+            )
+
+
+expectEqual : String -> a -> a -> TestResult
+expectEqual name expected actual =
+    outcome name (expected == actual) ("Expected " ++ Debug.toString expected ++ ", got " ++ Debug.toString actual)
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed details =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            details
+    }

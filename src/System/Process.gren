@@ -1,0 +1,102 @@
+module System.Process exposing
+    ( Output
+    , run
+    )
+
+import Bytes
+import ChildProcess
+import Dict exposing (Dict)
+import Port.Error as PortError exposing (Error)
+import Task exposing (Task)
+
+
+type alias Output =
+    { exitCode : Int
+    , stdout : String
+    , stderr : String
+    }
+
+
+run
+    : ChildProcess.Permission
+    ->
+        { program : String
+        , arguments : Array String
+        , workingDirectory : String
+        , environment : Dict String String
+        , allowedExitCodes : Array Int
+        , timeoutMilliseconds : Int
+        , maximumOutputBytes : Int
+        }
+    -> Task Error Output
+run permission options =
+    let
+        decode bytes =
+            Bytes.toString bytes |> Maybe.withDefault "<non-UTF-8 process output>"
+
+        runOptions =
+            { ChildProcess.defaultRunOptions
+                | shell = ChildProcess.NoShell
+                , workingDirectory = ChildProcess.SetWorkingDirectory options.workingDirectory
+                , environmentVariables = ChildProcess.MergeWithEnvironmentVariables options.environment
+                , maximumBytesWrittenToStreams = options.maximumOutputBytes
+                , runDuration = ChildProcess.Milliseconds options.timeoutMilliseconds
+            }
+
+        accept output =
+            if Array.member output.exitCode options.allowedExitCodes then
+                Task.succeed output
+
+            else
+                Task.fail <|
+                    PortError.create "PROCESS_FAILED"
+                        (options.program
+                            ++ " exited with code "
+                            ++ String.fromInt output.exitCode
+                            ++ ".\n"
+                            ++ processFailureDetail output
+                        )
+    in
+    ChildProcess.run permission options.program options.arguments runOptions
+        |> Task.map
+            (\successful ->
+                { exitCode = 0
+                , stdout = decode successful.stdout
+                , stderr = decode successful.stderr
+                }
+            )
+        |> Task.onError
+            (\failure ->
+                when failure is
+                    ChildProcess.InitError details ->
+                        Task.fail <|
+                            PortError.create "PROCESS_START_FAILED"
+                                ("Could not start " ++ details.program ++ ": " ++ details.errorCode)
+
+                    ChildProcess.ProgramError details ->
+                        accept
+                            { exitCode = details.exitCode
+                            , stdout = decode details.stdout
+                            , stderr = decode details.stderr
+                            }
+            )
+        |> Task.andThen accept
+
+
+processFailureDetail : Output -> String
+processFailureDetail output =
+    let
+        stderr =
+            String.trim output.stderr
+
+        stdout =
+            String.trim output.stdout
+    in
+    if String.isEmpty stderr then
+        stdout
+
+    else if String.isEmpty stdout then
+        stderr
+
+    else
+        stderr ++ "\n" ++ stdout

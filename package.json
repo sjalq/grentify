@@ -1,0 +1,50 @@
+{
+  "name": "elm-to-gren",
+  "version": "0.1.0",
+  "description": "Gren-native CLI that ports Elm package graphs into compiler-validated Gren packages",
+  "license": "MIT",
+  "keywords": [
+    "elm",
+    "gren",
+    "transpiler",
+    "elm-review",
+    "package"
+  ],
+  "bin": {
+    "elm-to-gren": "bin/elm-to-gren.cjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "src/**/*.gren",
+    "review/elm.json",
+    "review/src",
+    "mappings",
+    "gren.json",
+    "gren_packages",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node -e \"const fs=require('node:fs');fs.rmSync('dist',{recursive:true,force:true});fs.mkdirSync('dist',{recursive:true})\" && gren make Main --output=dist/elm-to-gren.js",
+    "check": "gren make Main --output=/dev/null",
+    "test": "node -e \"const fs=require('node:fs');fs.rmSync('dist',{recursive:true,force:true});fs.mkdirSync('dist',{recursive:true})\" && gren make TestMain --output=dist/tests.js && node test/run-tests.cjs",
+    "test:rule": "cd review && elm make src/ReviewConfig.elm --output=/dev/null && node tests/extractor-fixtures.mjs",
+    "test:e2e": "node -e \"const fs=require('node:fs');fs.mkdirSync('dist',{recursive:true})\" && gren make E2EMain --output=dist/e2e-tests.js && node test/run-e2e.cjs",
+    "test:integration": "npm run test:e2e",
+    "test:all": "npm run check && npm test && npm run test:rule && npm run test:e2e",
+    "prepack": "npm run test:all && npm run build",
+    "start": "npm run build --silent && node bin/elm-to-gren.cjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "elm-review": "2.13.5",
+    "gren-lang": "0.6.6"
+  },
+  "devDependencies": {
+    "elm": "0.19.1-6",
+    "prettier": "3.6.2"
+  }
+}

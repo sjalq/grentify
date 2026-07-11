@@ -1,0 +1,373 @@
+module Review.Protocol exposing
+    ( Diagnostic
+    , ExposedItem
+    , Extraction
+    , ImportFact
+    , ModuleExtraction
+    , Position
+    , Range
+    , ResolvedReference
+    , SourceEdit
+    , decode
+    )
+
+import Json.Decode as Decode exposing (Decoder)
+import Port.Error as PortError exposing (Error)
+
+
+type alias Position =
+    { row : Int
+    , column : Int
+    }
+
+
+type alias Range =
+    { start : Position
+    , end : Position
+    }
+
+
+type alias SourceEdit =
+    { range : Range
+    , replacement : String
+    , kind : String
+    , rule : String
+    }
+
+
+type alias Diagnostic =
+    { code : String
+    , severity : String
+    , message : String
+    , range : Maybe Range
+    , help : Maybe String
+    }
+
+
+type alias ResolvedReference =
+    { range : Range
+    , moduleName : String
+    , name : String
+    , text : String
+    , isType : Bool
+    }
+
+
+type alias ExposedItem =
+    { name : String
+    , text : String
+    }
+
+
+type alias ImportFact =
+    { range : Range
+    , moduleName : String
+    , alias : Maybe String
+    , exposingAll : Bool
+    , exposed : Array ExposedItem
+    }
+
+
+type alias ModuleExtraction =
+    { path : String
+    , moduleName : String
+    , edits : Array SourceEdit
+    , diagnostics : Array Diagnostic
+    , importedModules : Array String
+    , requiredAdapters : Array String
+    , references : Array ResolvedReference
+    , importFacts : Array ImportFact
+    , detectedPlatform : String
+    }
+
+
+type alias Extraction =
+    { schemaVersion : Int
+    , modules : Array ModuleExtraction
+    , diagnostics : Array Diagnostic
+    }
+
+
+decode : String -> Result Error Extraction
+decode source =
+    when Decode.decodeString Decode.value source is
+        Err decodeError ->
+            Err <|
+                PortError.create "ELM_REVIEW_REPORT_INVALID"
+                    ("elm-review did not return JSON: " ++ Decode.errorToString decodeError)
+
+        Ok value ->
+            when Decode.decodeValue (Decode.field "type" Decode.string) value is
+                Err decodeError ->
+                    Err <|
+                        PortError.create "ELM_REVIEW_REPORT_INVALID"
+                            ("elm-review report is missing its type field: "
+                                ++ Decode.errorToString decodeError
+                            )
+
+                Ok "error" ->
+                    when Decode.decodeValue toolErrorMessageDecoder value is
+                        Ok message ->
+                            Err (PortError.create "ELM_REVIEW_FAILED" message)
+
+                        Err decodeError ->
+                            Err <|
+                                PortError.create "ELM_REVIEW_REPORT_INVALID"
+                                    ("elm-review returned a tool error that could not be decoded: "
+                                        ++ Decode.errorToString decodeError
+                                    )
+
+                Ok "review-errors" ->
+                    when Decode.decodeValue (Decode.at [ "extracts", "ElmToGren" ] extractionDecoder) value is
+                        Ok extraction ->
+                            Ok extraction
+
+                        Err extractError ->
+                            when Decode.decodeValue reviewErrorsSummaryDecoder value is
+                                Ok summary ->
+                                    if String.isEmpty (String.trim summary) then
+                                        Err <|
+                                            PortError.create "ELM_REVIEW_REPORT_INVALID"
+                                                ("elm-review did not return the ElmToGren extraction schema: "
+                                                    ++ Decode.errorToString extractError
+                                                )
+
+                                    else
+                                        Err (PortError.create "ELM_REVIEW_FAILED" summary)
+
+                                Err _ ->
+                                    Err <|
+                                        PortError.create "ELM_REVIEW_REPORT_INVALID"
+                                            ("elm-review did not return the ElmToGren extraction schema: "
+                                                ++ Decode.errorToString extractError
+                                            )
+
+                Ok other ->
+                    Err <|
+                        PortError.create "ELM_REVIEW_REPORT_INVALID"
+                            ("Expected elm-review report type review-errors, got " ++ other ++ ".")
+
+
+toolErrorMessageDecoder : Decoder String
+toolErrorMessageDecoder =
+    Decode.map2
+        (\title messages ->
+            let
+                body =
+                    messages
+                        |> Array.keepIf (String.isEmpty >> not)
+                        |> String.join "\n"
+            in
+            if String.isEmpty body then
+                title
+
+            else
+                title ++ "\n" ++ body
+        )
+        (Decode.field "title" Decode.string)
+        (Decode.field "message" (Decode.array Decode.string))
+
+
+reviewErrorsSummaryDecoder : Decoder String
+reviewErrorsSummaryDecoder =
+    Decode.field "errors" (Decode.array fileErrorsDecoder)
+        |> Decode.map
+            (\files ->
+                files
+                    |> Array.keepIf (String.isEmpty >> not)
+                    |> String.join "\n"
+            )
+
+
+fileErrorsDecoder : Decoder String
+fileErrorsDecoder =
+    Decode.map2
+        (\path errors ->
+            errors
+                |> Array.map (formatFileError path)
+                |> String.join "\n"
+        )
+        (Decode.field "path" Decode.string)
+        (Decode.field "errors" (Decode.array singleReviewErrorDecoder))
+
+
+singleReviewErrorDecoder : Decoder { rule : String, message : String, details : Array String }
+singleReviewErrorDecoder =
+    Decode.map3
+        (\rule message details -> { rule = rule, message = message, details = details })
+        (Decode.field "rule" Decode.string)
+        (Decode.field "message" Decode.string)
+        (optional "details" (Decode.array Decode.string) [])
+
+
+formatFileError : String -> { rule : String, message : String, details : Array String } -> String
+formatFileError path error =
+    let
+        header =
+            path ++ ": " ++ error.rule ++ ": " ++ error.message
+
+        details =
+            error.details
+                |> Array.keepIf (String.isEmpty >> not)
+                |> Array.map (\detail -> "  " ++ detail)
+                |> String.join "\n"
+    in
+    if String.isEmpty details then
+        header
+
+    else
+        header ++ "\n" ++ details
+
+
+extractionDecoder : Decoder Extraction
+extractionDecoder =
+    Decode.map3
+        (\schemaVersion modules diagnostics ->
+            { schemaVersion = schemaVersion
+            , modules = modules
+            , diagnostics = diagnostics
+            }
+        )
+        (Decode.field "schemaVersion" Decode.int
+            |> Decode.andThen
+                (\schemaVersion ->
+                    if schemaVersion == 1 then
+                        Decode.succeed schemaVersion
+
+                    else
+                        Decode.fail ("Unsupported extraction schema " ++ String.fromInt schemaVersion)
+                )
+        )
+        (Decode.field "modules" (Decode.array moduleDecoder))
+        (optional "diagnostics" (Decode.array diagnosticDecoder) [])
+
+
+moduleDecoder : Decoder ModuleExtraction
+moduleDecoder =
+    Decode.map8
+        (\path moduleName edits diagnostics importedModules requiredAdapters mapping detectedPlatform ->
+            { path = path
+            , moduleName = moduleName
+            , edits = edits
+            , diagnostics = diagnostics
+            , importedModules = importedModules
+            , requiredAdapters = requiredAdapters
+            , references = mapping.references
+            , importFacts = mapping.importFacts
+            , detectedPlatform = detectedPlatform
+            }
+        )
+        (Decode.field "path" Decode.string)
+        (Decode.field "moduleName" Decode.string)
+        (Decode.field "edits" (Decode.array editDecoder))
+        (optional "diagnostics" (Decode.array diagnosticDecoder) [])
+        (optional "importedModules" (Decode.array Decode.string) [])
+        (optional "requiredAdapters" (Decode.array Decode.string) [])
+        (Decode.map2
+            (\references importFacts -> { references = references, importFacts = importFacts })
+            (optional "references" (Decode.array referenceDecoder) [])
+            (optional "importFacts" (Decode.array importFactDecoder) [])
+        )
+        (optional "detectedPlatform" Decode.string "common")
+
+
+referenceDecoder : Decoder ResolvedReference
+referenceDecoder =
+    Decode.map5
+        (\range moduleName name text isType ->
+            { range = range
+            , moduleName = moduleName
+            , name = name
+            , text = text
+            , isType = isType
+            }
+        )
+        (Decode.field "range" rangeDecoder)
+        (Decode.field "moduleName" Decode.string)
+        (Decode.field "name" Decode.string)
+        (Decode.field "text" Decode.string)
+        (Decode.field "isType" Decode.bool)
+
+
+importFactDecoder : Decoder ImportFact
+importFactDecoder =
+    Decode.map5
+        (\range moduleName alias exposingAll exposed ->
+            { range = range
+            , moduleName = moduleName
+            , alias = alias
+            , exposingAll = exposingAll
+            , exposed = exposed
+            }
+        )
+        (Decode.field "range" rangeDecoder)
+        (Decode.field "moduleName" Decode.string)
+        (Decode.field "alias" (Decode.nullable Decode.string))
+        (Decode.field "exposingAll" Decode.bool)
+        (Decode.field "exposed" (Decode.array exposedItemDecoder))
+
+
+exposedItemDecoder : Decoder ExposedItem
+exposedItemDecoder =
+    Decode.map2
+        (\name text -> { name = name, text = text })
+        (Decode.field "name" Decode.string)
+        (Decode.field "text" Decode.string)
+
+
+editDecoder : Decoder SourceEdit
+editDecoder =
+    Decode.map4
+        (\range replacement kind rule ->
+            { range = range
+            , replacement = replacement
+            , kind = kind
+            , rule = rule
+            }
+        )
+        (Decode.field "range" rangeDecoder)
+        (Decode.field "replacement" Decode.string)
+        (Decode.field "kind" Decode.string)
+        (Decode.field "rule" Decode.string)
+
+
+diagnosticDecoder : Decoder Diagnostic
+diagnosticDecoder =
+    Decode.map5
+        (\code severity message range help ->
+            { code = code
+            , severity = severity
+            , message = message
+            , range = range
+            , help = help
+            }
+        )
+        (Decode.field "code" Decode.string)
+        (Decode.field "severity" Decode.string)
+        (Decode.field "message" Decode.string)
+        (Decode.field "range" (Decode.nullable rangeDecoder))
+        (Decode.field "help" (Decode.nullable Decode.string))
+
+
+rangeDecoder : Decoder Range
+rangeDecoder =
+    Decode.map2
+        (\start end -> { start = start, end = end })
+        (Decode.field "start" positionDecoder)
+        (Decode.field "end" positionDecoder)
+
+
+positionDecoder : Decoder Position
+positionDecoder =
+    Decode.map2
+        (\row column -> { row = row, column = column })
+        (Decode.field "row" Decode.int)
+        (Decode.field "column" Decode.int)
+
+
+optional : String -> Decoder a -> a -> Decoder a
+optional fieldName decoder fallback =
+    Decode.oneOf
+        [ Decode.field fieldName decoder
+        , Decode.succeed fallback
+        ]

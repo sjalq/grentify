@@ -1,0 +1,319 @@
+module Emit.Package exposing
+    ( Package
+    , Prepared
+    , PreparedModule
+    , bundleFileName
+    , moduleRelativePath
+    , packageDirectoryName
+    , prepare
+    , write
+    )
+
+import Char
+import Compiler.ModuleName as ModuleName
+import Dict exposing (Dict)
+import Emit.Manifest as Manifest
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Mapping.Types exposing (GeneratedModule)
+import Port.Error as PortError exposing (Error)
+import System.File
+import Task exposing (Task)
+
+
+type alias Package =
+    { sourcePackage : String
+    , sourceRoot : Path
+    , manifest : Manifest.Spec
+    , modules : Array GeneratedModule
+    }
+
+
+type alias PreparedModule =
+    { moduleName : String
+    , relativePath : String
+    , source : String
+    }
+
+
+type alias Prepared =
+    { sourcePackage : String
+    , sourceRoot : Path
+    , manifest : Manifest.Spec
+    , manifestText : String
+    , modules : Array PreparedModule
+    , sources : Dict String String
+    }
+
+
+packageDirectoryName : { name : String, version : String } -> String
+packageDirectoryName identity =
+    safeSegment identity.name
+        ++ "__"
+        ++ safeSegment (String.replace "." "_" identity.version)
+
+
+bundleFileName : { name : String, version : String } -> String
+bundleFileName identity =
+    packageDirectoryName identity ++ ".pkg.gz"
+
+
+safeSegment : String -> String
+safeSegment value =
+    value
+        |> String.toArray
+        |> Array.map
+            (\character ->
+                if Char.isAlphaNum character
+                    || character == '.'
+                    || character == '_'
+                    || character == '-'
+                then
+                    character
+
+                else
+                    '_'
+            )
+        |> String.fromArray
+
+
+prepare : Package -> Result Error Prepared
+prepare package =
+    if String.isEmpty package.sourcePackage then
+        Err (PortError.create "OUTPUT_FAILED" "A generated package is missing its Elm source identity.")
+
+    else
+        Manifest.encode package.manifest
+            |> Result.andThen
+                (\manifestText ->
+                    package.modules
+                        |> Array.map prepareModule
+                        |> combine
+                        |> Result.andThen
+                            (\modules ->
+                                uniqueModules package.manifest.name modules
+                                    |> Result.map
+                                        (\sources ->
+                                            { sourcePackage = package.sourcePackage
+                                            , sourceRoot = package.sourceRoot
+                                            , manifest = package.manifest
+                                            , manifestText = manifestText
+                                            , modules = Array.sortBy .relativePath modules
+                                            , sources = sources
+                                            }
+                                        )
+                            )
+                )
+
+
+prepareModule : GeneratedModule -> Result Error PreparedModule
+prepareModule generated =
+    moduleRelativePath generated.relativePath
+        |> Result.andThen
+            (\relativePath ->
+                let
+                    inferredName =
+                        relativePath
+                            |> String.dropLast (String.count ".gren")
+                            |> String.replace "/" "."
+                in
+                if ModuleName.fromString generated.moduleName == Nothing then
+                    Err <|
+                        PortError.create "OUTPUT_FAILED"
+                            ("Generated module name is invalid: " ++ generated.moduleName)
+
+                else if inferredName /= generated.moduleName then
+                    Err <|
+                        PortError.create "OUTPUT_FAILED"
+                            ("Generated module "
+                                ++ generated.moduleName
+                                ++ " does not match its path "
+                                ++ generated.relativePath
+                                ++ "."
+                            )
+
+                else
+                    Ok
+                        { moduleName = generated.moduleName
+                        , relativePath = relativePath
+                        , source = ensureTrailingNewline generated.source
+                        }
+            )
+
+
+moduleRelativePath : String -> Result Error String
+moduleRelativePath original =
+    let
+        normalized =
+            String.replace "\\" "/" original
+
+        withoutSourcePrefix =
+            if String.startsWith "src/" normalized then
+                String.dropFirst (String.count "src/") normalized
+
+            else
+                normalized
+
+        grenPath =
+            if String.endsWith ".elm" withoutSourcePrefix then
+                String.dropLast (String.count ".elm") withoutSourcePrefix ++ ".gren"
+
+            else if String.endsWith ".gren" withoutSourcePrefix then
+                withoutSourcePrefix
+
+            else
+                withoutSourcePrefix ++ ".gren"
+
+        segments =
+            String.split "/" grenPath
+
+        inferredModuleName =
+            grenPath
+                |> String.dropLast (String.count ".gren")
+                |> String.replace "/" "."
+    in
+    if String.startsWith "/" normalized
+        || String.startsWith "\\" original
+        || String.contains "\u{0000}" original
+        || Array.any (\segment -> segment == "" || segment == "." || segment == "..") segments
+        || ModuleName.fromString inferredModuleName == Nothing
+    then
+        Err <|
+            PortError.create "OUTPUT_FAILED"
+                ("A generated module path escapes its package or is invalid: " ++ original)
+
+    else
+        Ok grenPath
+
+
+uniqueModules : String -> Array PreparedModule -> Result Error (Dict String String)
+uniqueModules packageName modules =
+    Array.foldl
+        (\module_ result ->
+            result
+                |> Result.andThen
+                    (\state ->
+                        if Dict.member module_.moduleName state.sources then
+                            duplicate packageName module_.moduleName
+
+                        else if Dict.member module_.relativePath state.paths then
+                            duplicate packageName module_.relativePath
+
+                        else
+                            Ok
+                                { sources = Dict.set module_.moduleName module_.source state.sources
+                                , paths = Dict.set module_.relativePath {} state.paths
+                                }
+                    )
+        )
+        (Ok { sources = Dict.empty, paths = Dict.empty })
+        modules
+        |> Result.map .sources
+
+
+duplicate : String -> String -> Result Error a
+duplicate packageName moduleIdentity =
+    Err <|
+        PortError.create "OUTPUT_FAILED"
+            ("Generated package "
+                ++ packageName
+                ++ " contains duplicate module output for "
+                ++ moduleIdentity
+                ++ "."
+            )
+
+
+combine : Array (Result error value) -> Result error (Array value)
+combine results =
+    Array.foldl
+        (\result combined ->
+            combined
+                |> Result.andThen
+                    (\values ->
+                        result
+                            |> Result.map (\value -> Array.pushLast value values)
+                    )
+        )
+        (Ok [])
+        results
+
+
+write : FileSystem.Permission -> Path -> Prepared -> Task Error Path
+write permission directory package =
+    System.File.ensureDirectory permission directory
+        |> Task.andThen
+            (\_ ->
+                System.File.writeText permission
+                    (inDirectory "gren.json" directory)
+                    package.manifestText
+            )
+        |> Task.andThen
+            (\_ ->
+                package.modules
+                    |> Array.foldl (writeModule permission directory) (Task.succeed {})
+            )
+        |> Task.andThen (\_ -> copyLicense permission package.sourceRoot directory licenseNames)
+        |> Task.map (\_ -> directory)
+
+
+writeModule : FileSystem.Permission -> Path -> PreparedModule -> Task Error {} -> Task Error {}
+writeModule permission directory module_ pending =
+    pending
+        |> Task.andThen
+            (\_ ->
+                System.File.writeText permission
+                    (inDirectory ("src/" ++ module_.relativePath) directory)
+                    module_.source
+                    |> Task.map (\_ -> {})
+            )
+
+
+licenseNames : Array String
+licenseNames =
+    [ "LICENSE", "LICENSE.txt", "LICENSE.adoc" ]
+
+
+copyLicense : FileSystem.Permission -> Path -> Path -> Array String -> Task Error {}
+copyLicense permission sourceRoot destination names =
+    when Array.popFirst names is
+        Nothing ->
+            Task.succeed {}
+
+        Just { first = name, rest = remaining } ->
+            let
+                source =
+                    inDirectory name sourceRoot
+            in
+            System.File.exists permission source
+                |> Task.andThen
+                    (\sourceExists ->
+                        if sourceExists then
+                            FileSystem.copyFile permission (inDirectory name destination) source
+                                |> Task.map (\_ -> {})
+                                |> Task.mapError
+                                    (\error ->
+                                        PortError.create "OUTPUT_FAILED"
+                                            ("Could not copy "
+                                                ++ Path.toPosixString source
+                                                ++ ": "
+                                                ++ FileSystem.errorToString error
+                                            )
+                                    )
+
+                        else
+                            copyLicense permission sourceRoot destination remaining
+                    )
+
+
+inDirectory : String -> Path -> Path
+inDirectory relative directory =
+    Path.append (Path.fromPosixString relative) directory
+
+
+ensureTrailingNewline : String -> String
+ensureTrailingNewline source =
+    if String.endsWith "\n" source then
+        source
+
+    else
+        source ++ "\n"

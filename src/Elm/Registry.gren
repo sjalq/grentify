@@ -1,0 +1,182 @@
+module Elm.Registry exposing
+    ( Registry
+    , Package
+    , Error(..)
+    , decoder
+    , decodeString
+    , packages
+    , versionsFor
+    , latestFor
+    , errorToString
+    )
+
+{-| Pure decoding and lookup for package.elm-lang.org's `/all-packages`
+response. Network and cache concerns live outside this module.
+-}
+
+import Array exposing (Array)
+import Dict exposing (Dict)
+import Elm.PackageName as PackageName exposing (Name)
+import Elm.Semver as Semver exposing (Version)
+import Json.Decode as Decode exposing (Decoder)
+import Result exposing (Result)
+import String
+
+
+type alias Registry =
+    Dict String Package
+
+
+type alias Package =
+    { name : Name
+    , versions : Array Version
+    }
+
+
+type Error
+    = DecodeFailure String
+
+
+decoder : Decoder Registry
+decoder =
+    Decode.keyValuePairs (Decode.array Decode.string)
+        |> Decode.andThen decodePackages
+
+
+decodeString : String -> Result Error Registry
+decodeString source =
+    Decode.decodeString decoder source
+        |> Result.mapError (Decode.errorToString >> DecodeFailure)
+
+
+decodePackages : Array { key : String, value : Array String } -> Decoder Registry
+decodePackages entries =
+    entries
+        |> Array.sortBy .key
+        |> Array.foldl decodePackage (Ok Dict.empty)
+        |> resultToDecoder
+
+
+decodePackage : { key : String, value : Array String } -> Result String Registry -> Result String Registry
+decodePackage entry accumulated =
+    accumulated
+        |> Result.andThen
+            (\registry ->
+                if Dict.member entry.key registry then
+                    Err ("Elm registry repeats package key '" ++ entry.key ++ "'.")
+
+                else
+                    when PackageName.parse entry.key is
+                        Err packageError ->
+                            Err
+                                ("Elm registry contains an invalid package name. "
+                                    ++ PackageName.errorToString packageError
+                                )
+
+                        Ok packageName ->
+                            when decodeVersions entry.key entry.value is
+                                Err versionError ->
+                                    Err versionError
+
+                                Ok versions ->
+                                    Ok
+                                        (Dict.set entry.key
+                                            { name = packageName
+                                            , versions = versions
+                                            }
+                                            registry
+                                        )
+            )
+
+
+decodeVersions : String -> Array String -> Result String (Array Version)
+decodeVersions packageName sources =
+    sources
+        |> Array.indexedFoldl
+            (\index source accumulated ->
+                accumulated
+                    |> Result.andThen
+                        (\versions ->
+                            when Semver.parseVersion source is
+                                Ok semanticVersion ->
+                                    Ok (Array.pushLast semanticVersion versions)
+
+                                Err versionError ->
+                                    Err
+                                        ("Elm registry has invalid version '"
+                                            ++ source
+                                            ++ "' for '"
+                                            ++ packageName
+                                            ++ "' at index "
+                                            ++ String.fromInt index
+                                            ++ ". "
+                                            ++ Semver.errorToString versionError
+                                        )
+                        )
+            )
+            (Ok [])
+        |> Result.andThen
+            (\versions ->
+                let
+                    sorted =
+                        Semver.sortDescending versions
+                in
+                when firstDuplicate sorted is
+                    Nothing ->
+                        Ok sorted
+
+                    Just duplicate ->
+                        Err
+                            ("Elm registry repeats '"
+                                ++ packageName
+                                ++ "@"
+                                ++ Semver.versionToString duplicate
+                                ++ "'."
+                            )
+            )
+
+
+firstDuplicate : Array Version -> Maybe Version
+firstDuplicate versions =
+    when { first = Array.get 0 versions, second = Array.get 1 versions } is
+        { first = Just first, second = Just second } ->
+            if Semver.compare first second == EQ then
+                Just first
+
+            else
+                firstDuplicate (Array.dropFirst 1 versions)
+
+        _ ->
+            Nothing
+
+
+resultToDecoder : Result String a -> Decoder a
+resultToDecoder result =
+    when result is
+        Ok value ->
+            Decode.succeed value
+
+        Err message ->
+            Decode.fail message
+
+
+packages : Registry -> Array Package
+packages =
+    Dict.values
+
+
+versionsFor : Name -> Registry -> Maybe (Array Version)
+versionsFor packageName registry =
+    Dict.get (PackageName.toString packageName) registry
+        |> Maybe.map .versions
+
+
+latestFor : Name -> Registry -> Maybe Version
+latestFor packageName registry =
+    versionsFor packageName registry
+        |> Maybe.andThen Array.first
+
+
+errorToString : Error -> String
+errorToString (DecodeFailure message) =
+    "Invalid Elm all-packages registry response: " ++ message

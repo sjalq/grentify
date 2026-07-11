@@ -1,0 +1,1524 @@
+module Transform.Pipeline exposing
+    ( Diagnostic
+    , SourceFile
+    , TransformResult
+    , TransformedModule
+    , collectMappingEdits
+    , convertEditKind
+    , ensureModuleImports
+    , toGrenSourcePath
+    , transform
+    , transformModule
+    )
+
+{-| Apply an `ElmToGren` elm-review extraction to package sources.
+
+The review rule supplies structural, AST-derived edits plus every resolved
+value/type reference and import. This module validates the edits, derives
+catalog mapping edits from the resolved references, applies both edit sets in
+one pass, and finalizes the small lexical syntax differences.
+-}
+
+import Array exposing (Array)
+import Char
+import Dict exposing (Dict)
+import Mapping.Adapter as Adapter
+import Mapping.Registry as Registry
+import Mapping.Types exposing (GeneratedModule, ModuleMapping, Registry, adapterIdName)
+import Maybe exposing (Maybe(..))
+import Port.Error as PortError exposing (Error)
+import Result exposing (Result(..))
+import Review.Protocol as Protocol
+import Transform.Lexical as Lexical
+import Transform.SourceEdit as SourceEdit exposing (EditKind(..), SourceEdit, SourceError)
+
+
+type alias SourceFile =
+    { path : String
+    , source : String
+    }
+
+
+type alias Diagnostic =
+    { path : Maybe String
+    , moduleName : Maybe String
+    , code : String
+    , severity : String
+    , message : String
+    , range : Maybe Protocol.Range
+    , help : Maybe String
+    }
+
+
+type alias TransformedModule =
+    { generated : GeneratedModule
+    , inputPath : String
+    , reviewEdits : Array SourceEdit
+    , lexicalEdits : Array SourceEdit
+    , mappingEdits : Array SourceEdit
+    , diagnostics : Array Diagnostic
+    , requiredAdapters : Array String
+    , detectedPlatform : String
+    }
+
+
+type alias TransformResult =
+    { modules : Array GeneratedModule
+    , transformedModules : Array TransformedModule
+    , diagnostics : Array Diagnostic
+    , requiredAdapters : Array String
+    , detectedPlatform : String
+    }
+
+
+type TokenKind
+    = IdentifierToken
+    | DotToken
+    | PunctuationToken
+    | OperatorToken
+
+
+type alias CodeToken =
+    { kind : TokenKind
+    , text : String
+    , startOffset : Int
+    , endOffset : Int
+    }
+
+
+mappingRule : String
+mappingRule =
+    "elm-to-gren/mapping"
+
+
+{-| Catalog mapping edits derived from rule-resolved references and imports.
+All ranges are positions in the original Elm source, so these edits are
+applied together with the structural review edits.
+-}
+collectMappingEdits : Registry -> Protocol.ModuleExtraction -> Array SourceEdit
+collectMappingEdits registry extraction =
+    let
+        -- Elm and Gren both implicitly `import Platform.Cmd as Cmd` and
+        -- `import Platform.Sub as Sub`; references resolve to the canonical
+        -- module name, so without this seed `Cmd.none` would be rewritten to
+        -- `Platform.Cmd.none`, which Gren cannot see behind its alias.
+        implicitAliases =
+            Dict.empty
+                |> Dict.set "Platform.Cmd" "Cmd"
+                |> Dict.set "Platform.Sub" "Sub"
+
+        aliases =
+            extraction.importFacts
+                |> Array.foldl
+                    (\fact found ->
+                        when fact.alias is
+                            Just aliasName ->
+                                Dict.set fact.moduleName aliasName found
+
+                            Nothing ->
+                                found
+                    )
+                    implicitAliases
+    in
+    Array.append
+        (Array.mapAndKeepJust (referenceEdit registry aliases) extraction.references)
+        (Array.mapAndKeepJust (importEdit registry) extraction.importFacts)
+
+
+referenceEdit : Registry -> Dict String String -> Protocol.ResolvedReference -> Maybe SourceEdit
+referenceEdit registry aliases reference =
+    Registry.moduleMappingFor reference.moduleName registry
+        |> Maybe.andThen
+            (\mapping ->
+                let
+                    writtenBare =
+                        not (String.contains "." reference.text)
+
+                    -- Gren hides a module's canonical name behind its alias,
+                    -- so every rewritten reference to an aliased import must
+                    -- use the alias (the rebuilt import preserves it).
+                    prefix =
+                        when Dict.get reference.moduleName aliases is
+                            Just aliasName ->
+                                aliasName
+
+                            Nothing ->
+                                mapping.target
+
+                    replacement =
+                        when mappedSymbol mapping reference.name is
+                            Just target ->
+                                if String.contains "." target then
+                                    target
+
+                                else if reference.isType && writtenBare then
+                                    -- A bare mapped type stays bare (`List` -> `Array`):
+                                    -- Gren default-imports the core types, and the
+                                    -- qualified spelling is wrong for builtin types.
+                                    target
+
+                                else
+                                    prefix ++ "." ++ target
+
+                            Nothing ->
+                                if reference.isType && writtenBare then
+                                    -- An unmapped bare type keeps its exposure from the
+                                    -- (possibly rewritten) import that provided it.
+                                    reference.text
+
+                                else
+                                    -- Values are always qualified: rewritten
+                                    -- imports may otherwise expose ambiguous names.
+                                    prefix ++ "." ++ reference.name
+                in
+                if replacement == reference.text then
+                    Nothing
+
+                else
+                    Just
+                        { range = reference.range
+                        , replacement = replacement
+                        , kind = SymbolEdit
+                        , rule = mappingRule
+                        }
+            )
+
+
+importEdit : Registry -> Protocol.ImportFact -> Maybe SourceEdit
+importEdit registry fact =
+    Registry.moduleMappingFor fact.moduleName registry
+        |> Maybe.andThen
+            (\mapping ->
+                let
+                    rewrittenItems =
+                        Array.map
+                            (\item ->
+                                when mappedSymbol mapping item.name is
+                                    Nothing ->
+                                        { text = Just item.text, changed = False }
+
+                                    Just target ->
+                                        if String.contains "." target then
+                                            -- Fully-qualified targets cannot appear in an
+                                            -- exposing list; references to them are
+                                            -- rewritten fully qualified instead.
+                                            { text = Nothing, changed = True }
+
+                                        else
+                                            { text = Just (String.replace item.name target item.text)
+                                            , changed = target /= item.name
+                                            }
+                            )
+                            fact.exposed
+
+                    keptItems =
+                        Array.mapAndKeepJust .text rewrittenItems
+
+                    anyItemChanged =
+                        Array.any .changed rewrittenItems
+                in
+                if mapping.target == fact.moduleName && not anyItemChanged then
+                    Nothing
+
+                else
+                    let
+                        aliasPart =
+                            when fact.alias is
+                                Just aliasName ->
+                                    " as " ++ aliasName
+
+                                Nothing ->
+                                    ""
+
+                        exposingPart =
+                            if fact.exposingAll then
+                                " exposing (..)"
+
+                            else if Array.isEmpty keptItems then
+                                ""
+
+                            else
+                                " exposing (" ++ String.join ", " keptItems ++ ")"
+                    in
+                    -- ponytail: two imports mapping to the same target module would
+                    -- emit a duplicate import; dedupe here if a real package hits it.
+                    Just
+                        { range = fact.range
+                        , replacement = "import " ++ mapping.target ++ aliasPart ++ exposingPart
+                        , kind = ModuleEdit
+                        , rule = mappingRule
+                        }
+            )
+
+
+transform : Registry -> Protocol.Extraction -> Array SourceFile -> Result Error TransformResult
+transform registry extraction sources =
+    validateExtraction extraction sources
+        |> Result.andThen
+            (\_ ->
+                sources
+                    |> Array.sortBy (\source -> (normalizePath source.path).path)
+                    |> Array.foldl
+                        (\source accumulated ->
+                            accumulated
+                                |> Result.andThen
+                                    (\modules ->
+                                        findMatchingExtraction source.path extraction.modules
+                                            |> Result.andThen (transformModule registry source)
+                                            |> Result.map (\module_ -> Array.pushLast module_ modules)
+                                    )
+                        )
+                        (Ok [])
+            )
+        |> Result.andThen
+            (\transformedModules ->
+                normalizeRequiredAdapters
+                    (Array.flatten (Array.map .requiredAdapters transformedModules))
+                    |> Result.map
+                        (\requiredAdapters ->
+                            let
+                                globalDiagnostics =
+                                    Array.map (attachDiagnostic Nothing Nothing) extraction.diagnostics
+
+                                diagnostics =
+                                    Array.append globalDiagnostics
+                                        (Array.flatten (Array.map .diagnostics transformedModules))
+                            in
+                            { modules = Array.map .generated transformedModules
+                            , transformedModules = transformedModules
+                            , diagnostics = diagnostics
+                            , requiredAdapters = requiredAdapters
+                            , detectedPlatform = aggregatePlatform transformedModules
+                            }
+                        )
+            )
+
+
+transformModule : Registry -> SourceFile -> Protocol.ModuleExtraction -> Result Error TransformedModule
+transformModule registry input extraction =
+    toGrenSourcePath input.path
+        |> Result.andThen
+            (\outputPath ->
+                validateModuleExtraction input extraction
+                    |> Result.andThen
+                        (\reviewEdits ->
+                            let
+                                mappingEdits =
+                                    collectMappingEdits registry extraction
+
+                                combinedEdits =
+                                    Array.append reviewEdits mappingEdits
+                            in
+                            applySourceEdits input.path input.source combinedEdits
+                                |> Result.andThen
+                                    (\reviewed ->
+                                        Lexical.transform reviewed
+                                            |> Result.mapError (sourceEditError input.path)
+                                    )
+                                |> Result.andThen
+                                    (\lexical ->
+                                        requiredModules lexical.source
+                                            |> Result.andThen
+                                                (\requirements ->
+                                                    normalizeRequiredAdapters
+                                                        (Array.append extraction.requiredAdapters requirements.adapters)
+                                                        |> Result.map
+                                                            (\requiredAdapters ->
+                                                                let
+                                                                    finalSource =
+                                                                        ensureModuleImports lexical.source requirements.imports
+
+                                                                    extractedDiagnostics =
+                                                                        Array.map
+                                                                            (attachDiagnostic (Just input.path) (Just extraction.moduleName))
+                                                                            extraction.diagnostics
+
+                                                                    diagnostics =
+                                                                        addUnsupportedDiagnostics input extraction finalSource extractedDiagnostics
+                                                                in
+                                                                { generated =
+                                                                    { moduleName = extraction.moduleName
+                                                                    , relativePath = outputPath
+                                                                    , source = ensureTrailingNewline finalSource
+                                                                    }
+                                                                , inputPath = input.path
+                                                                , reviewEdits = reviewEdits
+                                                                , lexicalEdits = lexical.edits
+                                                                , mappingEdits = mappingEdits
+                                                                , diagnostics = diagnostics
+                                                                , requiredAdapters = requiredAdapters
+                                                                , detectedPlatform = extraction.detectedPlatform
+                                                                }
+                                                            )
+                                                )
+                                    )
+                        )
+            )
+
+
+validateExtraction : Protocol.Extraction -> Array SourceFile -> Result Error {}
+validateExtraction extraction sources =
+    if extraction.schemaVersion /= 1 then
+        Err <|
+            PortError.create "EXTRACTION_INVALID"
+                ("Unsupported ElmToGren extraction schema " ++ String.fromInt extraction.schemaVersion ++ ".")
+
+    else if Array.isEmpty sources then
+        Err (PortError.create "SOURCE_INVALID" "The Elm package has no source modules to transform.")
+
+    else
+        validateDiagnostics "global extraction" extraction.diagnostics
+            |> Result.andThen (\_ -> ensureUniqueSourcePaths sources)
+            |> Result.andThen (\_ -> ensureUniqueExtractionPaths extraction.modules)
+            |> Result.andThen
+                (\_ ->
+                    sources
+                        |> Array.foldl
+                            (\source validation ->
+                                validation
+                                    |> Result.andThen
+                                        (\_ ->
+                                            findMatchingExtraction source.path extraction.modules
+                                                |> Result.map (\_ -> {})
+                                        )
+                            )
+                            (Ok {})
+                )
+            |> Result.andThen
+                (\_ ->
+                    extraction.modules
+                        |> Array.foldl
+                            (\module_ validation ->
+                                validation
+                                    |> Result.andThen
+                                        (\_ ->
+                                            let
+                                                matches =
+                                                    Array.keepIf (\source -> sourcePathsMatch source.path module_.path) sources
+                                            in
+                                            if Array.length matches == 1 then
+                                                Ok {}
+
+                                            else if Array.isEmpty matches then
+                                                Err <|
+                                                    PortError.create "EXTRACTION_INVALID"
+                                                        ("Review extraction contains module '"
+                                                            ++ module_.path
+                                                            ++ "' with no corresponding Elm source."
+                                                        )
+
+                                            else
+                                                Err <|
+                                                    PortError.create "EXTRACTION_INVALID"
+                                                        ("Review extraction module '"
+                                                            ++ module_.path
+                                                            ++ "' matches multiple Elm sources."
+                                                        )
+                                        )
+                            )
+                            (Ok {})
+                )
+
+
+ensureUniqueSourcePaths : Array SourceFile -> Result Error {}
+ensureUniqueSourcePaths sources =
+    ensureUniquePaths "Elm source" (Array.map .path sources)
+
+
+ensureUniqueExtractionPaths : Array Protocol.ModuleExtraction -> Result Error {}
+ensureUniqueExtractionPaths modules =
+    ensureUniquePaths "review extraction" (Array.map .path modules)
+
+
+ensureUniquePaths : String -> Array String -> Result Error {}
+ensureUniquePaths description paths =
+    paths
+        |> Array.foldl
+            (\path result ->
+                result
+                    |> Result.andThen
+                        (\seen ->
+                            let
+                                normalized =
+                                    (normalizePath path).path
+                            in
+                            if Dict.member normalized seen then
+                                Err <|
+                                    PortError.create "EXTRACTION_INVALID"
+                                        ("Duplicate " ++ description ++ " path '" ++ path ++ "'.")
+
+                            else
+                                Ok (Dict.set normalized {} seen)
+                        )
+            )
+            (Ok Dict.empty)
+        |> Result.map (\_ -> {})
+
+
+findMatchingExtraction : String -> Array Protocol.ModuleExtraction -> Result Error Protocol.ModuleExtraction
+findMatchingExtraction path modules =
+    let
+        matches =
+            Array.keepIf (\module_ -> sourcePathsMatch path module_.path) modules
+    in
+    when matches is
+        [ match ] ->
+            Ok match
+
+        [] ->
+            Err <|
+                PortError.create "EXTRACTION_INVALID"
+                    ("No review extraction module matches Elm source '" ++ path ++ "'.")
+
+        _ ->
+            Err <|
+                PortError.create "EXTRACTION_INVALID"
+                    ("Multiple review extraction modules match Elm source '" ++ path ++ "'.")
+
+
+validateModuleExtraction : SourceFile -> Protocol.ModuleExtraction -> Result Error (Array SourceEdit)
+validateModuleExtraction input extraction =
+    if not (sourcePathsMatch input.path extraction.path) then
+        Err <|
+            PortError.create "EXTRACTION_INVALID"
+                ("Review extraction for '" ++ extraction.path ++ "' cannot be applied to '" ++ input.path ++ "'.")
+
+    else if String.isEmpty extraction.moduleName then
+        Err (PortError.create "EXTRACTION_INVALID" ("Review extraction for '" ++ input.path ++ "' omitted its module name."))
+
+    else
+        declaredModuleName input.source
+            |> Result.andThen
+                (\declared ->
+                    if declared /= extraction.moduleName then
+                        Err <|
+                            PortError.create "EXTRACTION_INVALID"
+                                ("Review extraction names module '"
+                                    ++ extraction.moduleName
+                                    ++ "', but '"
+                                    ++ input.path
+                                    ++ "' declares '"
+                                    ++ declared
+                                    ++ "'."
+                                )
+
+                    else
+                        validateDetectedPlatform extraction.detectedPlatform
+                )
+            |> Result.andThen (\_ -> validateDiagnostics input.path extraction.diagnostics)
+            |> Result.andThen (\_ -> normalizeRequiredAdapters extraction.requiredAdapters |> Result.map (\_ -> {}))
+            |> Result.andThen
+                (\_ ->
+                    extraction.edits
+                        |> Array.foldl
+                            (\edit result ->
+                                result
+                                    |> Result.andThen
+                                        (\edits ->
+                                            convertReviewEdit edit
+                                                |> Result.map (\converted -> Array.pushLast converted edits)
+                                        )
+                            )
+                            (Ok [])
+                )
+
+
+validateDetectedPlatform : String -> Result Error {}
+validateDetectedPlatform platform =
+    if Array.member platform [ "common", "browser", "node" ] then
+        Ok {}
+
+    else
+        Err <|
+            PortError.create "EXTRACTION_INVALID"
+                ("Review extraction returned unknown platform '" ++ platform ++ "'.")
+
+
+validateDiagnostics : String -> Array Protocol.Diagnostic -> Result Error {}
+validateDiagnostics description diagnostics =
+    diagnostics
+        |> Array.foldl
+            (\diagnostic result ->
+                result
+                    |> Result.andThen
+                        (\_ ->
+                            if not (Array.member diagnostic.severity [ "info", "warning", "error" ]) then
+                                Err <|
+                                    PortError.create "EXTRACTION_INVALID"
+                                        ("Diagnostic '"
+                                            ++ diagnostic.code
+                                            ++ "' in "
+                                            ++ description
+                                            ++ " has invalid severity '"
+                                            ++ diagnostic.severity
+                                            ++ "'."
+                                        )
+
+                            else if String.isEmpty diagnostic.code || String.isEmpty diagnostic.message then
+                                Err <|
+                                    PortError.create "EXTRACTION_INVALID"
+                                        ("A diagnostic in " ++ description ++ " is missing its code or message.")
+
+                            else
+                                Ok {}
+                        )
+            )
+            (Ok {})
+
+
+convertReviewEdit : Protocol.SourceEdit -> Result Error SourceEdit
+convertReviewEdit edit =
+    if String.isEmpty edit.rule then
+        Err (PortError.create "EXTRACTION_INVALID" "A review source edit is missing its rule name.")
+
+    else
+        convertEditKind edit.kind
+            |> Result.map
+                (\kind ->
+                    { range = edit.range
+                    , replacement = edit.replacement
+                    , kind = kind
+                    , rule = edit.rule
+                    }
+                )
+
+
+convertEditKind : String -> Result Error EditKind
+convertEditKind kind =
+    when kind is
+        "case-keyword" ->
+            Ok SyntaxEdit
+
+        "of-keyword" ->
+            Ok SyntaxEdit
+
+        "unit" ->
+            Ok UnitEdit
+
+        "tuple-expression" ->
+            Ok TupleEdit
+
+        "tuple-pattern" ->
+            Ok TupleEdit
+
+        "tuple-type" ->
+            Ok TupleEdit
+
+        "list-cons-expression" ->
+            Ok ListEdit
+
+        "list-cons-pattern" ->
+            Ok ListEdit
+
+        "module-reference" ->
+            Ok ModuleEdit
+
+        "symbol-reference" ->
+            Ok SymbolEdit
+
+        "custom-type" ->
+            Ok ConstructorEdit
+
+        "custom-constructor" ->
+            Ok ConstructorEdit
+
+        "record-alias-constructor" ->
+            Ok ConstructorEdit
+
+        "manual" ->
+            Ok (CustomEdit "manual")
+
+        _ ->
+            Err <|
+                PortError.create "EXTRACTION_INVALID"
+                    ("Review extraction contains unknown edit kind '" ++ kind ++ "'.")
+
+
+applySourceEdits : String -> String -> Array SourceEdit -> Result Error String
+applySourceEdits path source edits =
+    SourceEdit.applyEdits source edits
+        |> Result.mapError (sourceEditError path)
+
+
+sourceEditError : String -> SourceError -> Error
+sourceEditError path problem =
+    PortError.create "SOURCE_EDIT_INVALID"
+        ("Could not apply edits to '" ++ path ++ "': " ++ SourceEdit.describeError problem)
+
+
+toGrenSourcePath : String -> Result Error String
+toGrenSourcePath original =
+    let
+        normalized =
+            (normalizePath original).path
+
+        segments =
+            String.split "/" normalized
+
+        hasDrivePrefix =
+            when Array.first segments is
+                Just first ->
+                    String.contains ":" first
+
+                Nothing ->
+                    False
+    in
+    if String.isEmpty original
+        || String.contains "\u{0000}" original
+        || String.startsWith "/" normalized
+        || hasDrivePrefix
+        || Array.any (\segment -> segment == "" || segment == "." || segment == "..") segments
+    then
+        Err <|
+            PortError.create "SOURCE_INVALID"
+                ("Elm source path '" ++ original ++ "' escapes the package root or is invalid.")
+
+    else if not (String.endsWith ".elm" normalized) then
+        Err <|
+            PortError.create "SOURCE_INVALID"
+                ("Elm source path '" ++ original ++ "' does not end in .elm.")
+
+    else
+        Ok (String.dropLast (String.count ".elm") normalized ++ ".gren")
+
+
+normalizePath : String -> { path : String }
+normalizePath original =
+    let
+        withoutCurrent =
+            if String.startsWith "./" original then
+                String.dropFirst 2 original
+
+            else
+                original
+
+        collapsed =
+            collapseSlashes (String.replace "\\" "/" withoutCurrent)
+    in
+    { path = collapsed }
+
+
+collapseSlashes : String -> String
+collapseSlashes path =
+    if String.contains "//" path then
+        collapseSlashes (String.replace "//" "/" path)
+
+    else
+        path
+
+
+sourcePathsMatch : String -> String -> Bool
+sourcePathsMatch left right =
+    let
+        normalizedLeft =
+            (normalizePath left).path
+
+        normalizedRight =
+            (normalizePath right).path
+    in
+    normalizedLeft == normalizedRight
+        || String.endsWith ("/" ++ normalizedRight) normalizedLeft
+        || String.endsWith ("/" ++ normalizedLeft) normalizedRight
+
+
+declaredModuleName : String -> Result Error String
+declaredModuleName source =
+    let
+        tokens =
+            scanCodeTokens source
+
+        moduleToken =
+            Array.findFirst (\token -> token.kind == IdentifierToken && token.text == "module") tokens
+    in
+    when moduleToken is
+        Nothing ->
+            Err (PortError.create "SOURCE_INVALID" "Elm source does not contain a module declaration.")
+
+        Just found ->
+            when qualifiedNameAt source tokens (found.index + 1) is
+                Nothing ->
+                    Err (PortError.create "SOURCE_INVALID" "Elm module declaration does not contain a valid module name.")
+
+                Just qualified ->
+                    Ok qualified.name
+
+
+{-| Build catalog mapping edits against code tokens only.
+-}
+mappedSymbol : ModuleMapping -> String -> Maybe String
+mappedSymbol mapping symbol =
+    when Dict.get symbol mapping.values is
+        Just target ->
+            Just target
+
+        Nothing ->
+            Dict.get symbol mapping.types
+
+
+qualifiedNameAt : String -> Array CodeToken -> Int -> Maybe { name : String, afterIndex : Int }
+qualifiedNameAt source tokens start =
+    when Array.get start tokens is
+        Just first ->
+            if first.kind == IdentifierToken && startsUpper first.text then
+                qualifiedNameFrom source tokens (start + 1) first.text first.endOffset
+
+            else
+                Nothing
+
+        Nothing ->
+            Nothing
+
+
+qualifiedNameFrom : String -> Array CodeToken -> Int -> String -> Int -> Maybe { name : String, afterIndex : Int }
+qualifiedNameFrom source tokens cursor name previousEnd =
+    when { dot = Array.get cursor tokens, next = Array.get (cursor + 1) tokens } is
+        { dot = Just dot, next = Just next } ->
+            if dot.kind == DotToken
+                && next.kind == IdentifierToken
+                && startsUpper next.text
+                && previousEnd == dot.startOffset
+                && dot.endOffset == next.startOffset
+                && String.slice previousEnd next.startOffset source == "."
+            then
+                qualifiedNameFrom source tokens (cursor + 2) (name ++ "." ++ next.text) next.endOffset
+
+            else
+                Just { name = name, afterIndex = cursor }
+
+        _ ->
+            Just { name = name, afterIndex = cursor }
+
+
+startsUpper : String -> Bool
+startsUpper value =
+    when Array.first (String.toArray value) is
+        Just first ->
+            Char.isUpper first
+
+        Nothing ->
+            False
+
+
+type alias RequiredModules =
+    { imports : Array String
+    , adapters : Array String
+    }
+
+
+requiredModules : String -> Result Error RequiredModules
+requiredModules source =
+    let
+        tokens =
+            scanCodeTokens source
+
+        existing =
+            importedModuleNames source tokens
+
+        referenced =
+            Array.indexedFoldl (collectReferencedModules source tokens) Dict.empty tokens
+
+        imports =
+            referenced
+                |> Dict.keys
+                |> Array.keepIf (\moduleName -> not (Dict.member moduleName existing))
+
+        adapterRequirements =
+            Array.append (Dict.keys referenced) (Dict.keys existing)
+                |> Array.mapAndKeepJust Adapter.adapterIdForTarget
+                |> Array.map adapterIdName
+    in
+    normalizeRequiredAdapters adapterRequirements
+        |> Result.map
+            (\adapters ->
+                { imports = imports
+                , adapters = adapters
+                }
+            )
+
+
+collectReferencedModules : String -> Array CodeToken -> Int -> CodeToken -> Dict String {} -> Dict String {}
+collectReferencedModules source tokens index token found =
+    if token.kind /= IdentifierToken then
+        found
+
+    else
+        let
+            previous =
+                Array.get (index - 1) tokens
+
+            inDeclaration =
+                when previous is
+                    Just value ->
+                        value.kind == IdentifierToken
+                            && (value.text == "module" || value.text == "import" || value.text == "as")
+
+                    Nothing ->
+                        False
+        in
+        if inDeclaration then
+            found
+
+        else
+            when fullQualifiedNameAt source tokens index is
+                Nothing ->
+                    found
+
+                Just qualified ->
+                    let
+                        withAdapter =
+                            when Adapter.adapterModuleForTarget qualified.name is
+                                Just adapterModule ->
+                                    Dict.set adapterModule {} found
+
+                                Nothing ->
+                                    found
+                    in
+                    if String.startsWith "Math." qualified.name then
+                        Dict.set "Math" {} withAdapter
+
+                    else
+                        withAdapter
+
+
+fullQualifiedNameAt : String -> Array CodeToken -> Int -> Maybe { name : String, afterIndex : Int }
+fullQualifiedNameAt source tokens start =
+    when Array.get start tokens is
+        Just first ->
+            if first.kind == IdentifierToken && startsUpper first.text then
+                fullQualifiedNameFrom source tokens (start + 1) first.text first.endOffset
+
+            else
+                Nothing
+
+        Nothing ->
+            Nothing
+
+
+fullQualifiedNameFrom : String -> Array CodeToken -> Int -> String -> Int -> Maybe { name : String, afterIndex : Int }
+fullQualifiedNameFrom source tokens cursor name previousEnd =
+    when { dot = Array.get cursor tokens, next = Array.get (cursor + 1) tokens } is
+        { dot = Just dot, next = Just next } ->
+            if dot.kind == DotToken
+                && next.kind == IdentifierToken
+                && previousEnd == dot.startOffset
+                && dot.endOffset == next.startOffset
+                && String.slice previousEnd next.startOffset source == "."
+            then
+                fullQualifiedNameFrom source tokens (cursor + 2) (name ++ "." ++ next.text) next.endOffset
+
+            else
+                Just { name = name, afterIndex = cursor }
+
+        _ ->
+            Just { name = name, afterIndex = cursor }
+
+
+importedModuleNames : String -> Array CodeToken -> Dict String {}
+importedModuleNames source tokens =
+    Array.indexedFoldl
+        (\index token names ->
+            if token.kind == IdentifierToken && token.text == "import" then
+                when qualifiedNameAt source tokens (index + 1) is
+                    Just qualified ->
+                        Dict.set qualified.name {} names
+
+                    Nothing ->
+                        names
+
+            else
+                names
+        )
+        Dict.empty
+        tokens
+
+
+normalizeRequiredAdapters : Array String -> Result Error (Array String)
+normalizeRequiredAdapters requirements =
+    requirements
+        |> Array.foldl
+            (\requirement result ->
+                result
+                    |> Result.andThen
+                        (\byName ->
+                            Adapter.normalize requirement
+                                |> Result.mapError
+                                    (\_ ->
+                                        PortError.create "EXTRACTION_INVALID"
+                                            ("Unknown compatibility adapter requirement '" ++ requirement ++ "'.")
+                                    )
+                                |> Result.map
+                                    (\adapterId -> Dict.set (adapterIdName adapterId) {} byName)
+                        )
+            )
+            (Ok Dict.empty)
+        |> Result.map Dict.keys
+
+
+ensureModuleImports : String -> Array String -> String
+ensureModuleImports source requested =
+    let
+        tokens =
+            scanCodeTokens source
+
+        existing =
+            importedModuleNames source tokens
+
+        missing =
+            requested
+                |> Array.foldl (\name names -> Dict.set name {} names) Dict.empty
+                |> Dict.keys
+                |> Array.keepIf (\name -> not (Dict.member name existing))
+    in
+    if Array.isEmpty missing then
+        source
+
+    else
+        let
+            insertionOffset =
+                when Array.findFirst (\token -> token.kind == IdentifierToken && token.text == "import") tokens is
+                    Just found ->
+                        found.value.startOffset
+
+                    Nothing ->
+                        moduleImportInsertionOffset source tokens
+
+            imports =
+                missing
+                    |> Array.map (\name -> "import " ++ name)
+                    |> String.join "\n"
+
+            before =
+                String.slice 0 insertionOffset source
+
+            after =
+                String.slice insertionOffset (String.count source) source
+
+            leading =
+                if String.endsWith "\n\n" before then
+                    ""
+
+                else if String.endsWith "\n" before then
+                    "\n"
+
+                else
+                    "\n\n"
+
+            trailing =
+                if String.startsWith "\n" after then
+                    "\n"
+
+                else
+                    "\n\n"
+        in
+        before ++ leading ++ imports ++ trailing ++ after
+
+
+moduleImportInsertionOffset : String -> Array CodeToken -> Int
+moduleImportInsertionOffset source tokens =
+    when Array.findFirst (\token -> token.kind == IdentifierToken && token.text == "exposing") tokens is
+        Nothing ->
+            0
+
+        Just foundExposing ->
+            when matchingCloseParenthesis tokens (foundExposing.index + 1) is
+                Nothing ->
+                    foundExposing.value.endOffset
+
+                Just closeIndex ->
+                    when Array.get closeIndex tokens is
+                        Nothing ->
+                            foundExposing.value.endOffset
+
+                        Just close ->
+                            let
+                                afterWhitespace =
+                                    skipWhitespace (String.toArray source) close.endOffset
+                            in
+                            if matchesCharactersAt (String.toArray source) afterWhitespace [ '{', '-', '|' ] then
+                                skipBlockComment (String.toArray source) (afterWhitespace + 2) 1
+
+                            else
+                                close.endOffset
+
+
+matchingCloseParenthesis : Array CodeToken -> Int -> Maybe Int
+matchingCloseParenthesis tokens start =
+    matchingCloseFrom tokens start 0
+
+
+matchingCloseFrom : Array CodeToken -> Int -> Int -> Maybe Int
+matchingCloseFrom tokens cursor depth =
+    when Array.get cursor tokens is
+        Nothing ->
+            Nothing
+
+        Just token ->
+            if token.kind == PunctuationToken && token.text == "(" then
+                matchingCloseFrom tokens (cursor + 1) (depth + 1)
+
+            else if token.kind == PunctuationToken && token.text == ")" then
+                if depth == 1 then
+                    Just cursor
+
+                else
+                    matchingCloseFrom tokens (cursor + 1) (depth - 1)
+
+            else
+                matchingCloseFrom tokens (cursor + 1) depth
+
+
+attachDiagnostic : Maybe String -> Maybe String -> Protocol.Diagnostic -> Diagnostic
+attachDiagnostic path moduleName diagnostic =
+    { path = path
+    , moduleName = moduleName
+    , code = diagnostic.code
+    , severity = diagnostic.severity
+    , message = diagnostic.message
+    , range = diagnostic.range
+    , help = diagnostic.help
+    }
+
+
+addUnsupportedDiagnostics
+    : SourceFile
+    -> Protocol.ModuleExtraction
+    -> String
+    -> Array Diagnostic
+    -> Array Diagnostic
+addUnsupportedDiagnostics input extraction source diagnostics =
+    let
+        tokens =
+            scanCodeTokens source
+
+        isPortModule =
+            containsIdentifierSequence tokens [ "port", "module" ]
+
+        isEffectModule =
+            containsIdentifierSequence tokens [ "effect", "module" ]
+
+        hasPortDeclaration =
+            Array.indexedFoldl
+                (\index token found ->
+                    found
+                        || (token.kind == IdentifierToken
+                                && token.text == "port"
+                                && when Array.get (index + 1) tokens is
+                                    Just next ->
+                                        next.kind == IdentifierToken && next.text /= "module"
+
+                                    Nothing ->
+                                        False
+                           )
+                )
+                False
+                tokens
+
+        kernelImport =
+            Array.any isKernelModule extraction.importedModules
+                || Array.indexedFoldl
+                    (\index _ found ->
+                        found
+                            || when fullQualifiedNameAt source tokens index is
+                                Just qualified ->
+                                    isKernelModule qualified.name
+
+                                Nothing ->
+                                    False
+                    )
+                    False
+                    tokens
+
+        withPortModule =
+            if isPortModule then
+                addSyntheticDiagnostic input extraction
+                    "UNSUPPORTED_PORT"
+                    "Elm port modules require an explicit Gren platform implementation."
+                    "Replace ports with a Gren Node or browser API boundary and provide a mapping for it."
+                    diagnostics
+
+            else
+                diagnostics
+
+        withPortDeclaration =
+            if hasPortDeclaration && not isPortModule then
+                addSyntheticDiagnostic input extraction
+                    "UNSUPPORTED_PORT"
+                    "Elm ports need a Gren-specific implementation."
+                    "Replace this port with an explicit Gren Node or browser API boundary."
+                    withPortModule
+
+            else
+                withPortModule
+
+        withEffect =
+            if isEffectModule then
+                addSyntheticDiagnostic input extraction
+                    "UNSUPPORTED_KERNEL"
+                    "Elm effect modules depend on privileged runtime and kernel APIs."
+                    "Map this module to a Gren runtime package or replace the effect manager with ordinary Gren code."
+                    withPortDeclaration
+
+            else
+                withPortDeclaration
+    in
+    if kernelImport then
+        addSyntheticDiagnostic input extraction
+            "UNSUPPORTED_KERNEL"
+            "Elm kernel module imports cannot be transpiled to portable Gren package source."
+            "Map the owning package to a Gren analogue or replace the kernel call with a public Gren API."
+            withEffect
+
+    else
+        withEffect
+
+
+addSyntheticDiagnostic
+    : SourceFile
+    -> Protocol.ModuleExtraction
+    -> String
+    -> String
+    -> String
+    -> Array Diagnostic
+    -> Array Diagnostic
+addSyntheticDiagnostic input extraction code message help diagnostics =
+    if Array.any (\diagnostic -> diagnostic.code == code) diagnostics then
+        diagnostics
+
+    else
+        Array.pushLast
+            { path = Just input.path
+            , moduleName = Just extraction.moduleName
+            , code = code
+            , severity = "error"
+            , message = message
+            , range = Nothing
+            , help = Just help
+            }
+            diagnostics
+
+
+isKernelModule : String -> Bool
+isKernelModule moduleName =
+    moduleName == "Elm.Kernel"
+        || String.startsWith "Elm.Kernel." moduleName
+        || moduleName == "Native"
+        || String.startsWith "Native." moduleName
+
+
+containsIdentifierSequence : Array CodeToken -> Array String -> Bool
+containsIdentifierSequence tokens expected =
+    Array.indexedFoldl
+        (\index _ found -> found || identifierSequenceAt tokens index expected)
+        False
+        tokens
+
+
+identifierSequenceAt : Array CodeToken -> Int -> Array String -> Bool
+identifierSequenceAt tokens start expected =
+    Array.indexedFoldl
+        (\relative name matches ->
+            matches
+                && when Array.get (start + relative) tokens is
+                    Just token ->
+                        token.kind == IdentifierToken && token.text == name
+
+                    Nothing ->
+                        False
+        )
+        True
+        expected
+
+
+aggregatePlatform : Array TransformedModule -> String
+aggregatePlatform modules =
+    let
+        platforms =
+            Array.map .detectedPlatform modules
+    in
+    if Array.member "browser" platforms then
+        "browser"
+
+    else if Array.member "node" platforms then
+        "node"
+
+    else
+        "common"
+
+
+ensureTrailingNewline : String -> String
+ensureTrailingNewline source =
+    if String.endsWith "\n" source then
+        source
+
+    else
+        source ++ "\n"
+
+
+scanCodeTokens : String -> Array CodeToken
+scanCodeTokens source =
+    scanTokensFrom (String.toArray source) 0 []
+
+
+scanTokensFrom : Array Char -> Int -> Array CodeToken -> Array CodeToken
+scanTokensFrom characters offset tokens =
+    -- Every recursive call below binds its arguments first: Gren only
+    -- eliminates direct self tail calls, so `recurse a (g b) c` or
+    -- `recurse a b <| build c` overflow the stack on large files.
+    when Array.get offset characters is
+        Nothing ->
+            tokens
+
+        Just character ->
+            if matchesCharactersAt characters offset [ '-', '-' ] then
+                let
+                    next =
+                        skipLineComment characters (offset + 2)
+                in
+                scanTokensFrom characters next tokens
+
+            else if matchesCharactersAt characters offset [ '{', '-' ] then
+                let
+                    next =
+                        skipBlockComment characters (offset + 2) 1
+                in
+                scanTokensFrom characters next tokens
+
+            else if matchesCharactersAt characters offset [ '[', 'g', 'l', 's', 'l', '|' ] then
+                let
+                    next =
+                        skipGlsl characters (offset + 6)
+                in
+                scanTokensFrom characters next tokens
+
+            else if matchesCharactersAt characters offset [ '"', '"', '"' ] then
+                let
+                    next =
+                        skipMultilineString characters (offset + 3)
+                in
+                scanTokensFrom characters next tokens
+
+            else if character == '"' then
+                let
+                    next =
+                        skipQuoted characters '"' (offset + 1)
+                in
+                scanTokensFrom characters next tokens
+
+            else if character == '\'' then
+                let
+                    next =
+                        skipQuoted characters '\'' (offset + 1)
+                in
+                scanTokensFrom characters next tokens
+
+            else if isIdentifierStart character then
+                let
+                    tokenEnd =
+                        scanIdentifierEnd characters (offset + 1)
+
+                    nextTokens =
+                        Array.pushLast
+                            { kind = IdentifierToken
+                            , text = String.fromArray (Array.slice offset tokenEnd characters)
+                            , startOffset = offset
+                            , endOffset = tokenEnd
+                            }
+                            tokens
+                in
+                scanTokensFrom characters tokenEnd nextTokens
+
+            else if character == '.' then
+                let
+                    nextTokens =
+                        Array.pushLast
+                            { kind = DotToken, text = ".", startOffset = offset, endOffset = offset + 1 }
+                            tokens
+                in
+                scanTokensFrom characters (offset + 1) nextTokens
+
+            else if String.contains (String.fromArray [ character ]) "()[]{};," then
+                let
+                    nextTokens =
+                        Array.pushLast
+                            { kind = PunctuationToken
+                            , text = String.fromArray [ character ]
+                            , startOffset = offset
+                            , endOffset = offset + 1
+                            }
+                            tokens
+                in
+                scanTokensFrom characters (offset + 1) nextTokens
+
+            else if String.contains (String.fromArray [ character ]) "+-/*=.$<>:&|^!?%#@~\\" then
+                let
+                    tokenEnd =
+                        scanOperatorEnd characters (offset + 1)
+
+                    nextTokens =
+                        Array.pushLast
+                            { kind = OperatorToken
+                            , text = String.fromArray (Array.slice offset tokenEnd characters)
+                            , startOffset = offset
+                            , endOffset = tokenEnd
+                            }
+                            tokens
+                in
+                scanTokensFrom characters tokenEnd nextTokens
+
+            else
+                scanTokensFrom characters (offset + 1) tokens
+
+
+isIdentifierStart : Char -> Bool
+isIdentifierStart character =
+    Char.isAlpha character || character == '_'
+
+
+isIdentifierContinuation : Char -> Bool
+isIdentifierContinuation character =
+    isIdentifierStart character || Char.isDigit character || character == '\''
+
+
+scanIdentifierEnd : Array Char -> Int -> Int
+scanIdentifierEnd characters offset =
+    when Array.get offset characters is
+        Just character ->
+            if isIdentifierContinuation character then
+                scanIdentifierEnd characters (offset + 1)
+
+            else
+                offset
+
+        Nothing ->
+            offset
+
+
+scanOperatorEnd : Array Char -> Int -> Int
+scanOperatorEnd characters offset =
+    when Array.get offset characters is
+        Just character ->
+            if String.contains (String.fromArray [ character ]) "+-/*=.$<>:&|^!?%#@~\\" then
+                scanOperatorEnd characters (offset + 1)
+
+            else
+                offset
+
+        Nothing ->
+            offset
+
+
+skipLineComment : Array Char -> Int -> Int
+skipLineComment characters offset =
+    when Array.get offset characters is
+        Nothing ->
+            Array.length characters
+
+        Just '\n' ->
+            offset
+
+        Just '\r' ->
+            offset
+
+        Just _ ->
+            skipLineComment characters (offset + 1)
+
+
+skipBlockComment : Array Char -> Int -> Int -> Int
+skipBlockComment characters offset depth =
+    if depth == 0 then
+        offset
+
+    else
+        when Array.get offset characters is
+            Nothing ->
+                Array.length characters
+
+            Just _ ->
+                if matchesCharactersAt characters offset [ '{', '-' ] then
+                    skipBlockComment characters (offset + 2) (depth + 1)
+
+                else if matchesCharactersAt characters offset [ '-', '}' ] then
+                    skipBlockComment characters (offset + 2) (depth - 1)
+
+                else
+                    skipBlockComment characters (offset + 1) depth
+
+
+skipQuoted : Array Char -> Char -> Int -> Int
+skipQuoted characters delimiter offset =
+    when Array.get offset characters is
+        Nothing ->
+            Array.length characters
+
+        Just '\\' ->
+            if offset + 1 < Array.length characters then
+                skipQuoted characters delimiter (offset + 2)
+
+            else
+                Array.length characters
+
+        Just character ->
+            if character == delimiter then
+                offset + 1
+
+            else
+                skipQuoted characters delimiter (offset + 1)
+
+
+skipMultilineString : Array Char -> Int -> Int
+skipMultilineString characters offset =
+    when Array.get offset characters is
+        Nothing ->
+            Array.length characters
+
+        Just '\\' ->
+            if offset + 1 < Array.length characters then
+                skipMultilineString characters (offset + 2)
+
+            else
+                Array.length characters
+
+        Just _ ->
+            if matchesCharactersAt characters offset [ '"', '"', '"' ] then
+                offset + 3
+
+            else
+                skipMultilineString characters (offset + 1)
+
+
+skipGlsl : Array Char -> Int -> Int
+skipGlsl characters offset =
+    when Array.get offset characters is
+        Nothing ->
+            Array.length characters
+
+        Just _ ->
+            if matchesCharactersAt characters offset [ '|', ']' ] then
+                offset + 2
+
+            else
+                skipGlsl characters (offset + 1)
+
+
+skipWhitespace : Array Char -> Int -> Int
+skipWhitespace characters offset =
+    when Array.get offset characters is
+        Just character ->
+            if Array.member character [ ' ', '\t', '\n', '\r', '\u{000B}', '\u{000C}' ] then
+                skipWhitespace characters (offset + 1)
+
+            else
+                offset
+
+        Nothing ->
+            offset
+
+
+matchesCharactersAt : Array Char -> Int -> Array Char -> Bool
+matchesCharactersAt characters offset expected =
+    Array.indexedFoldl
+        (\relative expectedCharacter matches ->
+            matches && Array.get (offset + relative) characters == Just expectedCharacter
+        )
+        True
+        expected

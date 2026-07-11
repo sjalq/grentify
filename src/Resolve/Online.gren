@@ -1,0 +1,346 @@
+module Resolve.Online exposing
+    ( Provider
+    , resolve
+    )
+
+{-| Effectful, deterministic Elm dependency solving. Registry reads stay at the
+provider boundary while the branch/search state is pure. Candidate packages are
+loaded newest-first, the most constrained unresolved package is branched first,
+and dependency conflicts backtrack before becoming user-facing errors.
+-}
+
+import Array exposing (Array)
+import Dict exposing (Dict)
+import Elm.Manifest as Manifest exposing (Manifest)
+import Elm.PackageName as PackageName exposing (Name)
+import Elm.Semver as Semver exposing (Version)
+import Port.Error as PortError exposing (Error)
+import Resolve.Solver as Solver exposing (Requirement, Resolution)
+import Task exposing (Task)
+
+
+type alias Provider =
+    { versionsFor : Name -> Task Error (Array Version)
+    , manifestFor : Name -> Version -> Task Error Manifest
+    }
+
+
+type alias State =
+    { selected : Dict String Manifest
+    , requirements : Dict String (Array Requirement)
+    }
+
+
+type alias CandidateSet =
+    { key : String
+    , name : Name
+    , requirements : Array Requirement
+    , available : Array Version
+    , candidates : Array Version
+    }
+
+
+resolve : Solver.Options -> Provider -> Manifest -> Task Error Resolution
+resolve options provider root =
+    let
+        rootKey =
+            PackageName.toString root.name
+
+        initial =
+            { selected = Dict.singleton rootKey root
+            , requirements = Dict.empty
+            }
+    in
+    when addDependencies options root initial is
+        Err solverError ->
+            Task.fail (solverFailure solverError)
+
+        Ok state ->
+            search options provider root state
+                |> Task.andThen
+                    (\searchResult ->
+                        when searchResult is
+                            Err solverError ->
+                                Task.fail (solverFailure solverError)
+
+                            Ok solved ->
+                                solved.selected
+                                    |> Dict.values
+                                    |> Solver.catalogFromManifests
+                                    |> Result.andThen (\catalog -> Solver.solveWith options catalog root)
+                                    |> resultTask solverFailure
+                    )
+
+
+search : Solver.Options -> Provider -> Manifest -> State -> Task Error (Result Solver.Error State)
+search options provider root state =
+    let
+        unresolved =
+            Dict.keys state.requirements
+                |> Array.keepIf (\key -> not (Dict.member key state.selected))
+    in
+    if Array.isEmpty unresolved then
+        Task.succeed (Ok state)
+
+    else
+        buildCandidateSets provider state unresolved
+            |> Task.andThen
+                (\candidateResult ->
+                    when candidateResult is
+                        Err solverError ->
+                            Task.succeed (Err solverError)
+
+                        Ok candidateSets ->
+                            when Array.first (Array.sortWith compareCandidateSets candidateSets) is
+                                Nothing ->
+                                    Task.succeed (Err (Solver.InternalInvariant "No candidate set was produced."))
+
+                                Just selected ->
+                                    tryCandidates options provider root state selected Nothing selected.candidates
+                )
+
+
+buildCandidateSets : Provider -> State -> Array String -> Task Error (Result Solver.Error (Array CandidateSet))
+buildCandidateSets provider state keys =
+    Array.foldl
+        (\key pending ->
+            pending
+                |> Task.andThen
+                    (\accumulated ->
+                        when accumulated is
+                            Err solverError ->
+                                Task.succeed (Err solverError)
+
+                            Ok sets ->
+                                candidateSet provider state key
+                                    |> Task.map (Result.map (\set -> Array.pushLast set sets))
+                    )
+        )
+        (Task.succeed (Ok []))
+        keys
+
+
+candidateSet : Provider -> State -> String -> Task Error (Result Solver.Error CandidateSet)
+candidateSet provider state key =
+    let
+        requirements =
+            Dict.get key state.requirements |> Maybe.withDefault []
+    in
+    when Array.first requirements is
+        Nothing ->
+            Task.succeed (Err (Solver.InternalInvariant ("Dependency " ++ key ++ " has no requirements.")))
+
+        Just first ->
+            provider.versionsFor first.packageName
+                |> Task.map
+                    (\available ->
+                        let
+                            sorted =
+                                Semver.sortDescending available
+
+                            candidates =
+                                Array.keepIf (\version -> requirementsSatisfied version requirements) sorted
+                        in
+                        if Array.isEmpty sorted then
+                            Err
+                                (Solver.PackageUnavailable
+                                    { packageName = first.packageName
+                                    , requirements = requirements
+                                    }
+                                )
+
+                        else if Array.isEmpty candidates then
+                            Err
+                                (Solver.NoCompatibleVersion
+                                    { packageName = first.packageName
+                                    , requirements = requirements
+                                    , availableVersions = sorted
+                                    }
+                                )
+
+                        else
+                            Ok
+                                { key = key
+                                , name = first.packageName
+                                , requirements = requirements
+                                , available = sorted
+                                , candidates = candidates
+                                }
+                    )
+
+
+tryCandidates
+    : Solver.Options
+    -> Provider
+    -> Manifest
+    -> State
+    -> CandidateSet
+    -> Maybe Solver.Error
+    -> Array Version
+    -> Task Error (Result Solver.Error State)
+tryCandidates options provider root state selected firstFailure remaining =
+    when Array.popFirst remaining is
+        Nothing ->
+            Task.succeed <|
+                Err <|
+                    Maybe.withDefault
+                        (Solver.NoCompatibleVersion
+                            { packageName = selected.name
+                            , requirements = selected.requirements
+                            , availableVersions = selected.available
+                            }
+                        )
+                        firstFailure
+
+        Just { first = version, rest } ->
+            provider.manifestFor selected.name version
+                |> Task.andThen
+                    (\manifest ->
+                        if PackageName.toString manifest.name /= selected.key
+                            || Semver.compare manifest.version version /= EQ
+                        then
+                            Task.fail <|
+                                PortError.create "SOURCE_INVALID"
+                                    ("Registry provider returned the wrong package for " ++ selected.key ++ ".")
+
+                        else
+                            let
+                                branch =
+                                    { selected = Dict.set selected.key manifest state.selected
+                                    , requirements = state.requirements
+                                    }
+                            in
+                            when addDependencies options manifest branch is
+                                Err conflict ->
+                                    tryCandidates options provider root state selected
+                                        (firstError firstFailure conflict)
+                                        rest
+
+                                Ok withDependencies ->
+                                    search options provider root withDependencies
+                                        |> Task.andThen
+                                            (\attempt ->
+                                                when attempt is
+                                                    Ok solved ->
+                                                        Task.succeed (Ok solved)
+
+                                                    Err conflict ->
+                                                        tryCandidates options provider root state selected
+                                                            (firstError firstFailure conflict)
+                                                            rest
+                                            )
+                    )
+
+
+addDependencies : Solver.Options -> Manifest -> State -> Result Solver.Error State
+addDependencies options source initial =
+    Manifest.dependencyArray source
+        |> Array.foldl
+            (\dependency accumulated ->
+                accumulated
+                    |> Result.andThen
+                        (\state ->
+                            if options.isMapped dependency.name then
+                                Ok state
+
+                            else
+                                addRequirement source.name dependency state
+                        )
+            )
+            (Ok initial)
+
+
+addRequirement : Name -> Manifest.Dependency -> State -> Result Solver.Error State
+addRequirement requester dependency state =
+    let
+        key =
+            PackageName.toString dependency.name
+
+        requirement =
+            { requester = requester
+            , packageName = dependency.name
+            , constraint = dependency.constraint
+            }
+
+        requirements =
+            Dict.get key state.requirements
+                |> Maybe.withDefault []
+                |> Array.pushLast requirement
+                |> Array.sortWith compareRequirements
+
+        next =
+            { selected = state.selected
+            , requirements = Dict.set key requirements state.requirements
+            }
+    in
+    when Dict.get key state.selected is
+        Nothing ->
+            Ok next
+
+        Just selected ->
+            if requirementsSatisfied selected.version requirements then
+                Ok next
+
+            else
+                Err
+                    (Solver.SelectedVersionConflict
+                        { packageName = dependency.name
+                        , selectedVersion = selected.version
+                        , requirements = requirements
+                        }
+                    )
+
+
+requirementsSatisfied : Version -> Array Requirement -> Bool
+requirementsSatisfied version requirements =
+    Array.all (\requirement -> Semver.satisfies requirement.constraint version) requirements
+
+
+compareRequirements : Requirement -> Requirement -> Order
+compareRequirements left right =
+    when PackageName.compare left.requester right.requester is
+        EQ ->
+            when PackageName.compare left.packageName right.packageName is
+                EQ ->
+                    compare (Semver.rangeToString left.constraint) (Semver.rangeToString right.constraint)
+
+                order ->
+                    order
+
+        order ->
+            order
+
+
+compareCandidateSets : CandidateSet -> CandidateSet -> Order
+compareCandidateSets left right =
+    when compare (Array.length left.candidates) (Array.length right.candidates) is
+        EQ ->
+            compare left.key right.key
+
+        order ->
+            order
+
+
+firstError : Maybe error -> error -> Maybe error
+firstError existing next =
+    when existing is
+        Just earlier ->
+            Just earlier
+
+        Nothing ->
+            Just next
+
+
+solverFailure : Solver.Error -> Error
+solverFailure solverError =
+    PortError.create "DEPENDENCY_CONFLICT" (Solver.errorToString solverError)
+
+
+resultTask : (problem -> Error) -> Result problem value -> Task Error value
+resultTask toError result =
+    when result is
+        Ok value ->
+            Task.succeed value
+
+        Err problem ->
+            Task.fail (toError problem)

@@ -1,0 +1,308 @@
+module Resolve.SolverTest exposing (tests)
+
+import Array exposing (Array)
+import Debug
+import Dict
+import Elm.Manifest as Manifest exposing (Manifest)
+import Elm.PackageName as PackageName
+import Elm.Semver as Semver
+import Resolve.Solver as Solver exposing (Error(..))
+import String
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ backtracksAcrossTransitiveConflict
+    , returnsDependencyFirstOrder
+    , deterministicAcrossCatalogOrder
+    , reportsExactUnsatisfiedPackage
+    , reportsUnavailablePackage
+    , omitsMappedDependencies
+    , reportsCyclePath
+    , rejectsDuplicateCatalogVersions
+    ]
+
+
+backtracksAcrossTransitiveConflict : TestResult
+backtracksAcrossTransitiveConflict =
+    when backtrackingScenario is
+        Err message ->
+            outcome "solver backtracks to an older compatible release" False message
+
+        Ok prepared ->
+            when Solver.solve prepared.catalog prepared.root is
+                Err error ->
+                    outcome "solver backtracks to an older compatible release" False (Solver.errorToString error)
+
+                Ok resolution ->
+                    let
+                        selectedVersion =
+                            Dict.get "author/a" resolution.packages
+                                |> Maybe.map (.manifest >> .version >> Semver.versionToString)
+                    in
+                    expectEqual "solver backtracks to an older compatible release" (Just "1.0.0") selectedVersion
+
+
+returnsDependencyFirstOrder : TestResult
+returnsDependencyFirstOrder =
+    when backtrackingScenario is
+        Err message ->
+            outcome "topological order is dependency-first and deterministic" False message
+
+        Ok prepared ->
+            Solver.solve prepared.catalog prepared.root
+                |> Result.map (.order >> Array.map PackageName.toString)
+                |> expectEqual
+                    "topological order is dependency-first and deterministic"
+                    (Ok [ "author/shared", "author/a", "author/b", "root/package" ])
+
+
+deterministicAcrossCatalogOrder : TestResult
+deterministicAcrossCatalogOrder =
+    when { forward = backtrackingScenario, backward = prepare backtrackingRoot (Array.reverse backtrackingPackageSources) } is
+        { forward = Ok forward, backward = Ok backward } ->
+            expectEqual
+                "catalog input order cannot change the solution"
+                (Solver.solve forward.catalog forward.root |> Result.map resolutionSignature |> Result.mapError Solver.errorToString)
+                (Solver.solve backward.catalog backward.root |> Result.map resolutionSignature |> Result.mapError Solver.errorToString)
+
+        values ->
+            outcome "catalog input order cannot change the solution" False (Debug.toString values)
+
+
+reportsExactUnsatisfiedPackage : TestResult
+reportsExactUnsatisfiedPackage =
+    let
+        prepared =
+            prepare
+                (manifestJson "root/package" "1.0.0" "{\"author/a\":\"3.0.0 <= v < 4.0.0\"}")
+                [ manifestJson "author/a" "1.0.0" "{}" ]
+    in
+    when prepared is
+        Err message ->
+            outcome "unsatisfied constraints name the exact package and versions" False message
+
+        Ok scenario ->
+            when Solver.solve scenario.catalog scenario.root is
+                Err (NoCompatibleVersion details) ->
+                    outcome
+                        "unsatisfied constraints name the exact package and versions"
+                        (PackageName.toString details.packageName == "author/a"
+                            && Array.map Semver.versionToString details.availableVersions == [ "1.0.0" ]
+                            && Array.length details.requirements == 1
+                        )
+                        (Debug.toString details)
+
+                Err other ->
+                    outcome "unsatisfied constraints name the exact package and versions" False (Solver.errorToString other)
+
+                Ok _ ->
+                    outcome "unsatisfied constraints name the exact package and versions" False "Expected NoCompatibleVersion."
+
+
+reportsUnavailablePackage : TestResult
+reportsUnavailablePackage =
+    let
+        prepared =
+            prepare
+                (manifestJson "root/package" "1.0.0" "{\"missing/package\":\"1.0.0 <= v < 2.0.0\"}")
+                []
+    in
+    when prepared is
+        Err message ->
+            outcome "missing packages produce a distinct exact error" False message
+
+        Ok scenario ->
+            when Solver.solve scenario.catalog scenario.root is
+                Err (PackageUnavailable details) ->
+                    outcome
+                        "missing packages produce a distinct exact error"
+                        (PackageName.toString details.packageName == "missing/package"
+                            && Array.map (.requester >> PackageName.toString) details.requirements == [ "root/package" ]
+                        )
+                        (Debug.toString details)
+
+                Err other ->
+                    outcome "missing packages produce a distinct exact error" False (Solver.errorToString other)
+
+                Ok _ ->
+                    outcome "missing packages produce a distinct exact error" False "Expected PackageUnavailable."
+
+
+omitsMappedDependencies : TestResult
+omitsMappedDependencies =
+    let
+        prepared =
+            prepare
+                (manifestJson "root/package" "1.0.0" "{\"elm/core\":\"1.0.0 <= v < 2.0.0\"}")
+                []
+    in
+    when prepared is
+        Err message ->
+            outcome "mapped Gren analogues are omitted from the solved graph" False message
+
+        Ok scenario ->
+            Solver.solveWith
+                { isMapped = \packageName -> PackageName.toString packageName == "elm/core" }
+                scenario.catalog
+                scenario.root
+                |> Result.map (.order >> Array.map PackageName.toString)
+                |> expectEqual "mapped Gren analogues are omitted from the solved graph" (Ok [ "root/package" ])
+
+
+reportsCyclePath : TestResult
+reportsCyclePath =
+    let
+        prepared =
+            prepare
+                (manifestJson "root/package" "1.0.0" "{\"author/a\":\"1.0.0 <= v < 2.0.0\"}")
+                [ manifestJson "author/a" "1.0.0" "{\"root/package\":\"1.0.0 <= v < 2.0.0\"}" ]
+    in
+    when prepared is
+        Err message ->
+            outcome "dependency cycles include the closed cycle path" False message
+
+        Ok scenario ->
+            when Solver.solve scenario.catalog scenario.root is
+                Err (DependencyCycle cycle) ->
+                    cycle
+                        |> Array.map PackageName.toString
+                        |> expectEqual "dependency cycles include the closed cycle path" [ "root/package", "author/a", "root/package" ]
+
+                Err other ->
+                    outcome "dependency cycles include the closed cycle path" False (Solver.errorToString other)
+
+                Ok _ ->
+                    outcome "dependency cycles include the closed cycle path" False "Expected DependencyCycle."
+
+
+rejectsDuplicateCatalogVersions : TestResult
+rejectsDuplicateCatalogVersions =
+    when decodeManifest (manifestJson "author/a" "1.0.0" "{}") is
+        Err message ->
+            outcome "catalog validation rejects duplicate coordinates" False message
+
+        Ok duplicate ->
+            when Solver.catalogFromManifests [ duplicate, duplicate ] is
+                Err (DuplicateCatalogVersion details) ->
+                    expectEqual
+                        "catalog validation rejects duplicate coordinates"
+                        "author/a@1.0.0"
+                        (PackageName.toString details.packageName ++ "@" ++ Semver.versionToString details.version)
+
+                Err other ->
+                    outcome "catalog validation rejects duplicate coordinates" False (Solver.errorToString other)
+
+                Ok _ ->
+                    outcome "catalog validation rejects duplicate coordinates" False "Expected DuplicateCatalogVersion."
+
+
+backtrackingScenario : Result String { root : Manifest, catalog : Solver.Catalog }
+backtrackingScenario =
+    prepare backtrackingRoot backtrackingPackageSources
+
+
+backtrackingRoot : String
+backtrackingRoot =
+    manifestJson
+        "root/package"
+        "1.0.0"
+        "{\"author/a\":\"1.0.0 <= v < 3.0.0\",\"author/b\":\"1.0.0 <= v < 2.0.0\"}"
+
+
+backtrackingPackageSources : Array String
+backtrackingPackageSources =
+    [ manifestJson "author/a" "2.0.0" "{\"author/shared\":\"2.0.0 <= v < 3.0.0\"}"
+    , manifestJson "author/a" "1.0.0" "{\"author/shared\":\"1.0.0 <= v < 2.0.0\"}"
+    , manifestJson "author/b" "1.0.0" "{\"author/shared\":\"1.0.0 <= v < 2.0.0\"}"
+    , manifestJson "author/shared" "2.0.0" "{}"
+    , manifestJson "author/shared" "1.0.0" "{}"
+    ]
+
+
+resolutionSignature : Solver.Resolution -> Array String
+resolutionSignature resolution =
+    [ "order=" ++ String.join "," (Array.map PackageName.toString resolution.order)
+    , "packages="
+        ++ String.join ","
+            (resolution.packages
+                |> Dict.values
+                |> Array.map
+                    (\resolved ->
+                        PackageName.toString resolved.manifest.name
+                            ++ "@"
+                            ++ Semver.versionToString resolved.manifest.version
+                    )
+            )
+    ]
+
+
+prepare : String -> Array String -> Result String { root : Manifest, catalog : Solver.Catalog }
+prepare rootSource packageSources =
+    decodeManifest rootSource
+        |> Result.andThen
+            (\root ->
+                decodeManifests packageSources
+                    |> Result.andThen
+                        (\manifests ->
+                            Solver.catalogFromManifests manifests
+                                |> Result.mapError Solver.errorToString
+                                |> Result.map (\catalog -> { root = root, catalog = catalog })
+                        )
+            )
+
+
+decodeManifests : Array String -> Result String (Array Manifest)
+decodeManifests sources =
+    Array.foldl
+        (\source accumulated ->
+            accumulated
+                |> Result.andThen
+                    (\manifests ->
+                        decodeManifest source
+                            |> Result.map (\manifest -> Array.pushLast manifest manifests)
+                    )
+        )
+        (Ok [])
+        sources
+
+
+decodeManifest : String -> Result String Manifest
+decodeManifest source =
+    Manifest.decodeString source |> Result.mapError Manifest.errorToString
+
+
+manifestJson : String -> String -> String -> String
+manifestJson packageName version dependencies =
+    "{\"type\":\"package\",\"name\":\""
+        ++ packageName
+        ++ "\",\"summary\":\"Solver fixture\",\"license\":\"BSD-3-Clause\",\"version\":\""
+        ++ version
+        ++ "\",\"exposed-modules\":[],\"elm-version\":\"0.19.0 <= v < 0.20.0\",\"dependencies\":"
+        ++ dependencies
+        ++ ",\"test-dependencies\":{}}"
+
+
+expectEqual : String -> a -> a -> TestResult
+expectEqual name expected actual =
+    outcome name (expected == actual) ("Expected " ++ Debug.toString expected ++ ", got " ++ Debug.toString actual)
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed failureDetails =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            failureDetails
+    }

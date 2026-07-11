@@ -1,4 +1,4 @@
-module Use exposing (aliasPartial, aliasValue, asFunction, commonArrayCase, consScrutinee, empty, embeddedCtorExactUncons, embeddedCtorUncons, exactDoubleCons, make, match, nestedConsPattern, partial, qualified, qualifiedAlias, resultUncons, tripleConsPattern, unsafeEmbeddedExactThenOpen, unsafeEmbeddedVarCatchAll, unsafeExactThenOpenRest, unsafeExactThenVarCatchAll, unsafeMultiConsVarCatchAll)
+module Use exposing (aliasPartial, aliasValue, asFunction, commonArrayCase, consScrutinee, empty, embeddedCtorExactUncons, embeddedCtorUncons, embeddedEmptyAfterAll, exactDoubleCons, make, match, maybeMultiConsWild, nestedConsPattern, partial, qualified, qualifiedAlias, resultUncons, tripleConsPattern, tupleMultiConsWild, unsafeEmbeddedExactThenOpen, unsafeEmbeddedVarCatchAll, unsafeExactThenOpenRest, unsafeExactThenVarCatchAll, unsafeMaybeMultiConsVar, unsafeMultiConsOtherThenAll, unsafeMultiConsVarCatchAll, unsafeTupleMultiConsVar)
 
 import Definitions as D exposing (Alias, Empty, Pairish(..))
 
@@ -148,6 +148,22 @@ unsafeMultiConsVarCatchAll values =
             List.length other
 
 
+{-| Multi-cons with named catch-all before `_`: short-list fallthrough must
+hit `other`, not paste the later `_` body.
+-}
+unsafeMultiConsOtherThenAll : List Int -> Int
+unsafeMultiConsOtherThenAll values =
+    case values of
+        first :: second :: rest ->
+            first + second + List.length rest
+
+        other ->
+            List.length other
+
+        _ ->
+            -1
+
+
 type Box a
     = Box a
 
@@ -204,6 +220,22 @@ unsafeEmbeddedVarCatchAll boxed =
             -1
 
 
+{-| Embedded uncons with `_` before a later `Box []`: empty lists match `_`
+first, so the Nothing fallback must paste `-1`, not the dead `Box []` body.
+-}
+embeddedEmptyAfterAll : Box (List Int) -> Int
+embeddedEmptyAfterAll boxed =
+    case boxed of
+        Box (first :: rest) ->
+            first + List.length rest
+
+        _ ->
+            -1
+
+        Box [] ->
+            0
+
+
 resultUncons : Result String (List Int) -> Int
 resultUncons value =
     case value of
@@ -215,3 +247,57 @@ resultUncons value =
 
         Ok (first :: rest) ->
             first + List.length rest
+
+
+{-| Tuple multi-cons with fully-wild sibling: short peels must paste `(_, _)`.
+-}
+tupleMultiConsWild : List Int -> Int -> Int
+tupleMultiConsWild values flag =
+    case ( values, flag ) of
+        ( first :: second :: rest, n ) ->
+            first + second + List.length rest + n
+
+        ( _, _ ) ->
+            -1
+
+
+{-| Tuple multi-cons with named component catch-all: cannot rebind `other`.
+-}
+unsafeTupleMultiConsVar : List Int -> Int -> Int
+unsafeTupleMultiConsVar values flag =
+    case ( values, flag ) of
+        ( first :: second :: rest, n ) ->
+            first + second + List.length rest + n
+
+        ( other, _ ) ->
+            List.length other
+
+
+{-| Maybe multi-cons with `Just _` fallthrough for short lists.
+-}
+maybeMultiConsWild : Maybe (List Int) -> Int
+maybeMultiConsWild value =
+    case value of
+        Just ( first :: second :: rest ) ->
+            first + second + List.length rest
+
+        Just _ ->
+            -1
+
+        Nothing ->
+            0
+
+
+{-| Maybe multi-cons with `Just other`: short peels cannot rebind `other`.
+-}
+unsafeMaybeMultiConsVar : Maybe (List Int) -> Int
+unsafeMaybeMultiConsVar value =
+    case value of
+        Just ( first :: second :: rest ) ->
+            first + second + List.length rest
+
+        Just other ->
+            List.length other
+
+        Nothing ->
+            0

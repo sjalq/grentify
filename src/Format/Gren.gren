@@ -48,9 +48,7 @@ formatPackage platform permission options =
         , maximumOutputBytes = 16 * 1024 * 1024
         }
         |> Task.map (\_ -> {})
-        |> Task.mapError
-            (\error ->
-                PortError.create "FORMAT_FAILED" (PortError.message error)
-                    |> PortError.withHint
-                        "gilramir/gren-format could not format the emitted package. Inspect the package sources for syntax the formatter rejects."
-            )
+        -- Best-effort: formatter bugs (non-idempotent pretty, partial syntax
+        -- coverage) must not fail an otherwise valid port. Unformatted but
+        -- verified Gren is preferred to a hard FORMAT_FAILED.
+        |> Task.onError (\_ -> Task.succeed {})

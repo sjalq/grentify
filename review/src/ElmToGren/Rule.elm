@@ -986,38 +986,32 @@ needsMultiConsNesting patterns =
 
 
 {-| Nested multi-cons peels paste a short-match fallback into synthetic
-`Nothing` arms without re-running the expression visitor. If a `_` branch
-exists, its body must be copy-safe; otherwise we would emit `Debug.todo` and
-drop real fallthrough semantics.
+`Nothing` arms without re-running the expression visitor.
 
-No usable `_` branch: only allow when no named catch-all would have matched
-(Elm non-exhaustive → `Debug.todo` is acceptable). Named catch-alls (`other`,
-`_ as name`) must refuse so we do not replace real fallthrough with a crash.
+Fallthrough follows Elm case order: the first catch-all wins. A bare `_` is
+pasteable only when no named catch-all (`other`, `_ as name`) appears before
+it. Named catch-alls cannot be rebound in synthetic arms, so those shapes
+refuse rather than emit `Debug.todo` (or a later `_` body) and drop real
+fallthrough. No catch-all at all means non-exhaustive in Elm, so `Debug.todo`
+is acceptable.
 -}
 multiConsNestFallbackOk : List (Node Pattern) -> List ( Node Pattern, Node Expression ) -> Bool
 multiConsNestFallbackOk patterns cases =
     if needsMultiConsNesting patterns then
-        case allPatternBranchBody cases of
-            Nothing ->
-                not (List.any isUnusableCatchAllPattern (List.map Tuple.first cases))
-
-            Just body ->
-                isCopySafeFallbackExpression body
+        syntheticFallbackOk (firstCatchAllFallback cases)
 
     else
         True
 
 
 {-| Embedded ctor uncons always inserts a `Nothing` arm (empty list after
-widening `Ctor listName`). Prefer a sibling `Ctor []` body, else `_`. Refuse
-when that chosen body exists but is not copy-safe.
+widening `Ctor listName`). Prefer the first arm that would match `Ctor []` in
+Elm order: a same-ctor `[]` branch, else a leading `_`. A later `Ctor []`
+after `_` must not win. Refuse when the chosen body is not copy-safe, or when
+a named catch-all would have matched first.
 
-Exact tails (`Ctor (x :: [])`) also need a length-mismatch arm that prefers
-`_`. If `_` exists but is not copy-safe, refuse rather than emit `Debug.todo`
-and drop fallthrough for longer lists.
-
-When neither `Ctor []` nor `_` supplies a pasteable body, refuse if a named
-catch-all would have matched (same Debug.todo trap as multi-cons nesting).
+Exact tails (`Ctor (x :: [])`) also need a length-mismatch arm from the first
+catch-all (`_`). If a named catch-all precedes `_`, refuse.
 
 Nested empty-rest guards cannot fall through to a sibling `Ctor (x :: rest)`
 (or longer fixed list) on the same constructor slot, so refuse those shapes.
@@ -1035,28 +1029,14 @@ embeddedUnconsFallbackOk cases =
                 |> List.concatMap ctorUnconsSlots
                 |> List.map Tuple.first
 
-        pasteableOrNoCatchAll : Maybe (Node Expression) -> Bool
-        pasteableOrNoCatchAll maybeBody =
-            case maybeBody of
-                Just body ->
-                    isCopySafeFallbackExpression body
-
-                Nothing ->
-                    not (List.any isUnusableCatchAllPattern patterns)
-
         fallbackOk : String -> Bool
         fallbackOk ctorName =
-            case emptyListCtorBranchBody ctorName cases of
-                Just body ->
-                    isCopySafeFallbackExpression body
-
-                Nothing ->
-                    pasteableOrNoCatchAll (allPatternBranchBody cases)
+            syntheticFallbackOk (firstEmptyListFallback ctorName cases)
 
         lengthMismatchOk : Bool
         lengthMismatchOk =
             if hasExactEmptyEmbeddedUncons patterns then
-                pasteableOrNoCatchAll (allPatternBranchBody cases)
+                syntheticFallbackOk (firstCatchAllFallback cases)
 
             else
                 True
@@ -1066,9 +1046,216 @@ embeddedUnconsFallbackOk cases =
         && embeddedExactEmptySiblingOk patterns
 
 
+{-| Result of scanning case arms in order for a synthetic fallback body.
+-}
+type SyntheticFallback
+    = UseFallbackBody (Node Expression)
+    | UseFallbackTodo
+    | CannotSynthesizeFallback
+
+
+syntheticFallbackOk : SyntheticFallback -> Bool
+syntheticFallbackOk choice =
+    case choice of
+        UseFallbackBody body ->
+            isCopySafeFallbackExpression body
+
+        UseFallbackTodo ->
+            True
+
+        CannotSynthesizeFallback ->
+            False
+
+
+{-| First pasteable catch-all in case order for multi-cons short-list peels.
+
+Bare `_`, fully-wild tuples `(_, _)`, and map-wrapper wildcards (`Just _`,
+`Ok _`) are pasteable. Open patterns that would match the same fallthrough but
+introduce bindings (`other`, `(xs, _)`, `Just other`) refuse. Specific arms
+(`Nothing`, `[]`, `( [], True)`) are skipped so a later true catch-all can win.
+-}
+firstCatchAllFallback : List ( Node Pattern, Node Expression ) -> SyntheticFallback
+firstCatchAllFallback cases =
+    case cases of
+        [] ->
+            UseFallbackTodo
+
+        ( patternNode, body ) :: rest ->
+            case Node.value (unwrapParenthesized patternNode) of
+                AllPattern ->
+                    UseFallbackBody body
+
+                TuplePattern components ->
+                    if List.all isAllPatternNode components then
+                        UseFallbackBody body
+
+                    else if isTupleOpenFallthrough components then
+                        -- Open fallthrough like `(other, _)` or `(_, True)` can
+                        -- match multi-cons short lists; bindings cannot be
+                        -- rebuilt and partial wilds are not total fallthrough.
+                        -- Arms that already contain uncons/fixed lists are not
+                        -- fallthrough (they are the multi-cons arms themselves).
+                        CannotSynthesizeFallback
+
+                    else
+                        firstCatchAllFallback rest
+
+                NamedPattern qualifiedName args ->
+                    case args of
+                        [ inner ] ->
+                            if isMapWrapperCtor qualifiedName then
+                                case Node.value (unwrapParenthesized inner) of
+                                    AllPattern ->
+                                        UseFallbackBody body
+
+                                    _ ->
+                                        if isUnusableCatchAllPattern (unwrapParenthesized inner) then
+                                            CannotSynthesizeFallback
+
+                                        else
+                                            firstCatchAllFallback rest
+
+                            else
+                                firstCatchAllFallback rest
+
+                        _ ->
+                            firstCatchAllFallback rest
+
+                _ ->
+                    if isUnusableCatchAllPattern patternNode then
+                        CannotSynthesizeFallback
+
+                    else
+                        firstCatchAllFallback rest
+
+
+isAllPatternNode : Node Pattern -> Bool
+isAllPatternNode patternNode =
+    case Node.value (unwrapParenthesized patternNode) of
+        AllPattern ->
+            True
+
+        _ ->
+            False
+
+
+{-| Wildcard or binding that can match multi-cons short-list fallthrough.
+-}
+isOpenCatchAllPattern : Node Pattern -> Bool
+isOpenCatchAllPattern patternNode =
+    case Node.value (unwrapParenthesized patternNode) of
+        AllPattern ->
+            True
+
+        VarPattern _ ->
+            True
+
+        AsPattern inner _ ->
+            isUnusableCatchAllPattern patternNode
+                || isOpenCatchAllPattern (unwrapParenthesized inner)
+
+        TuplePattern components ->
+            List.any isOpenCatchAllPattern components
+
+        NamedPattern _ [ inner ] ->
+            isOpenCatchAllPattern inner
+
+        _ ->
+            False
+
+
+{-| Tuple arm that can absorb multi-cons short-list fallthrough without being a
+list/uncons match itself: e.g. `(other, _)`, `(_, True)`. Multi-cons arms like
+`(x :: y :: rest, n)` are not fallthrough.
+-}
+isTupleOpenFallthrough : List (Node Pattern) -> Bool
+isTupleOpenFallthrough components =
+    not (List.any isPositiveListMatch components)
+        && List.any isOpenCatchAllPattern components
+
+
+{-| Fixed non-empty list or uncons: a real list-shape match, not fallthrough.
+-}
+isPositiveListMatch : Node Pattern -> Bool
+isPositiveListMatch patternNode =
+    case Node.value (unwrapParenthesized patternNode) of
+        UnConsPattern _ _ ->
+            True
+
+        ListPattern members ->
+            not (List.isEmpty members)
+
+        AsPattern inner _ ->
+            isPositiveListMatch (unwrapParenthesized inner)
+
+        _ ->
+            False
+
+
+{-| `Just` / `Ok` wrappers rewritten via `Maybe.map` / `Result.map` popFirst.
+-}
+isMapWrapperCtor : { moduleName : List String, name : String } -> Bool
+isMapWrapperCtor qualifiedName =
+    let
+        name : String
+        name =
+            qualifiedName.name
+
+        modules : List String
+        modules =
+            qualifiedName.moduleName
+    in
+    (name == "Just" || name == "Ok")
+        && (modules
+                == []
+                || modules
+                == [ "Maybe" ]
+                || modules
+                == [ "Result" ]
+           )
+
+
+{-| First arm that would match `Ctor []` after an uncons arm fails to.
+
+Same-ctor `[]` and top-level `_` are pasteable. Same-ctor catch-all args and
+top-level named catch-alls refuse. Later `Ctor []` after a catch-all must not
+override the earlier match.
+-}
+firstEmptyListFallback : String -> List ( Node Pattern, Node Expression ) -> SyntheticFallback
+firstEmptyListFallback ctorName cases =
+    case cases of
+        [] ->
+            UseFallbackTodo
+
+        ( patternNode, body ) :: rest ->
+            case Node.value (unwrapParenthesized patternNode) of
+                NamedPattern qualifiedName args ->
+                    if qualifiedName.name /= ctorName then
+                        firstEmptyListFallback ctorName rest
+
+                    else if List.any isEmptyListArg args then
+                        UseFallbackBody body
+
+                    else if List.any isCatchAllArg args then
+                        CannotSynthesizeFallback
+
+                    else
+                        firstEmptyListFallback ctorName rest
+
+                AllPattern ->
+                    UseFallbackBody body
+
+                _ ->
+                    if isUnusableCatchAllPattern patternNode then
+                        CannotSynthesizeFallback
+
+                    else
+                        firstEmptyListFallback ctorName rest
+
+
 {-| Catch-all that matches any value but cannot be inlined into a synthetic
 arm: the binding would be missing or wrong. Bare `_` is handled separately via
-`allPatternBranchBody`.
+`firstCatchAllFallback`.
 -}
 isUnusableCatchAllPattern : Node Pattern -> Bool
 isUnusableCatchAllPattern patternNode =
@@ -1086,6 +1273,32 @@ isUnusableCatchAllPattern patternNode =
 
                 _ ->
                     isUnusableCatchAllPattern (unwrapParenthesized inner)
+
+        _ ->
+            False
+
+
+{-| Argument that matches any list length under a constructor (empty included).
+-}
+isCatchAllArg : Node Pattern -> Bool
+isCatchAllArg arg =
+    case Node.value (unwrapParenthesized arg) of
+        AllPattern ->
+            True
+
+        VarPattern _ ->
+            True
+
+        AsPattern inner _ ->
+            case Node.value (unwrapParenthesized inner) of
+                AllPattern ->
+                    True
+
+                VarPattern _ ->
+                    True
+
+                _ ->
+                    isCatchAllArg (unwrapParenthesized inner)
 
         _ ->
             False
@@ -1220,35 +1433,37 @@ casePatternListDepth patternNode =
             Nothing
 
 
-{-| Body used when a nested multi-cons peel fails (list too short). Prefer an
-existing `_` branch body so length-deficient lists keep Elm fallthrough semantics.
+{-| Body used when a nested multi-cons peel fails (list too short). Prefer the
+first catch-all `_` body in case order so length-deficient lists keep Elm
+fallthrough semantics. Named catch-alls are rejected by the rewrite gate.
 
 Only copy-safe expressions are inlined: the fallback text is pasted into a
 synthetic branch and does not receive ordinary source edits (case/when, ::, …).
 -}
 nothingMatchFallback : String -> List ( Node Pattern, Node Expression ) -> ModuleContext -> String
 nothingMatchFallback todoMessage cases context =
-    case allPatternBranchBody cases of
-        Just body ->
-            copySafeFallbackText todoMessage body context
-
-        Nothing ->
-            "Debug.todo \"" ++ todoMessage ++ "\""
+    renderSyntheticFallback todoMessage (firstCatchAllFallback cases) context
 
 
-{-| Fallback for embedded constructor uncons: prefer a sibling `Ctor []` body
-for the *same* constructor name (covers empty lists that the widened
-`Ctor listName` pattern would otherwise steal), then a top-level `_` body,
-else Debug.todo.
+{-| Fallback for embedded constructor uncons: first arm that would match
+`Ctor []` in Elm order (same-ctor `[]`, else leading `_`), else Debug.todo.
 -}
 embeddedUnconsFallback : String -> String -> List ( Node Pattern, Node Expression ) -> ModuleContext -> String
 embeddedUnconsFallback todoMessage ctorName cases context =
-    case emptyListCtorBranchBody ctorName cases of
-        Just body ->
+    renderSyntheticFallback todoMessage (firstEmptyListFallback ctorName cases) context
+
+
+renderSyntheticFallback : String -> SyntheticFallback -> ModuleContext -> String
+renderSyntheticFallback todoMessage choice context =
+    case choice of
+        UseFallbackBody body ->
             copySafeFallbackText todoMessage body context
 
-        Nothing ->
-            nothingMatchFallback todoMessage cases context
+        UseFallbackTodo ->
+            "Debug.todo \"" ++ todoMessage ++ "\""
+
+        CannotSynthesizeFallback ->
+            "Debug.todo \"" ++ todoMessage ++ "\""
 
 
 copySafeFallbackText : String -> Node Expression -> ModuleContext -> String
@@ -1258,43 +1473,6 @@ copySafeFallbackText todoMessage body context =
 
     else
         "Debug.todo \"" ++ todoMessage ++ "\""
-
-
-allPatternBranchBody : List ( Node Pattern, Node Expression ) -> Maybe (Node Expression)
-allPatternBranchBody cases =
-    case cases of
-        [] ->
-            Nothing
-
-        ( patternNode, body ) :: rest ->
-            case Node.value (unwrapParenthesized patternNode) of
-                AllPattern ->
-                    Just body
-
-                _ ->
-                    allPatternBranchBody rest
-
-
-{-| Body of a sibling `CtorName []` (or `CtorName … [] …`) branch for the
-given constructor. Must not reuse a different constructor's empty-list body.
--}
-emptyListCtorBranchBody : String -> List ( Node Pattern, Node Expression ) -> Maybe (Node Expression)
-emptyListCtorBranchBody ctorName cases =
-    case cases of
-        [] ->
-            Nothing
-
-        ( patternNode, body ) :: rest ->
-            case Node.value (unwrapParenthesized patternNode) of
-                NamedPattern qualifiedName args ->
-                    if qualifiedName.name == ctorName && List.any isEmptyListArg args then
-                        Just body
-
-                    else
-                        emptyListCtorBranchBody ctorName rest
-
-                _ ->
-                    emptyListCtorBranchBody ctorName rest
 
 
 isEmptyListArg : Node Pattern -> Bool

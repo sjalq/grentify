@@ -142,6 +142,9 @@ scanFrom characters offset edits =
                     tokenEnd =
                         scanIdentifierEnd characters (offset + 1)
 
+                    token =
+                        identifierToken characters offset tokenEnd
+
                     nextEdits =
                         if tokenEnd == offset + 4 && matchesAt characters offset caseKeyword then
                             Array.pushLast
@@ -157,6 +160,18 @@ scanFrom characters offset edits =
                                 { startOffset = offset
                                 , endOffset = tokenEnd
                                 , replacement = "is"
+                                , kind = SyntaxEdit
+                                }
+                                edits
+
+                        else if needsAsKeywordEscape token then
+                            -- Gren pattern parsers (including gren-format) can
+                            -- tokenize `assoc` as `as` + `soc`. Escape by
+                            -- prefixing so the name no longer starts with `as`.
+                            Array.pushLast
+                                { startOffset = offset
+                                , endOffset = tokenEnd
+                                , replacement = "x_" ++ token
                                 , kind = SyntaxEdit
                                 }
                                 edits
@@ -275,6 +290,23 @@ scanIdentifierEnd characters offset =
 
         Nothing ->
             offset
+
+
+identifierToken : Array Char -> Int -> Int -> String
+identifierToken characters start end =
+    Array.slice start end characters
+        |> Array.foldl (\character text -> text ++ String.fromChar character) ""
+
+
+{-| True for names that start with the keyword `as` plus more identifier
+characters (`assoc`, `async`, …). Pattern parsers can split those into
+`as` + remainder, so we rename them before emit/format.
+-}
+needsAsKeywordEscape : String -> Bool
+needsAsKeywordEscape token =
+    -- Pattern parsers can split `assoc` into `as` + `soc`. Short public API
+    -- names (`asc`, `ask`, `asks`) stay put so @docs lines still match.
+    String.startsWith "as" token && String.unitLength token > 4
 
 
 isIdentifierStart : Char -> Bool

@@ -111,6 +111,7 @@ if (failed > 0) {
   process.exit(1);
 }
 
+const seeds = catalog.seeds || catalog.seed;
 console.log(
-  `\nPASS: ${packages.length}/${packages.length} ecosystem packages ported and verified (seed ${catalog.seed})`,
+  `\nPASS: ${packages.length}/${packages.length} ecosystem packages ported and verified (seeds ${JSON.stringify(seeds)})`,
 );

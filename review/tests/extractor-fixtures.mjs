@@ -272,9 +272,11 @@ assert.match(
 // Unsafe exact-then-open-rest shapes must refuse: nested empty-rest guards
 // cannot fall through to an open-rest sibling, so :: patterns remain.
 // Named catch-alls (`other`) likewise refuse: fallbacks cannot rebind them.
+// Named catch-all before `_` must refuse: short-list peels would paste `_`.
+// Tuple/Maybe open catch-alls with bindings also refuse.
 assert.ok(
   use.diagnostics.filter((d) => /List \(::\) pattern/u.test(d.message)).length
-    >= 5,
+    >= 8,
 );
 assert.match(
   useRawOutput,
@@ -294,7 +296,34 @@ assert.match(
 );
 assert.match(
   useRawOutput,
+  /unsafeMultiConsOtherThenAll[\s\S]*?first :: second :: rest[\s\S]*?other[\s\S]*?_/u,
+);
+assert.match(
+  useRawOutput,
   /unsafeEmbeddedVarCatchAll[\s\S]*?Box \(first :: \[\]\)[\s\S]*?other/u,
+);
+assert.match(
+  useRawOutput,
+  /unsafeTupleMultiConsVar[\s\S]*?first :: second :: rest[\s\S]*?other/u,
+);
+assert.match(
+  useRawOutput,
+  /unsafeMaybeMultiConsVar[\s\S]*?first :: second :: rest[\s\S]*?Just other/u,
+);
+// `_` before a later `Ctor []`: empty-list Nothing must paste `_` body (-1).
+assert.match(
+  useRawOutput,
+  /embeddedEmptyAfterAll[\s\S]*?when Array\.popFirst rest_r\d+_c\d+_elmToGren_list of\n( +)Just \{ first = first, rest = rest \} ->\n\1 {4}first \+ List\.length rest\n\1Nothing ->\n\1 {4}-1/u,
+);
+// Tuple multi-cons short peel pastes fully-wild `(_, _)` body (-1).
+assert.match(
+  useRawOutput,
+  /tupleMultiConsWild[\s\S]*?when Array\.popFirst rest_r\d+_c\d+_elmToGren of\n( +)Just \{ first = second, rest = rest \} ->\n\1 {4}first \+ second \+ List\.length rest \+ n\n\1Nothing ->\n\1 {4}-1/u,
+);
+// Maybe multi-cons short peel pastes `Just _` body (-1).
+assert.match(
+  useRawOutput,
+  /maybeMultiConsWild[\s\S]*?when Array\.popFirst rest_r\d+_c\d+_elmToGren of\n( +)Just \{ first = second, rest = rest \} ->\n\1 {4}first \+ second \+ List\.length rest\n\1Nothing ->\n\1 {4}-1/u,
 );
 
 assert.deepEqual(

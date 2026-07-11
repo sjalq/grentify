@@ -173,6 +173,7 @@ type PlatformInferenceError
 type AdapterId
     = ArrayAdapter
     | BasicsAdapter
+    | CharAdapter
     | DictAdapter
     | JsonDecodeAdapter
     | JsonEncodeAdapter
@@ -194,6 +195,9 @@ adapterIdName adapterId =
 
         BasicsAdapter ->
             "Basics"
+
+        CharAdapter ->
+            "Char"
 
         DictAdapter ->
             "Dict"

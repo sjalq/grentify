@@ -34,6 +34,7 @@ all : Array AdapterId
 all =
     [ ArrayAdapter
     , BasicsAdapter
+    , CharAdapter
     , DictAdapter
     , JsonDecodeAdapter
     , JsonEncodeAdapter
@@ -185,6 +186,9 @@ sourceFor adapterId =
         BasicsAdapter ->
             basicsSource
 
+        CharAdapter ->
+            charSource
+
         DictAdapter ->
             dictSource
 
@@ -278,6 +282,49 @@ fromPolar polar =
     { first = polar.first * Math.cos polar.second
     , second = polar.first * Math.sin polar.second
     }
+"""
+
+
+{-| Gren Char has no case conversion. Route through String.toLower/toUpper
+(kernel Unicode casing). Locale variants match non-locale: Gren has no locale API.
+-}
+charSource : String
+charSource =
+    """
+module ElmToGren.Compat.Char exposing (toLower, toUpper, toLocaleLower, toLocaleUpper)
+
+import Maybe exposing (Maybe(..))
+import String
+
+
+toLower : Char -> Char
+toLower char =
+    when String.popFirst (String.toLower (String.fromChar char)) is
+        Just { first } ->
+            first
+
+        Nothing ->
+            char
+
+
+toUpper : Char -> Char
+toUpper char =
+    when String.popFirst (String.toUpper (String.fromChar char)) is
+        Just { first } ->
+            first
+
+        Nothing ->
+            char
+
+
+toLocaleLower : Char -> Char
+toLocaleLower char =
+    toLower char
+
+
+toLocaleUpper : Char -> Char
+toLocaleUpper char =
+    toUpper char
 """
 
 

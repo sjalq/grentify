@@ -31,6 +31,7 @@ checks =
     , check "Tuple adapter contains record-pair semantics" tupleAdapterIsSemantic
     , check "JSON encoding adapter converts pair field names" jsonEncodeAdapterIsSemantic
     , check "List and Array adapters preserve collection conversions" listAndArrayAdaptersAreSemantic
+    , check "Char adapter routes case conversion through String" charAdapterIsSemantic
     , check "mapping lexical validation matches the JSON contract" lexicalValidationWorks
     ]
 
@@ -262,6 +263,18 @@ listAndArrayAdaptersAreSemantic =
     String.contains "Array.foldl (+) 0 values" (Adapter.sourceFor ListAdapter)
         && String.contains "fromList values =" (Adapter.sourceFor ArrayAdapter)
         && String.contains "toList values =" (Adapter.sourceFor ArrayAdapter)
+
+
+charAdapterIsSemantic : Bool
+charAdapterIsSemantic =
+    let
+        source =
+            Adapter.sourceFor CharAdapter
+    in
+    String.contains "String.toLower (String.fromChar char)" source
+        && String.contains "String.toUpper (String.fromChar char)" source
+        && String.contains "toLocaleLower" source
+        && String.contains "toLocaleUpper" source
 
 
 lexicalValidationWorks : Bool

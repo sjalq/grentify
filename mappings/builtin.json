@@ -82,7 +82,14 @@
         {
           "source": "Tuple",
           "target": "ElmToGren.Compat.Tuple",
-          "values": {},
+          "values": {
+            "pair": "pair",
+            "first": "first",
+            "second": "second",
+            "mapFirst": "mapFirst",
+            "mapSecond": "mapSecond",
+            "mapBoth": "mapBoth"
+          },
           "types": {}
         },
         {
@@ -169,7 +176,17 @@
             "Task": "Task"
           }
         },
-        { "source": "Char", "target": "Char", "values": {}, "types": { "Char": "Char" } },
+        {
+          "source": "Char",
+          "target": "Char",
+          "values": {
+            "toLower": "ElmToGren.Compat.Char.toLower",
+            "toUpper": "ElmToGren.Compat.Char.toUpper",
+            "toLocaleLower": "ElmToGren.Compat.Char.toLocaleLower",
+            "toLocaleUpper": "ElmToGren.Compat.Char.toLocaleUpper"
+          },
+          "types": { "Char": "Char" }
+        },
         { "source": "Bitwise", "target": "Bitwise", "values": {}, "types": {} },
         { "source": "Debug", "target": "Debug", "values": {}, "types": {} },
         { "source": "Platform", "target": "Platform", "values": {}, "types": {} },

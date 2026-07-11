@@ -121,8 +121,89 @@ collectMappingEdits registry extraction =
                     implicitAliases
     in
     Array.append
-        (Array.mapAndKeepJust (referenceEdit registry aliases) extraction.references)
+        (extraction.references
+            -- Bare locals (params, let-bindings) are reported against their
+            -- enclosing module. Rewriting those would qualify a local with the
+            -- module's own name. Qualified self-references (`Module.name`) must
+            -- still rewrite when the module is namespaced (`Module` -> `Elm.Module`).
+            |> Array.keepIf
+                (\reference ->
+                    reference.moduleName /= extraction.moduleName
+                        || String.contains "." reference.text
+                )
+            |> Array.mapAndKeepJust (referenceEdit registry aliases)
+        )
         (Array.mapAndKeepJust (importEdit registry) extraction.importFacts)
+
+
+rangesOverlap : Protocol.Range -> Protocol.Range -> Bool
+rangesOverlap left right =
+    positionBefore left.start right.end && positionBefore right.start left.end
+
+
+rangesEqual : Protocol.Range -> Protocol.Range -> Bool
+rangesEqual left right =
+    left.start.row == right.start.row
+        && left.start.column == right.start.column
+        && left.end.row == right.end.row
+        && left.end.column == right.end.column
+
+
+positionBefore : Protocol.Position -> Protocol.Position -> Bool
+positionBefore first second =
+    first.row < second.row || (first.row == second.row && first.column < second.column)
+
+
+{-| When a mapping edit and a structural edit cover the exact same span, the
+mapping cannot be applied as a separate source edit. If the structural
+replacement still embeds the original span text (constructor eta-expansion does),
+swap that embedded original for the mapping's replacement.
+-}
+foldEqualRangeMappings : String -> Array SourceEdit -> SourceEdit -> SourceEdit
+foldEqualRangeMappings source mappingEdits structural =
+    Array.foldl
+        (\mapping edit ->
+            if rangesEqual mapping.range edit.range then
+                when rangeSlice source edit.range is
+                    Just original ->
+                        if String.isEmpty original then
+                            edit
+
+                        else
+                            { edit
+                                | replacement =
+                                    replaceFirstOccurrence original mapping.replacement edit.replacement
+                            }
+
+                    Nothing ->
+                        edit
+
+            else
+                edit
+        )
+        structural
+        mappingEdits
+
+
+rangeSlice : String -> Protocol.Range -> Maybe String
+rangeSlice source range =
+    Result.map2
+        (\start end -> String.slice start end source)
+        (SourceEdit.positionToOffset source range.start)
+        (SourceEdit.positionToOffset source range.end)
+        |> Result.toMaybe
+
+
+replaceFirstOccurrence : String -> String -> String -> String
+replaceFirstOccurrence needle replacement haystack =
+    when String.firstIndexOf needle haystack is
+        Nothing ->
+            haystack
+
+        Just index ->
+            String.slice 0 index haystack
+                ++ replacement
+                ++ String.slice (index + String.count needle) (String.count haystack) haystack
 
 
 referenceEdit : Registry -> Dict String String -> Protocol.ResolvedReference -> Maybe SourceEdit
@@ -303,11 +384,31 @@ transformModule registry input extraction =
                     |> Result.andThen
                         (\reviewEdits ->
                             let
-                                mappingEdits =
+                                collectedMapping =
                                     collectMappingEdits registry extraction
 
+                                -- A structural edit and a catalog edit can target the same
+                                -- span (e.g. an arity>1 constructor is both eta-expanded and
+                                -- resolved as a reference). Drop the colliding mapping edit so
+                                -- applyEdits does not fail, but fold its replacement into the
+                                -- structural wrapper when the ranges are identical: the wrapper
+                                -- embeds the original constructor text (`Other.Ctor`), which
+                                -- must become the mapped form (`Elm.Other.Ctor`) under module
+                                -- namespacing.
+                                reviewEditsWithMappings =
+                                    Array.map
+                                        (foldEqualRangeMappings input.source collectedMapping)
+                                        reviewEdits
+
+                                mappingEdits =
+                                    collectedMapping
+                                        |> Array.keepIf
+                                            (\edit ->
+                                                not (Array.any (\structural -> rangesOverlap structural.range edit.range) reviewEditsWithMappings)
+                                            )
+
                                 combinedEdits =
-                                    Array.append reviewEdits mappingEdits
+                                    Array.append reviewEditsWithMappings mappingEdits
                             in
                             applySourceEdits input.path input.source combinedEdits
                                 |> Result.andThen
@@ -342,7 +443,7 @@ transformModule registry input extraction =
                                                                     , source = ensureTrailingNewline finalSource
                                                                     }
                                                                 , inputPath = input.path
-                                                                , reviewEdits = reviewEdits
+                                                                , reviewEdits = reviewEditsWithMappings
                                                                 , lexicalEdits = lexical.edits
                                                                 , mappingEdits = mappingEdits
                                                                 , diagnostics = diagnostics

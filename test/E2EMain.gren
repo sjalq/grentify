@@ -197,6 +197,8 @@ runScenario runtime spec =
             , offline = False
             , verify = True
             , json = False
+            , namespaceModules = False
+            , vendor = False
             }
     in
     Orchestrator.run runtime.context runtime.permissions options

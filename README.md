@@ -12,6 +12,52 @@ node bin/elm-to-gren.cjs elm-community/list-extra --out ./out --cache ./cache
 cd out && gren docs   # the output compiles with the official Gren compiler
 ```
 
+Or vendor a package into an existing Gren application:
+
+```sh
+# from a Gren app root (must have gren.json with type "application")
+node bin/elm-to-gren.cjs add elm-community/list-extra --cache ./cache
+# writes ./.elm-to-gren/packages/... and adds a local dependency to gren.json
+```
+
+## Commands
+
+```
+elm-to-gren <author/package[@version] | local-path> [options]
+elm-to-gren port <author/package[@version] | local-path> [options]
+elm-to-gren add  <author/package[@version] | local-path> [options]
+```
+
+| Command | Purpose |
+| --- | --- |
+| `port` (default) | Port into a fresh Gren workspace (`--out`, default `./gren-output`). |
+| `add` | Vendor into the current Gren app: source under `./.elm-to-gren/packages/`, local dep in `./gren.json`. `--out` is the project root (default `.`). |
+
+### Options
+
+| Flag | Meaning |
+| --- | --- |
+| `-o, --out <dir>` | Workspace (`port`) or project root (`add`) |
+| `--cache <dir>` | Download and analysis cache |
+| `--platform <p>` | `auto`, `common`, `browser`, or `node` (default `auto`) |
+| `--namespace <author>` | Namespace generated package names |
+| `--elm-namespace` | Prefix ported modules with `Elm.` (default for `add`) |
+| `--no-elm-namespace` | Do not prefix modules (default for `port`) |
+| `--mapping <file>` | Add or override mappings; may be repeated |
+| `--offline` | Use cached registry data only |
+| `--no-verify` | Skip the final Gren compiler check |
+| `--json` | Print the final report as JSON |
+
+`add` requires an application `gren.json` (not a package). It is idempotent:
+re-running overwrites the vendored packages and updates the same dependency
+entry. Mapped registry deps land in the app's `dependencies.indirect`; the
+library itself is added under `dependencies.direct` as
+`local:.elm-to-gren/packages/<name>-<version>`.
+
+With `--elm-namespace` (on by default for `add`), module paths, declarations,
+imports, and exposed names get an `Elm.` prefix so vendored APIs do not collide
+with Gren-native modules.
+
 ## How it works
 
 ```mermaid
@@ -38,11 +84,13 @@ flowchart TD
    (`mappings/builtin.json`): `List.filter`→`Array.keepIf`,
    `Basics.round`→`Math.round`, `elm/regex`→`String.Regex`, and so on.
    Unmapped gaps are bridged by generated `ElmToGren.Compat.*` adapter modules.
-4. **Emit** Gren manifests, sources, and package bundles atomically.
+4. **Emit** Gren manifests, sources, and package bundles atomically
+   (`port`), or vendor under `.elm-to-gren/packages/` and update the app
+   `gren.json` (`add`).
 5. **Format** every package with the vendored [gilramir/gren-format](https://github.com/gilramir/gren-format)
    tool (community reimplementation of official `gren format`, removed in 0.5).
-6. **Verify** with the real Gren compiler (`gren docs`) before publishing the
-   workspace.
+6. **Verify** with the real Gren compiler (`gren docs`) before finishing
+   (skipped with `--no-verify`).
 
 ## What ports
 
@@ -56,19 +104,37 @@ Refused with a diagnostic (no portable translation exists):
 - port modules and port declarations
 - effect modules and `Elm.Kernel` / `Native` code
 - GLSL shader expressions
-- identifiers named `when` / `is` (Gren reserved words)
+
+Identifiers named `when` or `is` (Gren keywords; Elm's `case`/`of`) are
+rewritten to `when_` / `is_` at every binding and use site.
 
 List patterns are rewritten for Gren arrays: `x :: xs` becomes
 `Array.popFirst` with `Just { first, rest }`, multi-cons (`x :: y :: rest`)
 nests further `popFirst` in the branch body, and uncons under `Maybe`,
 `Result`, or other single-argument constructors is rewritten in place.
 
-API gaps in cataloged modules surface as real Gren compile errors at the
-verify step; the fix is a catalog entry or adapter, not code.
+If an Elm function is in a mapped package (like `elm/core`) but we never taught
+the tool its Gren name, the port still runs and then fails when Gren compiles
+the result. Fix that by adding a mapping or a small compatibility helper, not
+by editing the generated package by hand.
+
+Example: Elm `List.filter` is mapped to Gren `Array.keepIf`, so this:
+
+```elm
+List.filter (\n -> n > 0) numbers
+```
+
+becomes something Gren accepts:
+
+```gren
+Array.keepIf (\n -> n > 0) numbers
+```
+
+If `filter` had no mapping, the tool might still emit `List.filter` (or a half-rewritten form). `gren docs` would then fail with a missing-function style error. You would not patch that one package by hand; you would add a catalog line (or a Compat helper) so every future port gets the fix.
 
 ## Ecosystem smoke tests
 
-`npm run test:ecosystem` ports 20 randomly selected (seeded) pure Elm packages
+`npm run test:ecosystem` ports 40 randomly selected (seeded) pure Elm packages
 whose direct dependencies stay within the supported platform set
 (`elm/core`, `elm/json`, `elm/time`, `elm/random`, `elm/bytes`, `elm/regex`,
 `elm/url`, `elm/parser`) and checks that each run completes with verification.
@@ -77,7 +143,7 @@ whose direct dependencies stay within the supported platform set
 
 ```sh
 npm run test:all        # unit, rule fixtures, e2e, ecosystem (network)
-npm run test:ecosystem  # 20 seeded pure packages from package.elm-lang.org
+npm run test:ecosystem  # 40 seeded pure packages from package.elm-lang.org
 ```
 
 - `src/` — the Gren CLI (acquire, resolve, transform, format, emit, verify)

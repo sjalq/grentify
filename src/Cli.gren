@@ -32,6 +32,8 @@ type alias Options =
     , offline : Bool
     , verify : Bool
     , json : Bool
+    , namespaceModules : Bool
+    , vendor : Bool
     }
 
 
@@ -51,6 +53,8 @@ type alias ParseState =
     , offline : Bool
     , verify : Bool
     , json : Bool
+    , namespaceModules : Bool
+    , vendor : Bool
     }
 
 
@@ -66,17 +70,31 @@ wantsJson arguments =
 parse : Defaults -> Array String -> Result String Command
 parse defaults rawArguments =
     let
-        arguments =
+        -- The `add` subcommand vendors a ported library into the current Gren
+        -- project: it defaults to Elm.-namespaced modules and writes into the
+        -- working directory rather than a fresh workspace.
+        selection =
             when Array.first rawArguments is
                 Just "port" ->
-                    Array.dropFirst 1 rawArguments
+                    { arguments = Array.dropFirst 1 rawArguments, vendor = False }
+
+                Just "add" ->
+                    { arguments = Array.dropFirst 1 rawArguments, vendor = True }
 
                 _ ->
-                    rawArguments
+                    { arguments = rawArguments, vendor = False }
+
+        arguments =
+            selection.arguments
 
         initial =
             { input = Nothing
-            , outputDirectory = defaults.outputDirectory
+            , outputDirectory =
+                if selection.vendor then
+                    "."
+
+                else
+                    defaults.outputDirectory
             , cacheDirectory = defaults.cacheDirectory
             , platform = Auto
             , namespace = Nothing
@@ -84,32 +102,38 @@ parse defaults rawArguments =
             , offline = False
             , verify = True
             , json = False
+            , namespaceModules = selection.vendor
+            , vendor = selection.vendor
             }
     in
-    when Array.first arguments is
-        Nothing ->
-            Ok Help
+    if selection.vendor then
+        parseArguments initial arguments
 
-        Just "help" ->
-            Ok Help
+    else
+        when Array.first arguments is
+            Nothing ->
+                Ok Help
 
-        Just "--help" ->
-            Ok Help
+            Just "help" ->
+                Ok Help
 
-        Just "-h" ->
-            Ok Help
+            Just "--help" ->
+                Ok Help
 
-        Just "version" ->
-            onlyVersion arguments
+            Just "-h" ->
+                Ok Help
 
-        Just "--version" ->
-            onlyVersion arguments
+            Just "version" ->
+                onlyVersion arguments
 
-        Just "-v" ->
-            onlyVersion arguments
+            Just "--version" ->
+                onlyVersion arguments
 
-        _ ->
-            parseArguments initial arguments
+            Just "-v" ->
+                onlyVersion arguments
+
+            _ ->
+                parseArguments initial arguments
 
 
 onlyVersion : Array String -> Result String Command
@@ -143,6 +167,12 @@ parseArguments state arguments =
 
                 "--json" ->
                     parseArguments { state | json = True } rest
+
+                "--elm-namespace" ->
+                    parseArguments { state | namespaceModules = True } rest
+
+                "--no-elm-namespace" ->
+                    parseArguments { state | namespaceModules = False } rest
 
                 "--out" ->
                     withValue "--out" rest (\value remaining -> parseArguments { state | outputDirectory = value } remaining)
@@ -281,6 +311,8 @@ finalize state =
                     , offline = state.offline
                     , verify = state.verify
                     , json = state.json
+                    , namespaceModules = state.namespaceModules
+                    , vendor = state.vendor
                     }
 
 
@@ -294,12 +326,23 @@ Port an Elm package and its dependency graph to Gren package source.
 Usage:
   elm-to-gren <author/package[@version] | local-path> [options]
   elm-to-gren port <author/package[@version] | local-path> [options]
+  elm-to-gren add <author/package[@version] | local-path> [options]
+
+Commands:
+  port  Port a package into a fresh Gren workspace (default).
+  add   Port a package and vendor it into the current Gren project
+        (writes source into ./.elm-to-gren/packages and adds a local
+        dependency to ./gren.json). Defaults to Elm.-namespaced
+        modules; --out sets the project root.
 
 Options:
-  -o, --out <directory>      Output workspace (default: ./gren-output)
+  -o, --out <directory>      Output workspace (default: ./gren-output);
+                             for `add`, the target project root (default: .)
       --cache <directory>    Download and analysis cache
       --platform <platform>  auto, common, browser, or node (default: auto)
       --namespace <author>   Namespace generated package names
+      --elm-namespace        Prefix ported modules with Elm. (default for add)
+      --no-elm-namespace     Do not prefix ported modules (default for port)
       --mapping <file>       Add or override mappings; may be repeated
       --offline              Use cached registry data only
       --no-verify            Skip the final Gren compiler check

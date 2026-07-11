@@ -8,6 +8,7 @@ module Port.Orchestrator exposing
 import Array exposing (Array)
 import Bytes
 import Bytes.Decode as BytesDecode
+import Char
 import ChildProcess
 import Cli
 import Compiler.Platform as GrenPlatform
@@ -18,10 +19,13 @@ import Elm.Manifest exposing (Manifest)
 import Elm.PackageName as PackageName exposing (Name)
 import Elm.Registry as ElmRegistry
 import Elm.Semver as Semver
+import Emit.Manifest as Manifest exposing (Dependency(..), ExposedModules(..))
+import Emit.Package as PackageEmit
 import Emit.Workspace as Workspace
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import HttpClient
+import Json.Decode as Decode
 import Json.Encode as Encode
 import Mapping.Adapter as Adapter exposing (AdapterError(..))
 import Mapping.Load
@@ -129,7 +133,21 @@ run context permissions cliOptions =
                                                 (\resolution ->
                                                     acquireSources context.platform permissions acquireOptions rootSource resolution
                                                         |> Task.andThen
-                                                            (transformSources context permissions cache cliOptions.offline assets registry resolution)
+                                                            (\sources ->
+                                                                let
+                                                                    -- Feature 2: overlay a synthetic `M -> Elm.M` module
+                                                                    -- mapping for every ported module so the transform
+                                                                    -- pass rewrites intra-package cross-module imports and
+                                                                    -- qualified references automatically.
+                                                                    transformRegistry =
+                                                                        if cliOptions.namespaceModules then
+                                                                            overlayPortedModules sources registry
+
+                                                                        else
+                                                                            registry
+                                                                in
+                                                                transformSources context permissions cache cliOptions.offline cliOptions.namespaceModules assets transformRegistry resolution sources
+                                                            )
                                                         |> Task.andThen
                                                             (\drafts ->
                                                                 planPackages cliOptions registry resolution drafts
@@ -137,7 +155,22 @@ run context permissions cliOptions =
                                                             )
                                                         |> Task.andThen
                                                             (\planned ->
-                                                                finalize context permissions cliOptions output overlays assets registry resolution planned
+                                                                let
+                                                                    -- Feature 2: exposed-module names must track the
+                                                                    -- Elm. prefix applied to the module sources, or
+                                                                    -- `gren docs` cannot find the exposed modules.
+                                                                    finalPlanned =
+                                                                        if cliOptions.namespaceModules then
+                                                                            { planned | packages = Array.map namespaceExposedModules planned.packages }
+
+                                                                        else
+                                                                            planned
+                                                                in
+                                                                if cliOptions.vendor then
+                                                                    finalizeAdd context permissions cliOptions output assets resolution finalPlanned
+
+                                                                else
+                                                                    finalize context permissions cliOptions output overlays assets registry resolution finalPlanned
                                                             )
                                                 )
                                     )
@@ -259,12 +292,13 @@ transformSources
     -> Permissions
     -> Path
     -> Bool
+    -> Bool
     -> Assets
     -> Registry
     -> Resolution
     -> Dict String Acquire.PackageSource
     -> Task Error (Dict String Draft)
-transformSources context permissions cache offline assets registry resolution sources =
+transformSources context permissions cache offline namespaceModules assets registry resolution sources =
     let
         elmHome =
             Path.join [ cache, Path.fromPosixString "elm-home" ]
@@ -289,7 +323,7 @@ transformSources context permissions cache offline assets registry resolution so
                                                         ("Acquired source set is missing " ++ key ++ ".")
 
                                             Just source ->
-                                                transformOne context permissions elmHome offline assets registry source
+                                                transformOne context permissions elmHome offline namespaceModules assets registry source
                                                     |> Task.map (\draft -> Dict.set key draft drafts)
                                     )
                         )
@@ -302,11 +336,12 @@ transformOne
     -> Permissions
     -> Path
     -> Bool
+    -> Bool
     -> Assets
     -> Registry
     -> Acquire.PackageSource
     -> Task Error Draft
-transformOne context permissions elmHome offline assets registry source =
+transformOne context permissions elmHome offline namespaceModules assets registry source =
     Task.map2
         (\extraction sourceFiles -> { extraction = extraction, sourceFiles = sourceFiles })
         (Review.Runner.run context.platform permissions.childProcess
@@ -347,8 +382,18 @@ transformOne context permissions elmHome offline assets registry source =
                                 parseDetectedPlatform transformed.detectedPlatform
                                     |> Result.map
                                         (\detectedPlatform ->
+                                            let
+                                                -- Feature 2: prefix only ported source modules with Elm.;
+                                                -- compatibility adapters (ElmToGren.Compat.*) are left alone.
+                                                portedModules =
+                                                    if namespaceModules then
+                                                        Array.map namespaceGeneratedModule transformed.modules
+
+                                                    else
+                                                        transformed.modules
+                                            in
                                             { source = source
-                                            , modules = Array.append transformed.modules adapters
+                                            , modules = Array.append portedModules adapters
                                             , diagnostics = transformed.diagnostics
                                             , detectedPlatform = detectedPlatform
                                             }
@@ -952,6 +997,578 @@ adapterFailure adapterError =
         UnknownAdapter details ->
             PortError.create "INVALID_MAPPING"
                 ("Unknown compatibility adapter " ++ details.requirement ++ ".")
+
+
+-- ELM. NAMESPACING (Feature 2)
+
+
+{-| Prefix a ported module with `Elm.`: its declared name, its file path, and
+the `module ...` header inside its source. Applied only to ported package
+modules; compatibility adapters keep their own names.
+-}
+namespaceGeneratedModule : Mapping.GeneratedModule -> Mapping.GeneratedModule
+namespaceGeneratedModule generated =
+    { moduleName = "Elm." ++ generated.moduleName
+    , relativePath = namespaceModulePath generated.relativePath
+    , source = namespaceModuleDeclaration generated.moduleName generated.source
+    }
+
+
+namespaceModulePath : String -> String
+namespaceModulePath path =
+    if String.startsWith "src/" path then
+        "src/Elm/" ++ String.dropFirst 4 path
+
+    else
+        "Elm/" ++ path
+
+
+{-| Rewrite the `module Name` / `port module Name` / `effect module Name`
+declaration to `Elm.Name` on the first source line that is an actual module
+header. Line-based (not free-text) so a comment that happens to mention
+`module Name` before the declaration is left alone.
+-}
+namespaceModuleDeclaration : String -> String -> String
+namespaceModuleDeclaration moduleName source =
+    let
+        trailingNewline =
+            String.endsWith "\n" source
+
+        body =
+            if trailingNewline then
+                String.dropLast 1 source
+
+            else
+                source
+
+        lines =
+            String.lines body
+
+        rewritten =
+            when Array.findFirst (lineDeclaresModule moduleName) lines is
+                Nothing ->
+                    lines
+
+                Just found ->
+                    Array.set found.index
+                        (String.replace
+                            ("module " ++ moduleName)
+                            ("module Elm." ++ moduleName)
+                            found.value
+                        )
+                        lines
+    in
+    String.join "\n" rewritten
+        ++ (if trailingNewline then
+                "\n"
+
+            else
+                ""
+           )
+
+
+lineDeclaresModule : String -> String -> Bool
+lineDeclaresModule moduleName line =
+    let
+        trimmed =
+            String.trimLeft line
+
+        prefixes =
+            [ "port module " ++ moduleName
+            , "effect module " ++ moduleName
+            , "module " ++ moduleName
+            ]
+    in
+    Array.any
+        (\prefix ->
+            if String.startsWith prefix trimmed then
+                moduleNameBoundary (String.dropFirst (String.count prefix) trimmed)
+
+            else
+                False
+        )
+        prefixes
+
+
+{-| True when the character after a candidate module name cannot extend that
+name (`module Foo` must not match `module Foo.Bar` or `module FooBar`).
+-}
+moduleNameBoundary : String -> Bool
+moduleNameBoundary rest =
+    when String.popFirst rest is
+        Nothing ->
+            True
+
+        Just { first } ->
+            not (Char.isAlphaNum first || first == '_' || first == '.')
+
+
+{-| Overlay a synthetic `M -> Elm.M` mapping for every module in every ported
+package, so the transform pass rewrites cross-module imports and qualified
+references to the namespaced names. Ported module names never collide with the
+built-in stdlib mappings (Elm guarantees globally unique module names), so this
+only ever adds entries.
+-}
+overlayPortedModules : Dict String Acquire.PackageSource -> Registry -> Registry
+overlayPortedModules sources registry =
+    let
+        modules =
+            Dict.foldl
+                (\_ source outer ->
+                    Array.foldl
+                        (\filename inner ->
+                            when moduleNameFromSource source.root filename is
+                                Just name ->
+                                    Dict.set name
+                                        { source = name
+                                        , target = "Elm." ++ name
+                                        , values = Dict.empty
+                                        , types = Dict.empty
+                                        }
+                                        inner
+
+                                Nothing ->
+                                    inner
+                        )
+                        outer
+                        source.sourceFiles
+                )
+                registry.modules
+                sources
+    in
+    { registry | modules = modules }
+
+
+moduleNameFromSource : Path -> Path -> Maybe String
+moduleNameFromSource root filename =
+    when relativeSourcePath root filename is
+        Ok relative ->
+            let
+                withoutSrc =
+                    if String.startsWith "src/" relative then
+                        String.dropFirst 4 relative
+
+                    else
+                        relative
+
+                withoutExtension =
+                    if String.endsWith ".elm" withoutSrc then
+                        String.dropLast 4 withoutSrc
+
+                    else if String.endsWith ".gren" withoutSrc then
+                        String.dropLast 5 withoutSrc
+
+                    else
+                        withoutSrc
+            in
+            Just (String.replace "/" "." withoutExtension)
+
+        Err _ ->
+            Nothing
+
+
+namespaceExposedModules : Workspace.Package -> Workspace.Package
+namespaceExposedModules package =
+    let
+        manifest =
+            package.manifest
+
+        exposed =
+            when manifest.exposedModules is
+                ExposedArray names ->
+                    ExposedArray (Array.map (\name -> "Elm." ++ name) names)
+
+                ExposedDict groups ->
+                    ExposedDict (Dict.map (\_ names -> Array.map (\name -> "Elm." ++ name) names) groups)
+    in
+    { package | manifest = { manifest | exposedModules = exposed } }
+
+
+
+-- ADD: VENDOR INTO AN EXISTING GREN PROJECT (Feature 1)
+
+
+{-| Vendor the ported library and its transpiled dependencies as source under
+`<project>/.elm-to-gren/packages/`, then add the library to the project's
+`gren.json` as a local dependency. Idempotent: re-running overwrites the
+vendored packages and updates the same dependency entry.
+-}
+finalizeAdd : Context -> Permissions -> Cli.Options -> Path -> Assets -> Resolution -> Planned -> Task Error Outcome
+finalizeAdd context permissions cliOptions output assets resolution planned =
+    let
+        rootKey =
+            PackageName.toString resolution.root
+    in
+    when Dict.get rootKey planned.identities is
+        Nothing ->
+            Task.fail (PortError.create "INTERNAL_ERROR" "Root package identity was not planned.")
+
+        Just rootIdentity ->
+            let
+                packagesRoot =
+                    Path.join [ output, Path.fromPosixString ".elm-to-gren/packages" ]
+
+                -- The library is placed as a sibling of its dependencies, so its
+                -- own `local:.elm-to-gren/packages/X` deps become `local:../X`.
+                vendored =
+                    Array.map
+                        (\package ->
+                            if package.manifest.name == rootIdentity.grenName then
+                                { package | manifest = siblingRelativeManifest package.manifest }
+
+                            else
+                                package
+                        )
+                        planned.packages
+
+                libDirectory =
+                    Workspace.packageDirectoryName
+                        { name = rootIdentity.grenName, version = rootIdentity.version }
+
+                -- Transitive registry (mapped) deps the library needs. gren
+                -- resolves local deps without re-solving, so it wants these in
+                -- the app's `indirect` at the library's declared lower bound.
+                -- When several packages pin the same dep, keep the highest lower
+                -- bound so a looser sibling cannot regress a stricter one.
+                indirectDependencies =
+                    Array.foldl
+                        (\package collected ->
+                            Dict.foldl
+                                (\name dependency inner ->
+                                    when dependency is
+                                        VersionRange range ->
+                                            mergeLowerBound name (lowerBoundVersion range) inner
+
+                                        LocalPath _ ->
+                                            inner
+                                )
+                                collected
+                                package.manifest.dependencies
+                        )
+                        Dict.empty
+                        planned.packages
+
+                dependencyValue =
+                    "local:.elm-to-gren/packages/" ++ libDirectory
+
+                manifestPath =
+                    Path.join [ output, Path.fromPosixString "gren.json" ]
+            in
+            -- Validate and build the updated gren.json *before* writing packages,
+            -- so a non-application project fails without leaving vendor debris.
+            System.File.readText permissions.fileSystem manifestPath
+                |> Task.mapError
+                    (\_ ->
+                        PortError.create "ADD_FAILED"
+                            ("Could not read " ++ Path.toPosixString manifestPath ++ ". Run `add` from a Gren application root.")
+                    )
+                |> Task.andThen
+                    (\manifestText ->
+                        when applyManifestChanges manifestText rootIdentity.grenName dependencyValue indirectDependencies is
+                            Err error ->
+                                Task.fail error
+
+                            Ok updatedManifest ->
+                                System.File.ensureDirectory permissions.fileSystem packagesRoot
+                                    |> Task.andThen (\_ -> writeVendored context permissions assets packagesRoot vendored cliOptions.verify)
+                                    |> Task.andThen
+                                        (\_ ->
+                                            System.File.writeText permissions.fileSystem manifestPath updatedManifest
+                                                |> Task.map (\_ -> {})
+                                        )
+                                    |> Task.map
+                                        (\_ ->
+                                            { output = output
+                                            , rootPackage = rootIdentity.grenName
+                                            , packageCount = Array.length planned.packages
+                                            , report = addReport rootIdentity libDirectory planned
+                                            }
+                                        )
+                    )
+
+
+writeVendored : Context -> Permissions -> Assets -> Path -> Array Workspace.Package -> Bool -> Task Error {}
+writeVendored context permissions assets packagesRoot packages verify =
+    Array.foldl
+        (\package pending ->
+            pending
+                |> Task.andThen
+                    (\_ ->
+                        when PackageEmit.prepare package is
+                            Err error ->
+                                Task.fail error
+
+                            Ok prepared ->
+                                let
+                                    directory =
+                                        Path.join
+                                            [ packagesRoot
+                                            , Path.fromPosixString
+                                                (Workspace.packageDirectoryName
+                                                    { name = prepared.manifest.name
+                                                    , version = prepared.manifest.version
+                                                    }
+                                                )
+                                            ]
+                                in
+                                removePath permissions.fileSystem directory
+                                    |> Task.andThen (\_ -> PackageEmit.write permissions.fileSystem directory prepared)
+                                    |> Task.andThen
+                                        (\_ ->
+                                            Format.formatPackage context.platform
+                                                permissions.childProcess
+                                                { packageDirectory = directory
+                                                , formatExecutable = assets.formatExecutable
+                                                }
+                                        )
+                                    |> Task.andThen
+                                        (\_ ->
+                                            if verify then
+                                                Verify.Package.verify context.platform
+                                                    permissions.childProcess
+                                                    { packageDirectory = directory
+                                                    , grenExecutable = assets.grenExecutable
+                                                    }
+
+                                            else
+                                                Task.succeed {}
+                                        )
+                    )
+        )
+        (Task.succeed {})
+        packages
+
+
+siblingRelativeManifest : Manifest.Spec -> Manifest.Spec
+siblingRelativeManifest spec =
+    { spec | dependencies = Dict.map (\_ dependency -> siblingRelativeDependency dependency) spec.dependencies }
+
+
+siblingRelativeDependency : Dependency -> Dependency
+siblingRelativeDependency dependency =
+    when dependency is
+        LocalPath path ->
+            if String.startsWith ".elm-to-gren/packages/" path then
+                LocalPath ("../" ++ String.dropFirst (String.count ".elm-to-gren/packages/") path)
+
+            else
+                dependency
+
+        VersionRange _ ->
+            dependency
+
+
+removePath : FileSystem.Permission -> Path -> Task Error {}
+removePath permission path =
+    System.File.exists permission path
+        |> Task.andThen
+            (\pathExists ->
+                if pathExists then
+                    FileSystem.remove permission { recursive = True } path
+                        |> Task.map (\_ -> {})
+                        |> Task.mapError
+                            (\error ->
+                                PortError.create "ADD_FAILED"
+                                    ("Could not clear " ++ Path.toPosixString path ++ ": " ++ FileSystem.errorToString error)
+                            )
+
+                else
+                    Task.succeed {}
+            )
+
+
+lowerBoundVersion : String -> String
+lowerBoundVersion range =
+    when Array.first (String.split " " (String.trim range)) is
+        Just version ->
+            version
+
+        Nothing ->
+            range
+
+
+{-| Prefer the higher of two version pins. Unparseable values keep `existing`.
+-}
+preferHigherVersion : String -> String -> String
+preferHigherVersion existing candidate =
+    when Result.map2 Semver.compare (Semver.parseVersion existing) (Semver.parseVersion candidate) is
+        Ok LT ->
+            candidate
+
+        Ok _ ->
+            existing
+
+        Err _ ->
+            existing
+
+
+mergeLowerBound : String -> String -> Dict String String -> Dict String String
+mergeLowerBound name candidate deps =
+    when Dict.get name deps is
+        Nothing ->
+            Dict.set name candidate deps
+
+        Just existing ->
+            Dict.set name (preferHigherVersion existing candidate) deps
+
+
+{-| Add the library to `dependencies.direct` and its transitive registry deps to
+`dependencies.indirect`, preserving every other field. Deps already present in
+`direct` or `indirect` are left as the project set them. The library is removed
+from `indirect` if it was already there, so it is not listed twice.
+-}
+applyManifestChanges : String -> String -> String -> Dict String String -> Result Error String
+applyManifestChanges manifestText name value indirectDependencies =
+    Decode.decodeString (Decode.keyValuePairs Decode.value) manifestText
+        |> Result.mapError
+            (\problem ->
+                PortError.create "ADD_FAILED"
+                    ("gren.json is not a JSON object: " ++ Decode.errorToString problem)
+            )
+        |> Result.andThen requireApplicationManifest
+        |> Result.andThen
+            (\topPairs ->
+                requireObjectPairs "dependencies" topPairs
+                    |> Result.andThen
+                        (\dependencies ->
+                            Result.map2
+                                (\directBase indirectBase ->
+                                    let
+                                        direct =
+                                            setPair name (Encode.string value) directBase
+
+                                        -- Drop the library from indirect if a previous
+                                        -- install left it there; a package cannot live in
+                                        -- both direct and indirect.
+                                        indirectWithoutLibrary =
+                                            removePair name indirectBase
+
+                                        indirect =
+                                            Dict.foldl
+                                                (\dependencyName dependencyVersion accumulated ->
+                                                    if hasPair dependencyName direct || hasPair dependencyName accumulated then
+                                                        accumulated
+
+                                                    else
+                                                        setPair dependencyName (Encode.string dependencyVersion) accumulated
+                                                )
+                                                indirectWithoutLibrary
+                                                indirectDependencies
+
+                                        newDependencies =
+                                            dependencies
+                                                |> setPair "direct" (objectFromPairs direct)
+                                                |> setPair "indirect" (objectFromPairs indirect)
+
+                                        newTop =
+                                            setPair "dependencies" (objectFromPairs newDependencies) topPairs
+                                    in
+                                    Encode.encode 4 (objectFromPairs newTop) ++ "\n"
+                                )
+                                (requireObjectPairs "direct" dependencies)
+                                (requireObjectPairs "indirect" dependencies)
+                        )
+            )
+
+
+requireApplicationManifest : Array Pair -> Result Error (Array Pair)
+requireApplicationManifest topPairs =
+    when pairString "type" topPairs is
+        Just "application" ->
+            Ok topPairs
+
+        Just other ->
+            Err <|
+                PortError.create "ADD_FAILED"
+                    ("gren.json type is \""
+                        ++ other
+                        ++ "\"; `add` requires a Gren application project."
+                    )
+
+        Nothing ->
+            Err <|
+                PortError.create "ADD_FAILED"
+                    "gren.json is missing a type field; `add` requires a Gren application project."
+
+
+hasPair : String -> Array Pair -> Bool
+hasPair key pairs =
+    Array.any (\pair -> pair.key == key) pairs
+
+
+type alias Pair =
+    { key : String, value : Decode.Value }
+
+
+pairString : String -> Array Pair -> Maybe String
+pairString key pairs =
+    when Array.findFirst (\pair -> pair.key == key) pairs is
+        Just found ->
+            Decode.decodeValue Decode.string found.value.value
+                |> Result.toMaybe
+
+        Nothing ->
+            Nothing
+
+
+requireObjectPairs : String -> Array Pair -> Result Error (Array Pair)
+requireObjectPairs key pairs =
+    when Array.findFirst (\pair -> pair.key == key) pairs is
+        Nothing ->
+            Err <|
+                PortError.create "ADD_FAILED"
+                    ("gren.json is missing \"" ++ key ++ "\".")
+
+        Just found ->
+            Decode.decodeValue (Decode.keyValuePairs Decode.value) found.value.value
+                |> Result.mapError
+                    (\problem ->
+                        PortError.create "ADD_FAILED"
+                            ("gren.json field \""
+                                ++ key
+                                ++ "\" is not a JSON object: "
+                                ++ Decode.errorToString problem
+                            )
+                    )
+
+
+setPair : String -> Decode.Value -> Array Pair -> Array Pair
+setPair key value pairs =
+    if Array.any (\pair -> pair.key == key) pairs then
+        Array.map
+            (\pair ->
+                if pair.key == key then
+                    { key = key, value = value }
+
+                else
+                    pair
+            )
+            pairs
+
+    else
+        Array.pushLast { key = key, value = value } pairs
+
+
+removePair : String -> Array Pair -> Array Pair
+removePair key pairs =
+    Array.keepIf (\pair -> pair.key /= key) pairs
+
+
+objectFromPairs : Array Pair -> Decode.Value
+objectFromPairs pairs =
+    Encode.object (Array.map (\pair -> { key = pair.key, value = pair.value }) pairs)
+
+
+addReport : Plan.Identity -> String -> Planned -> String
+addReport rootIdentity libDirectory planned =
+    Encode.object
+        [ { key = "schemaVersion", value = Encode.int 1 }
+        , { key = "command", value = Encode.string "add" }
+        , { key = "library", value = Encode.string rootIdentity.grenName }
+        , { key = "vendorPath", value = Encode.string (".elm-to-gren/packages/" ++ libDirectory) }
+        , { key = "packageCount", value = Encode.int (Array.length planned.packages) }
+        ]
+        |> Encode.encode 2
 
 
 resultTask : (problem -> Error) -> Result problem value -> Task Error value

@@ -334,13 +334,16 @@ assert.deepEqual(
   kernelBoundary.diagnostics.map(({ code }) => code),
   ["UNSUPPORTED_KERNEL", "UNSUPPORTED_KERNEL"],
 );
-assert.ok(reserved.diagnostics.length >= 6);
-assert.ok(reserved.diagnostics.every(({ code }) => code === "UNMAPPED_SYMBOL"));
-assert.ok(
-  reserved.diagnostics.every(({ message }) =>
-    /reserved word in Gren/u.test(message),
-  ),
-);
+// Gren reserved words `when`/`is` are rewritten to `when_`/`is_`, not refused.
+assert.equal(reserved.diagnostics.length, 0);
+const reservedOutput = transformedFixtureModule("structural", reserved);
+assert.match(reservedOutput, /module Reserved exposing \(is_, when_\)/u);
+assert.match(reservedOutput, /when_ : Int -> Int/u);
+assert.match(reservedOutput, /when_ is_ =/u);
+assert.match(reservedOutput, /let\s+when_ =/u);
+assert.match(reservedOutput, /\{\s*is_ = when_\s*\}\.is_/u);
+assert.doesNotMatch(reservedOutput, /\bwhen\b/u);
+assert.doesNotMatch(reservedOutput, /\bis\b/u);
 
 const effect = moduleNamed(extractFixture("effect"), "EffectBoundary");
 assert.deepEqual(

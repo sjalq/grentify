@@ -122,7 +122,7 @@ fromProjectToModule =
             { path = path
             , moduleName = qualifiedModuleName
             , extract = extract
-            , edits = []
+            , edits = reservedEditsForModule (Node.value ast.moduleDefinition)
             , diagnostics = List.reverse (diagnosticsForModuleDefinition ast.moduleDefinition)
             , importedModules = []
             , requiredAdapters = []
@@ -252,36 +252,35 @@ importInfo import_ =
 
 diagnosticsForModuleDefinition : Node Module -> List Diagnostic
 diagnosticsForModuleDefinition (Node range moduleDefinition) =
-    let
-        moduleKindDiagnostics : List Diagnostic
-        moduleKindDiagnostics =
-            case moduleDefinition of
-                PortModule _ ->
-                    [ { code = "UNMAPPED_MODULE"
-                      , severity = Types.Error
-                      , message = "Elm port modules require an explicit Gren platform boundary."
-                      , range = Just range
-                      , help = Just "Replace ports with a Gren Node or browser API and provide a mapping for that boundary."
-                      }
-                    ]
+    case moduleDefinition of
+        PortModule _ ->
+            [ { code = "UNMAPPED_MODULE"
+              , severity = Types.Error
+              , message = "Elm port modules require an explicit Gren platform boundary."
+              , range = Just range
+              , help = Just "Replace ports with a Gren Node or browser API and provide a mapping for that boundary."
+              }
+            ]
 
-                EffectModule _ ->
-                    [ { code = "UNSUPPORTED_KERNEL"
-                      , severity = Types.Error
-                      , message = "Elm effect modules depend on privileged runtime and kernel APIs that packages cannot reproduce in Gren."
-                      , range = Just range
-                      , help = Just "Map this module to a Gren runtime package or replace the effect manager with ordinary Gren code."
-                      }
-                    ]
+        EffectModule _ ->
+            [ { code = "UNSUPPORTED_KERNEL"
+              , severity = Types.Error
+              , message = "Elm effect modules depend on privileged runtime and kernel APIs that packages cannot reproduce in Gren."
+              , range = Just range
+              , help = Just "Map this module to a Gren runtime package or replace the effect manager with ordinary Gren code."
+              }
+            ]
 
-                NormalModule _ ->
-                    []
-    in
-    moduleKindDiagnostics ++ reservedDiagnosticsForModule moduleDefinition
+        NormalModule _ ->
+            []
 
 
-reservedDiagnosticsForModule : Module -> List Diagnostic
-reservedDiagnosticsForModule moduleDefinition =
+{-| Gren reclaims `when`/`is` as keywords (`case`/`of` in Elm). Elm code that
+uses those as ordinary identifiers is rewritten to `when_`/`is_` at every
+binding and use site the rule visits, rather than refused.
+-}
+reservedEditsForModule : Module -> List SourceEdit
+reservedEditsForModule moduleDefinition =
     let
         exposingList : Node Exposing
         exposingList =
@@ -304,32 +303,40 @@ reservedDiagnosticsForModule moduleDefinition =
                 _ ->
                     []
     in
-    reservedDiagnosticsForExposing (Node.value exposingList)
-        ++ List.filterMap reservedDiagnosticForNode effectManagerNames
+    reservedEditsForExposing (Node.value exposingList)
+        ++ List.filterMap reservedEditForNode effectManagerNames
 
 
-reservedDiagnosticsForExposing : Exposing -> List Diagnostic
-reservedDiagnosticsForExposing exposingList =
+reservedEditsForExposing : Exposing -> List SourceEdit
+reservedEditsForExposing exposingList =
     case exposingList of
         All _ ->
             []
 
         Explicit exposed ->
             List.filterMap
-                (\((Node range exposedValue) as exposedNode) ->
+                (\(Node range exposedValue) ->
                     case exposedValue of
                         FunctionExpose name ->
-                            if isReservedGrenIdentifier name then
-                                Just (reservedIdentifierDiagnostic range name)
+                            reservedEditForName range name
 
-                            else
-                                Nothing
+                        TypeOrAliasExpose name ->
+                            reservedEditForName range name
 
-                        _ ->
-                            let
-                                _ =
-                                    exposedNode
-                            in
+                        TypeExpose exposedType ->
+                            -- Range covers `Name` or `Name (..)`; only rewrite the name.
+                            case exposedType.open of
+                                Nothing ->
+                                    reservedEditForName range exposedType.name
+
+                                Just openRange ->
+                                    reservedEditForName
+                                        { start = range.start
+                                        , end = openRange.start
+                                        }
+                                        exposedType.name
+
+                        InfixExpose _ ->
                             Nothing
                 )
                 exposed
@@ -392,12 +399,12 @@ importVisitor (Node range import_) context =
                 , importFacts = importFact :: context.importFacts
             }
 
-        withReservedDiagnostics : ModuleContext
-        withReservedDiagnostics =
+        withReservedEdits : ModuleContext
+        withReservedEdits =
             import_.exposingList
-                |> Maybe.map (Node.value >> reservedDiagnosticsForExposing)
+                |> Maybe.map (Node.value >> reservedEditsForExposing)
                 |> Maybe.withDefault []
-                |> List.foldl addDiagnostic withImport
+                |> List.foldl (\edit ctx -> { ctx | edits = edit :: ctx.edits }) withImport
     in
     if isKernelModule imported then
         ( []
@@ -408,11 +415,11 @@ importVisitor (Node range import_) context =
             , range = Just range
             , help = Just "Map the owning Elm package to an analogous Gren package or replace the kernel call with a public Gren API."
             }
-            withReservedDiagnostics
+            withReservedEdits
         )
 
     else
-        ( [], withReservedDiagnostics )
+        ( [], withReservedEdits )
 
 
 detectPlatform : String -> Platform -> Platform
@@ -444,32 +451,39 @@ isReservedGrenIdentifier name =
     name == "when" || name == "is"
 
 
-reservedIdentifierDiagnostic : Range -> String -> Diagnostic
-reservedIdentifierDiagnostic range name =
-    { code = "UNMAPPED_SYMBOL"
-    , severity = Types.Error
-    , message = "Elm identifier `" ++ name ++ "` is a reserved word in Gren."
-    , range = Just range
-    , help = Just "Rename this identifier consistently or provide an explicit symbol mapping."
-    }
+{-| Append `_` so the identifier remains legal under Gren keywords. -}
+reservedRewrite : String -> String
+reservedRewrite name =
+    name ++ "_"
 
 
-reservedDiagnosticForNode : Node String -> Maybe Diagnostic
-reservedDiagnosticForNode (Node range name) =
+reservedEditForName : Range -> String -> Maybe SourceEdit
+reservedEditForName range name =
     if isReservedGrenIdentifier name then
-        Just (reservedIdentifierDiagnostic range name)
+        Just
+            { range = range
+            , replacement = reservedRewrite name
+            , kind = Types.SymbolReference
+            , rule = "ElmToGren"
+            }
 
     else
         Nothing
 
 
+reservedEditForNode : Node String -> Maybe SourceEdit
+reservedEditForNode (Node range name) =
+    reservedEditForName range name
+
+
 addReservedIdentifier : Range -> String -> ModuleContext -> ModuleContext
 addReservedIdentifier range name context =
-    if isReservedGrenIdentifier name then
-        addDiagnostic (reservedIdentifierDiagnostic range name) context
+    case reservedEditForName range name of
+        Just edit ->
+            { context | edits = edit :: context.edits }
 
-    else
-        context
+        Nothing ->
+            context
 
 
 addReservedIdentifierNode : Node String -> ModuleContext -> ModuleContext
@@ -510,7 +524,13 @@ declarationVisitor (Node range declaration) direction context =
                         withSignature =
                             case function.signature of
                                 Just signatureNode ->
-                                    collectTypeAnnotation (Node.value signatureNode).typeAnnotation withFunctionName
+                                    let
+                                        signature =
+                                            Node.value signatureNode
+                                    in
+                                    withFunctionName
+                                        |> addReservedIdentifierNode signature.name
+                                        |> collectTypeAnnotation signature.typeAnnotation
 
                                 Nothing ->
                                     withFunctionName
@@ -519,16 +539,21 @@ declarationVisitor (Node range declaration) direction context =
 
                 AliasDeclaration aliasDeclaration ->
                     ( []
-                    , aliasDeclaration.generics
-                        |> List.foldl addReservedIdentifierNode context
+                    , context
+                        |> addReservedIdentifierNode aliasDeclaration.name
+                        |> (\ctx -> List.foldl addReservedIdentifierNode ctx aliasDeclaration.generics)
                         |> collectTypeAnnotation aliasDeclaration.typeAnnotation
                     )
 
                 CustomTypeDeclaration customType ->
                     let
+                        withName : ModuleContext
+                        withName =
+                            addReservedIdentifierNode customType.name context
+
                         withGenerics : ModuleContext
                         withGenerics =
-                            List.foldl addReservedIdentifierNode context customType.generics
+                            List.foldl addReservedIdentifierNode withName customType.generics
 
                         withTypes : ModuleContext
                         withTypes =
@@ -613,7 +638,26 @@ expressionVisitor ((Node range expression) as expressionNode) context =
             ( [], addReservedIdentifierNode fieldName context )
 
         RecordAccessFunction fieldName ->
-            ( [], addReservedIdentifier range fieldName context )
+            -- elm-syntax stores access-functions as `.field` (leading dot).
+            let
+                bareField : String
+                bareField =
+                    if String.startsWith "." fieldName then
+                        String.dropLeft 1 fieldName
+
+                    else
+                        fieldName
+            in
+            if isReservedGrenIdentifier bareField then
+                ( []
+                , addEdit Types.SymbolReference
+                    range
+                    ("." ++ reservedRewrite bareField)
+                    context
+                )
+
+            else
+                ( [], context )
 
         RecordUpdateExpression recordName setters ->
             ( []
@@ -623,7 +667,18 @@ expressionVisitor ((Node range expression) as expressionNode) context =
 
         FunctionOrValue moduleParts name ->
             if isReservedGrenIdentifier name then
-                ( [], addReservedIdentifier range name context )
+                -- Range covers the whole written form (`when` or `Mod.when`).
+                -- Rewrite only the identifier, preserving any qualifier.
+                let
+                    rewritten : String
+                    rewritten =
+                        if List.isEmpty moduleParts then
+                            reservedRewrite name
+
+                        else
+                            String.join "." moduleParts ++ "." ++ reservedRewrite name
+                in
+                ( [], addEdit Types.SymbolReference range rewritten context )
 
             else if isKernelModule (String.join "." moduleParts) then
                 ( []
@@ -3195,11 +3250,16 @@ recordAliasFunction fields =
 
 collectConstructorDefinition : Node ValueConstructor -> ModuleContext -> ModuleContext
 collectConstructorDefinition (Node _ constructor) context =
+    let
+        withName : ModuleContext
+        withName =
+            addReservedIdentifierNode constructor.name context
+    in
     if List.length constructor.arguments > 1 then
-        addPayloadEdits Types.CustomType ":" constructor.arguments context
+        addPayloadEdits Types.CustomType ":" constructor.arguments withName
 
     else
-        context
+        withName
 
 
 collectLetDeclaration : Node LetDeclaration -> ModuleContext -> ModuleContext
@@ -3218,7 +3278,13 @@ collectLetDeclaration (Node _ declaration) context =
                 withSignature =
                     case function.signature of
                         Just signatureNode ->
-                            collectTypeAnnotation (Node.value signatureNode).typeAnnotation withFunctionName
+                            let
+                                signature =
+                                    Node.value signatureNode
+                            in
+                            withFunctionName
+                                |> addReservedIdentifierNode signature.name
+                                |> collectTypeAnnotation signature.typeAnnotation
 
                         Nothing ->
                             withFunctionName

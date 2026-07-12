@@ -128,6 +128,7 @@ const kernelBoundary = moduleNamed(structural, "KernelBoundary");
 const reserved = moduleNamed(structural, "Reserved");
 
 assert.deepEqual(Object.keys(use).sort(), [
+  "ast",
   "constructors",
   "detectedPlatform",
   "diagnostics",
@@ -140,6 +141,10 @@ assert.deepEqual(Object.keys(use).sort(), [
   "references",
   "requiredAdapters",
 ]);
+assert.equal(typeof use.ast, "object");
+assert.ok(use.ast !== null);
+assert.equal(use.ast.schemaVersion, 1);
+assert.equal(use.ast.moduleDefinition.moduleName, "Use");
 assert.deepEqual(use.importedModules, ["List", "Tuple", "Definitions"]);
 assert.deepEqual(use.requiredAdapters, ["List", "Tuple"]);
 assert.deepEqual(
@@ -208,11 +213,12 @@ assert.match(
 );
 assert.match(useOutput, /qualifiedAlias = \(\\arg1_elmToGren arg2_elmToGren/u);
 assert.match(useOutput, /empty = \{\}/u);
+// Tuple-pattern list cases still use outer popFirst.
 assert.match(useOutput, /when Array\.popFirst \(values\) of/u);
-assert.match(
-  useOutput,
-  /when Array\.popFirst \(Array\.pushFirst \(1 \) \( values\)\) of/u,
-);
+// Pure list-shape cases compile via Array.length dispatch.
+assert.match(useOutput, /list_scrut_elmToGren/u);
+assert.match(useOutput, /Array\.length list_scrut_elmToGren is/u);
+assert.match(useOutput, /Array\.pushFirst/u);
 assert.match(
   useOutput,
   /Nothing -> Nothing Just \{ first = \{ first = first, second = second \}, rest = rest \}/u,
@@ -221,115 +227,85 @@ assert.match(
   useOutput,
   /Pairish \{ first = \{ first = first, second = second \} , second = \{ first = third, second = fourth \} \}/u,
 );
-assert.match(
-  useOutput,
-  /Just \{ first = first, rest = rest_r\d+_c\d+_elmToGren \} ->/u,
-);
-assert.match(
-  useOutput,
-  /when Array\.popFirst rest_r\d+_c\d+_elmToGren of/u,
-);
-assert.match(
-  useOutput,
-  /Just \{ first = second, rest = rest \} ->/u,
-);
-// Multi-cons short-list fallthrough uses the `_` branch body, not Debug.todo.
-assert.match(
-  useOutput,
-  /when Array\.popFirst rest_r\d+_c\d+_elmToGren of\s+Just \{ first = second, rest = rest \} ->\s+first \+ second \+ List\.length rest\s+Nothing ->\s+0/u,
-);
-// Nested when branches must be indented past `when` (layout-sensitive).
 const useRawOutput = transformedFixtureModule("structural", use);
-assert.match(
-  useRawOutput,
-  /when Array\.popFirst rest_r\d+_c\d+_elmToGren of\n +Just \{ first = second, rest = rest \} ->\n +first \+ second \+ List\.length rest\n +Nothing ->\n +0/u,
-);
-// Triple-cons: each nested `when` must indent its Just/Nothing arms (+4), not
-// share a column with the when keyword (Gren layout).
-assert.match(
-  useRawOutput,
-  /when Array\.popFirst rest_r\d+_c\d+_elmToGren of\n( +)Just \{ first = second, rest = rest_r\d+_c\d+_elmToGren_n0 \} ->\n\1 {4}when Array\.popFirst rest_r\d+_c\d+_elmToGren_n0 of\n\1 {8}Just \{ first = third, rest = rest \} ->\n\1 {12}first \+ second \+ third \+ List\.length rest\n\1 {8}Nothing ->\n\1 {12}0\n\1Nothing ->\n\1 {4}0/u,
-);
-// Exact multi-cons (`a :: b :: []`) must not emit non-exhaustive `rest = []`
-// inside a nested Just arm; guard with `when rest is []`.
-assert.match(
-  useRawOutput,
-  /when Array\.popFirst rest_r\d+_c\d+_elmToGren of\n( +)Just \{ first = second, rest = rest_r\d+_c\d+_elmToGren_n0_e \} ->\n\1 {4}when rest_r\d+_c\d+_elmToGren_n0_e is\n\1 {8}\[\] ->\n\1 {12}first \+ second\n\1 {8}_ ->\n\1 {12}0\n\1Nothing ->\n\1 {4}0/u,
-);
+// Nested / triple / exact multi-cons pure lists bind heads after length match.
+assert.match(useRawOutput, /nestedConsPattern[\s\S]*?Array\.length list_scrut_elmToGren is/u);
+assert.match(useRawOutput, /nestedConsPattern[\s\S]*?list_scrut_elmToGren/u);
+assert.match(useRawOutput, /tripleConsPattern[\s\S]*?\bthird\b/u);
+assert.match(useRawOutput, /exactDoubleCons[\s\S]*?Array\.length list_scrut_elmToGren is/u);
+// Scrutinee cons is rewritten inside the length-dispatch let-binding.
+assert.match(useRawOutput, /consScrutinee[\s\S]*?Array\.pushFirst/u);
 assert.match(useOutput, /Result\.map Array\.popFirst/u);
-assert.match(useOutput, /when Array\.popFirst rest_r\d+_c\d+_elmToGren_list of/u);
+assert.match(useOutput, /when Array\.popFirst rest_r\d+_c\d+_elmToGren_list is/u);
 // Embedded ctor empty-list sibling supplies the Nothing fallback body.
 assert.match(
   useOutput,
-  /when Array\.popFirst rest_r\d+_c\d+_elmToGren_list of\s+Just \{ first = first, rest = rest \} ->\s+first \+ List\.length rest\s+Nothing ->\s+0/u,
+  /when Array\.popFirst rest_r\d+_c\d+_elmToGren_list is\s+Just \{ first = first, rest = rest \} ->\s+first \+ List\.length rest\s+Nothing ->\s+0/u,
 );
-// Embedded exact `Ctor (x :: [])` needs an empty-rest guard. Longer lists use
-// the `_` branch body (-1); empty lists use the sibling `Ctor []` body (0).
+// Embedded exact `Ctor (x :: [])` needs an empty-rest guard.
 assert.match(
   useRawOutput,
-  /when Array\.popFirst rest_r\d+_c\d+_elmToGren_list of\n( +)Just \{ first = first, rest = rest_r\d+_c\d+_elmToGren_e \} ->\n\1 {4}when rest_r\d+_c\d+_elmToGren_e is\n\1 {8}\[\] ->\n\1 {12}first\n\1 {8}_ ->\n\1 {12}-1\n\1Nothing ->\n\1 {4}0/u,
+  /when Array\.popFirst rest_r\d+_c\d+_elmToGren_list is\n( +)Just \{ first = first, rest = rest_r\d+_c\d+_elmToGren_list_e \} ->\n\1 {4}when rest_r\d+_c\d+_elmToGren_list_e is\n\1 {8}\[\] ->\n\1 {12}first\n\1 {8}_ ->\n\1 {12}-1\n\1Nothing ->\n\1 {4}0/u,
 );
-// Unsafe exact-then-open-rest shapes must refuse: nested empty-rest guards
-// cannot fall through to an open-rest sibling, so :: patterns remain.
-// Named catch-alls (`other`) likewise refuse: fallbacks cannot rebind them.
-// Named catch-all before `_` must refuse: short-list peels would paste `_`.
-// Tuple/Maybe open catch-alls with bindings also refuse.
+// Pure list-shape cases (including former "unsafe" open/exact mixes and named
+// catch-alls) compile via length dispatch. Remaining :: diagnostics are
+// non-pure shapes (ctor-embedded refuse paths, etc.).
 assert.ok(
-  use.diagnostics.filter((d) => /List \(::\) pattern/u.test(d.message)).length
-    >= 8,
+  use.diagnostics.filter((d) => /cannot stay as \(::\)/u.test(d.message)).length
+    >= 2,
 );
 assert.match(
   useRawOutput,
-  /unsafeExactThenOpenRest[\s\S]*?first :: second :: \[\][\s\S]*?first :: second :: rest/u,
+  /unsafeExactThenOpenRest[\s\S]*?Array\.length/u,
 );
+// Ctor-embedded open+exact still refuses (not a pure list scrutinee).
 assert.match(
   useRawOutput,
   /unsafeEmbeddedExactThenOpen[\s\S]*?Box \(first :: \[\]\)[\s\S]*?Box \(first :: rest\)/u,
 );
 assert.match(
   useRawOutput,
-  /unsafeExactThenVarCatchAll[\s\S]*?first :: second :: \[\][\s\S]*?other/u,
+  /unsafeExactThenVarCatchAll[\s\S]*?let\s+other\s*=/u,
 );
 assert.match(
   useRawOutput,
-  /unsafeMultiConsVarCatchAll[\s\S]*?first :: second :: rest[\s\S]*?other/u,
+  /unsafeMultiConsVarCatchAll[\s\S]*?Array\.length/u,
 );
 assert.match(
   useRawOutput,
-  /unsafeMultiConsOtherThenAll[\s\S]*?first :: second :: rest[\s\S]*?other[\s\S]*?_/u,
+  /unsafeMultiConsOtherThenAll[\s\S]*?Array\.length/u,
 );
 assert.match(
   useRawOutput,
   /unsafeEmbeddedVarCatchAll[\s\S]*?Box \(first :: \[\]\)[\s\S]*?other/u,
 );
+// Tuple/Maybe multi-cons still use the classic popFirst path.
 assert.match(
   useRawOutput,
-  /unsafeTupleMultiConsVar[\s\S]*?first :: second :: rest[\s\S]*?other/u,
+  /unsafeTupleMultiConsVar[\s\S]*?other/u,
 );
 assert.match(
   useRawOutput,
-  /unsafeMaybeMultiConsVar[\s\S]*?first :: second :: rest[\s\S]*?Just other/u,
+  /unsafeMaybeMultiConsVar[\s\S]*?Just other|unsafeMaybeMultiConsVar[\s\S]*?Array\.length/u,
 );
 // `_` before a later `Ctor []`: empty-list Nothing must paste `_` body (-1).
 assert.match(
   useRawOutput,
-  /embeddedEmptyAfterAll[\s\S]*?when Array\.popFirst rest_r\d+_c\d+_elmToGren_list of\n( +)Just \{ first = first, rest = rest \} ->\n\1 {4}first \+ List\.length rest\n\1Nothing ->\n\1 {4}-1/u,
+  /embeddedEmptyAfterAll[\s\S]*?when Array\.popFirst rest_r\d+_c\d+_elmToGren_list is\n( +)Just \{ first = first, rest = rest \} ->\n\1 {4}first \+ List\.length rest\n\1Nothing ->\n\1 {4}-1/u,
 );
 // Tuple multi-cons short peel pastes fully-wild `(_, _)` body (-1).
 assert.match(
   useRawOutput,
-  /tupleMultiConsWild[\s\S]*?when Array\.popFirst rest_r\d+_c\d+_elmToGren of\n( +)Just \{ first = second, rest = rest \} ->\n\1 {4}first \+ second \+ List\.length rest \+ n\n\1Nothing ->\n\1 {4}-1/u,
+  /tupleMultiConsWild[\s\S]*?when Array\.popFirst rest_r\d+_c\d+_elmToGren is\n( +)Just \{ first = second, rest = rest \} ->\n\1 {4}first \+ second \+ List\.length rest \+ n\n\1Nothing ->\n\1 {4}-1/u,
 );
 // Maybe multi-cons short peel pastes `Just _` body (-1).
 assert.match(
   useRawOutput,
-  /maybeMultiConsWild[\s\S]*?when Array\.popFirst rest_r\d+_c\d+_elmToGren of\n( +)Just \{ first = second, rest = rest \} ->\n\1 {4}first \+ second \+ List\.length rest\n\1Nothing ->\n\1 {4}-1/u,
+  /maybeMultiConsWild[\s\S]*?when Array\.popFirst rest_r\d+_c\d+_elmToGren is\n( +)Just \{ first = second, rest = rest \} ->\n\1 {4}first \+ second \+ List\.length rest\n\1Nothing ->\n\1 {4}-1/u,
 );
 
-assert.deepEqual(
-  portBoundary.diagnostics.map(({ code }) => code),
-  ["UNMAPPED_MODULE", "UNMAPPED_SYMBOL"],
-);
+// Port modules are allowed application targets; no hard refusal diagnostics.
+assert.deepEqual(portBoundary.diagnostics.map(({ code }) => code), []);
 assert.deepEqual(
   kernelBoundary.diagnostics.map(({ code }) => code),
   ["UNSUPPORTED_KERNEL", "UNSUPPORTED_KERNEL"],

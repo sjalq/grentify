@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "selection": "Public Elm 0.19 applications for the app-port regression suite, including elm-ui and elm-css dependents. Goal: elm.json application → compiling Gren app (port decls preserved; no JS interop emit).",
+  "apps": [
+    {
+      "id": "todomvc",
+      "repo": "evancz/elm-todomvc",
+      "ref": "master",
+      "elmJsonPath": "elm.json",
+      "main": "Main",
+      "notes": "Browser.document, one storage port, minimal deps"
+    },
+    {
+      "id": "example-app",
+      "repo": "sporto/elm-example-app",
+      "ref": "master",
+      "elmJsonPath": "elm.json",
+      "main": "Main",
+      "notes": "Small SPA, elm/http 1.x"
+    },
+    {
+      "id": "builtwithelm",
+      "repo": "dwayne/builtwithelm",
+      "ref": "master",
+      "elmJsonPath": "elm.json",
+      "main": "Main",
+      "notes": "SPA, minimal official deps, no ports"
+    },
+    {
+      "id": "webpack-starter",
+      "repo": "simonh1000/elm-webpack-starter",
+      "ref": "master",
+      "elmJsonPath": "elm.json",
+      "main": "Main",
+      "notes": "Browser.document, one simple port, core deps"
+    },
+    {
+      "id": "hnpwa",
+      "repo": "rl-king/elm-hnpwa",
+      "ref": "master",
+      "elmJsonPath": "elm.json",
+      "main": "Main",
+      "notes": "HN SPA, http + markdown stub"
+    },
+    {
+      "id": "elm-conduit",
+      "repo": "dwayne/elm-conduit",
+      "ref": "master",
+      "elmJsonPath": "elm.json",
+      "main": "Main",
+      "notes": "RealWorld SPA, simple ports"
+    },
+    {
+      "id": "spa-example",
+      "repo": "rtfeldman/elm-spa-example",
+      "ref": "master",
+      "elmJsonPath": "elm.json",
+      "main": "Main",
+      "notes": "Classic RealWorld SPA, http 1.x + localStorage ports"
+    },
+    {
+      "id": "l-system-studio",
+      "repo": "dwayne/elm-l-system-studio",
+      "ref": "master",
+      "elmJsonPath": "elm.json",
+      "main": "Main",
+      "notes": "Browser.element + canvas ports, nested tuple patterns"
+    },
+    {
+      "id": "spa-skeleton",
+      "repo": "jhbrown94/experimental-elm-spa-skeleton",
+      "ref": "master",
+      "elmJsonPath": "elm.json",
+      "main": "Main",
+      "notes": "SPA skeleton with mdgriffith/elm-ui (list pattern stress)"
+    },
+    {
+      "id": "shared-state",
+      "repo": "ohanhi/elm-shared-state",
+      "ref": "master",
+      "elmJsonPath": "elm.json",
+      "main": "Main",
+      "notes": "Shared-state SPA; rtfeldman/elm-css (list pattern stress)"
+    }
+  ]
+}

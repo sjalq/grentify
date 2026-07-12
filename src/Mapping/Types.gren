@@ -179,16 +179,21 @@ type AdapterId
     | DictAdapter
     | HtmlAttributesAdapter
     | HtmlEventsAdapter
+    | HtmlKeyedAdapter
+    | HttpAdapter
     | JsonDecodeAdapter
     | JsonEncodeAdapter
     | ListAdapter
+    | MarkdownAdapter
     | MaybeAdapter
     | RandomAdapter
     | ResultAdapter
     | SetAdapter
     | StringAdapter
+    | SvgKeyedAdapter
     | TaskAdapter
     | TupleAdapter
+    | VirtualDomKeyedAdapter
 
 
 adapterIdName : AdapterId -> String
@@ -218,6 +223,12 @@ adapterIdName adapterId =
         HtmlEventsAdapter ->
             "Html.Events"
 
+        HtmlKeyedAdapter ->
+            "Html.Keyed"
+
+        HttpAdapter ->
+            "Http"
+
         JsonDecodeAdapter ->
             "Json.Decode"
 
@@ -226,6 +237,9 @@ adapterIdName adapterId =
 
         ListAdapter ->
             "List"
+
+        MarkdownAdapter ->
+            "Markdown"
 
         MaybeAdapter ->
             "Maybe"
@@ -242,11 +256,17 @@ adapterIdName adapterId =
         StringAdapter ->
             "String"
 
+        SvgKeyedAdapter ->
+            "Svg.Keyed"
+
         TaskAdapter ->
             "Task"
 
         TupleAdapter ->
             "Tuple"
+
+        VirtualDomKeyedAdapter ->
+            "VirtualDom.Keyed"
 
 
 type alias GeneratedModule =

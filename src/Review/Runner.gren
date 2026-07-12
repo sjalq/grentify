@@ -1,7 +1,15 @@
 module Review.Runner exposing (Options, run)
 
+{-| Run elm-review extract for a package.
+
+Caches the compiled review application under `reviewAppCache` so multi-package
+ports (and prove scripts) pay the ~3–20s compile once per rule version, not
+once per package tree.
+-}
+
 import ChildProcess
 import Dict
+import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Node
 import Port.Error as PortError exposing (Error)
@@ -19,22 +27,45 @@ type alias Options =
     , elmHome : Maybe Path
     , files : Array String
     , offline : Bool
+    , -- Shared cache of elm-review's generated CLI app (cli/2.13.5 tree).
+      -- Nothing disables seeding/saving.
+      reviewAppCache : Maybe Path
+    , fileSystem : FileSystem.Permission
     }
 
 
+{-| Relative path where elm-review stores its compiled app for a project.
+Version segment tracks the elm-review dependency used by this repo.
+-}
+reviewCliRelative : String
+reviewCliRelative =
+    "elm-stuff/generated-code/jfmengels/elm-review/cli/2.13.5"
+
+
 run : Node.Platform -> ChildProcess.Permission -> Options -> Task Error Extraction
-run platform permission options =
+run platform childProcess options =
+    seedReviewApp platform childProcess options
+        |> Task.andThen (\_ -> invokeReview platform childProcess options)
+        |> Task.andThen
+            (\extraction ->
+                saveReviewApp platform childProcess options
+                    |> Task.map (\_ -> extraction)
+            )
+
+
+invokeReview : Node.Platform -> ChildProcess.Permission -> Options -> Task Error Extraction
+invokeReview platform childProcess options =
     let
         baseArguments =
             Array.append options.files
-            [ "--elmjson"
-            , System.File.pathToString platform options.elmJson
-            , "--config"
-            , System.File.pathToString platform options.reviewConfig
-            , "--report=json"
-            , "--extract"
-            , "--no-color"
-            ]
+                [ "--elmjson"
+                , System.File.pathToString platform options.elmJson
+                , "--config"
+                , System.File.pathToString platform options.reviewConfig
+                , "--report=json"
+                , "--extract"
+                , "--no-color"
+                ]
 
         arguments =
             if options.offline then
@@ -51,7 +82,7 @@ run platform permission options =
                 Just elmHome ->
                     Dict.singleton "ELM_HOME" (System.File.pathToString platform elmHome)
     in
-    System.Process.run permission
+    System.Process.run childProcess
         { program = options.executable
         , arguments = arguments
         , workingDirectory = System.File.pathToString platform options.packageRoot
@@ -80,3 +111,104 @@ run platform permission options =
                         in
                         Task.fail enriched
             )
+
+
+seedReviewApp : Node.Platform -> ChildProcess.Permission -> Options -> Task Error {}
+seedReviewApp platform childProcess options =
+    when options.reviewAppCache is
+        Nothing ->
+            Task.succeed {}
+
+        Just cacheRoot ->
+            let
+                shared =
+                    Path.join [ cacheRoot, Path.fromPosixString reviewCliRelative ]
+
+                destination =
+                    Path.join [ options.packageRoot, Path.fromPosixString reviewCliRelative ]
+
+                sharedApps =
+                    Path.join [ shared, Path.fromPosixString "review-applications" ]
+
+                destApps =
+                    Path.join [ destination, Path.fromPosixString "review-applications" ]
+            in
+            System.File.exists options.fileSystem sharedApps
+                |> Task.andThen
+                    (\sharedReady ->
+                        if not sharedReady then
+                            Task.succeed {}
+
+                        else
+                            System.File.exists options.fileSystem destApps
+                                |> Task.andThen
+                                    (\already ->
+                                        if already then
+                                            Task.succeed {}
+
+                                        else
+                                            -- Fast path: native recursive copy (~ms) instead of
+                                            -- per-file Gren copies of the whole review app tree.
+                                            System.File.ensureDirectory options.fileSystem destination
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        shellCopyTree platform childProcess shared destination
+                                                    )
+                                    )
+                    )
+
+
+saveReviewApp : Node.Platform -> ChildProcess.Permission -> Options -> Task Error {}
+saveReviewApp platform childProcess options =
+    when options.reviewAppCache is
+        Nothing ->
+            Task.succeed {}
+
+        Just cacheRoot ->
+            let
+                source =
+                    Path.join [ options.packageRoot, Path.fromPosixString reviewCliRelative ]
+
+                shared =
+                    Path.join [ cacheRoot, Path.fromPosixString reviewCliRelative ]
+
+                sourceApps =
+                    Path.join [ source, Path.fromPosixString "review-applications" ]
+            in
+            System.File.exists options.fileSystem sourceApps
+                |> Task.andThen
+                    (\ready ->
+                        if not ready then
+                            Task.succeed {}
+
+                        else
+                            System.File.ensureDirectory options.fileSystem shared
+                                |> Task.andThen
+                                    (\_ ->
+                                        shellCopyTree platform childProcess source shared
+                                    )
+                    )
+
+
+{-| Best-effort `cp -a source/. dest/`. Failures are swallowed so review can cold-build.
+-}
+shellCopyTree : Node.Platform -> ChildProcess.Permission -> Path -> Path -> Task Error {}
+shellCopyTree platform childProcess source destination =
+    let
+        src =
+            System.File.pathToString platform source ++ "/."
+
+        dest =
+            System.File.pathToString platform destination
+    in
+    System.Process.run childProcess
+        { program = "cp"
+        , arguments = [ "-a", src, dest ]
+        , workingDirectory = System.File.pathToString platform destination
+        , environment = Dict.empty
+        , allowedExitCodes = [ 0 ]
+        , timeoutMilliseconds = 60 * 1000
+        , maximumOutputBytes = 1024 * 1024
+        }
+        |> Task.map (\_ -> {})
+        |> Task.onError (\_ -> Task.succeed {})

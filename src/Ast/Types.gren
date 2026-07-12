@@ -1,0 +1,186 @@
+module Ast.Types exposing
+    ( CaseArm
+    , Declaration(..)
+    , Exposing(..)
+    , Expr(..)
+    , ExposedItem(..)
+    , Field
+    , File
+    , Import
+    , LetDecl(..)
+    , ModuleDef
+    , ModuleKind(..)
+    , NamedRef
+    , Pattern(..)
+    , RecordFieldType
+    , Signature
+    , TypeAnn(..)
+    )
+
+{-| Phase 1 resolved simplified AST.
+
+The review extractor encodes Elm syntax with resolved module names. The host
+applies catalog name substitution and pretty-prints Gren source. Structural
+lowers (case/when, tuples, unit, list cons) live in `Ast.Print`.
+
+Gren custom-type variants take at most one payload, so multi-field nodes use
+records.
+-}
+
+
+type alias File =
+    { schemaVersion : Int
+    , moduleDefinition : ModuleDef
+    , comments : Array String
+    , imports : Array Import
+    , declarations : Array Declaration
+    }
+
+
+type ModuleKind
+    = NormalModule
+    | PortModule
+    | EffectModule
+
+
+type alias ModuleDef =
+    { kind : ModuleKind
+    , moduleName : String
+    , exposing_ : Exposing
+    }
+
+
+type Exposing
+    = ExposeAll
+    | ExposeExplicit (Array ExposedItem)
+
+
+type ExposedItem
+    = ExposeInfix String
+    | ExposeFunction String
+    | ExposeTypeOrAlias String
+    | ExposeType { name : String, open : Bool }
+
+
+type alias Import =
+    { moduleName : String
+    , alias : Maybe String
+    , exposing_ : Maybe Exposing
+    }
+
+
+type Declaration
+    = DeclFunction
+        { name : String
+        , documentation : Maybe String
+        , signature : Maybe Signature
+        , arguments : Array Pattern
+        , expression : Expr
+        }
+    | DeclAlias
+        { name : String
+        , documentation : Maybe String
+        , generics : Array String
+        , typeAnnotation : TypeAnn
+        }
+    | DeclCustomType
+        { name : String
+        , documentation : Maybe String
+        , generics : Array String
+        , constructors : Array { name : String, arguments : Array TypeAnn }
+        }
+    | DeclPort Signature
+    | DeclInfix
+    | DeclDestructure { pattern : Pattern, expression : Expr }
+
+
+type alias Signature =
+    { name : String
+    , typeAnnotation : TypeAnn
+    }
+
+
+type TypeAnn
+    = TypeGeneric String
+    | TypeTyped { ref : NamedRef, arguments : Array TypeAnn }
+    | TypeUnit
+    | TypeTuple (Array TypeAnn)
+    | TypeRecord (Array RecordFieldType)
+    | TypeGenericRecord { extension : String, fields : Array RecordFieldType }
+    | TypeFunction { left : TypeAnn, right : TypeAnn }
+
+
+type alias RecordFieldType =
+    { name : String
+    , typeAnnotation : TypeAnn
+    }
+
+
+type alias NamedRef =
+    { moduleName : Maybe String
+    , name : String
+    }
+
+
+type Pattern
+    = PatAll
+    | PatUnit
+    | PatChar String
+    | PatString String
+    | PatInt Int
+    | PatHex Int
+    | PatFloat Float
+    | PatTuple (Array Pattern)
+    | PatRecord (Array String)
+    | PatCons { head : Pattern, tail : Pattern }
+    | PatList (Array Pattern)
+    | PatVar String
+    | PatNamed { ref : NamedRef, arguments : Array Pattern }
+    | PatAs { pattern : Pattern, name : String }
+
+
+type Expr
+    = ExprUnit
+    | ExprApplication (Array Expr)
+    | ExprBinop { operator : String, left : Expr, right : Expr }
+    | ExprVar NamedRef
+    | ExprIf { condition : Expr, then_ : Expr, else_ : Expr }
+    | ExprPrefix String
+    | ExprOperator String
+    | ExprInt Int
+    | ExprHex Int
+    | ExprFloat Float
+    | ExprNegation Expr
+    | ExprString String
+    | ExprChar String
+    | ExprTuple (Array Expr)
+    | ExprLet { declarations : Array LetDecl, expression : Expr }
+    | ExprCase { expression : Expr, cases : Array CaseArm }
+    | ExprLambda { arguments : Array Pattern, expression : Expr }
+    | ExprRecord (Array Field)
+    | ExprList (Array Expr)
+    | ExprAccess { record : Expr, field : String }
+    | ExprAccessFunction String
+    | ExprUpdate { name : String, fields : Array Field }
+    | ExprGlsl String
+
+
+type alias CaseArm =
+    { pattern : Pattern
+    , body : Expr
+    }
+
+
+type alias Field =
+    { name : String
+    , value : Expr
+    }
+
+
+type LetDecl
+    = LetFunction
+        { name : String
+        , arguments : Array Pattern
+        , expression : Expr
+        }
+    | LetDestructure { pattern : Pattern, expression : Expr }

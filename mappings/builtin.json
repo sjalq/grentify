@@ -334,7 +334,16 @@
           },
           "types": {}
         },
-        { "source": "Html.Keyed", "target": "Html.Keyed", "values": {}, "types": {} },
+        {
+          "source": "Html.Keyed",
+          "target": "Html.Keyed",
+          "values": {
+            "node": "ElmToGren.Compat.Html.Keyed.node",
+            "ol": "ElmToGren.Compat.Html.Keyed.ol",
+            "ul": "ElmToGren.Compat.Html.Keyed.ul"
+          },
+          "types": {}
+        },
         { "source": "Html.Lazy", "target": "Html.Lazy", "values": {}, "types": {} }
       ]
     },
@@ -357,7 +366,14 @@
           },
           "types": {}
         },
-        { "source": "Svg.Keyed", "target": "Svg.Keyed", "values": {}, "types": {} },
+        {
+          "source": "Svg.Keyed",
+          "target": "Svg.Keyed",
+          "values": {
+            "node": "ElmToGren.Compat.Svg.Keyed.node"
+          },
+          "types": {}
+        },
         { "source": "Svg.Lazy", "target": "Svg.Lazy", "values": {}, "types": {} }
       ]
     },
@@ -368,7 +384,36 @@
       "grenVersion": "6.0.2",
       "platform": "browser",
       "modules": [
-        { "source": "VirtualDom", "target": "VirtualDom", "values": {}, "types": {} }
+        {
+          "source": "VirtualDom",
+          "target": "VirtualDom",
+          "values": {
+            "keyedNode": "ElmToGren.Compat.VirtualDom.Keyed.keyedNode",
+            "keyedNodeNS": "ElmToGren.Compat.VirtualDom.Keyed.keyedNodeNS"
+          },
+          "types": {}
+        }
+      ]
+    },
+    {
+      "kind": "absorbed",
+      "elmPackage": "elm-explorations/markdown",
+      "grenPackage": "gren-lang/browser",
+      "grenVersion": "6.0.2",
+      "platform": "browser",
+      "modules": [
+        {
+          "source": "Markdown",
+          "target": "ElmToGren.Compat.Markdown",
+          "values": {
+            "toHtml": "ElmToGren.Compat.Markdown.toHtml",
+            "toHtmlWith": "ElmToGren.Compat.Markdown.toHtmlWith",
+            "defaultOptions": "ElmToGren.Compat.Markdown.defaultOptions"
+          },
+          "types": {
+            "Options": "ElmToGren.Compat.Markdown.Options"
+          }
+        }
       ]
     },
     {

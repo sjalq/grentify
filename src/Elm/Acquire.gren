@@ -547,25 +547,43 @@ acquireArchive platform permissions options name version endpoint =
         destination =
             packageCachePath options name version ("source-" ++ endpoint.hash)
 
-        verifyOrRecover =
-            verifyArchive platform permissions.childProcess archivePath endpoint.hash
-                |> Task.onError
-                    (\verifyError ->
-                        if options.offline || PortError.code verifyError /= "SOURCE_HASH_MISMATCH" then
-                            Task.fail verifyError
+        useZip =
+            extractArchive platform permissions destination archivePath
+                |> Task.andThen (\_ -> findPackageRoot permissions.fileSystem destination)
 
-                        else
-                            -- A corrupt or truncated cached ZIP would otherwise stick forever.
-                            removeIfExists permissions.fileSystem archivePath
-                                |> Task.andThen (\_ -> removeIfExists permissions.fileSystem destination)
-                                |> Task.andThen (\_ -> ensureArchive permissions options endpoint archivePath)
-                                |> Task.andThen (\_ -> verifyArchive platform permissions.childProcess archivePath endpoint.hash)
+        useGitClone =
+            removeIfExists permissions.fileSystem archivePath
+                |> Task.andThen (\_ -> removeIfExists permissions.fileSystem destination)
+                |> Task.andThen (\_ -> cloneVersionTag platform permissions name version destination)
+                |> Task.andThen (\_ -> findPackageRoot permissions.fileSystem destination)
+
+        recoverHashMismatch =
+            -- Corrupt/truncated ZIP first; then permanent GitHub zipball hash
+            -- drift vs package.elm-lang.org (clone the version tag).
+            removeIfExists permissions.fileSystem archivePath
+                |> Task.andThen (\_ -> removeIfExists permissions.fileSystem destination)
+                |> Task.andThen (\_ -> ensureArchive permissions options endpoint archivePath)
+                |> Task.andThen
+                    (\_ ->
+                        verifyArchive platform permissions.childProcess archivePath endpoint.hash
+                            |> Task.andThen (\_ -> useZip)
+                            |> Task.onError (\_ -> useGitClone)
                     )
     in
     ensureArchive permissions options endpoint archivePath
-        |> Task.andThen (\_ -> verifyOrRecover)
-        |> Task.andThen (\_ -> extractArchive platform permissions destination archivePath)
-        |> Task.andThen (\_ -> findPackageRoot permissions.fileSystem destination)
+        |> Task.andThen
+            (\_ ->
+                verifyArchive platform permissions.childProcess archivePath endpoint.hash
+                    |> Task.andThen (\_ -> useZip)
+                    |> Task.onError
+                        (\verifyError ->
+                            if options.offline || PortError.code verifyError /= "SOURCE_HASH_MISMATCH" then
+                                Task.fail verifyError
+
+                            else
+                                recoverHashMismatch
+                        )
+            )
 
 
 ensureArchive : Permissions -> Options -> Endpoint -> Path -> Task Error Path
@@ -598,6 +616,79 @@ ensureArchive permissions options endpoint archivePath =
                                                 )
                                     )
             )
+
+
+{-| Clone `author/project` at an exact version tag into destination.
+Used when package.elm-lang.org endpoint SHA-1 no longer matches GitHub zipballs.
+-}
+cloneVersionTag
+    : Node.Platform
+    -> Permissions
+    -> Name
+    -> Version
+    -> Path
+    -> Task Error Path
+cloneVersionTag platform permissions name version destination =
+    let
+        tag =
+            Semver.versionToString version
+
+        cloneUrl =
+            "https://github.com/"
+                ++ PackageName.author name
+                ++ "/"
+                ++ PackageName.project name
+                ++ ".git"
+
+        parent =
+            Path.parentPath destination
+
+        destStr =
+            System.File.pathToString platform destination
+    in
+    when parent is
+        Nothing ->
+            Task.fail (PortError.create "CACHE_INVALID" "Source clone path has no parent.")
+
+        Just parentPath ->
+            System.File.ensureDirectory permissions.fileSystem parentPath
+                |> Task.andThen (\_ -> removeIfExists permissions.fileSystem destination)
+                |> Task.andThen
+                    (\_ ->
+                        System.Process.run permissions.childProcess
+                            { program = "git"
+                            , arguments =
+                                [ "clone"
+                                , "--depth"
+                                , "1"
+                                , "--branch"
+                                , tag
+                                , "--single-branch"
+                                , "--"
+                                , cloneUrl
+                                , destStr
+                                ]
+                            , workingDirectory = System.File.pathToString platform parentPath
+                            , environment = Dict.empty
+                            , allowedExitCodes = [ 0 ]
+                            , timeoutMilliseconds = 120000
+                            , maximumOutputBytes = 1024 * 1024
+                            }
+                            |> Task.mapError
+                                (\processError ->
+                                    PortError.create "SOURCE_CLONE_FAILED"
+                                        ("Could not clone "
+                                            ++ PackageName.toString name
+                                            ++ "@"
+                                            ++ tag
+                                            ++ " from "
+                                            ++ cloneUrl
+                                            ++ ": "
+                                            ++ PortError.toString processError
+                                        )
+                                )
+                    )
+                |> Task.map (\_ -> destination)
 
 
 verifyArchive : Node.Platform -> ChildProcess.Permission -> Path -> String -> Task Error {}
@@ -864,8 +955,11 @@ readPackageAt permission root =
             |> Task.andThen
                 (\allFiles ->
                     let
+                        -- Only Elm kernel JS (`src/Elm/Kernel/*.js`) blocks porting.
+                        -- Host assets co-located under an application `src/`
+                        -- (app.js, index.js, service workers) are not kernels.
                         kernelFiles =
-                            Array.keepIf (\file -> String.toLower file.extension == "js") allFiles
+                            Array.keepIf isElmKernelJs allFiles
 
                         elmFiles =
                             Array.keepIf (\file -> String.toLower file.extension == "elm") allFiles
@@ -892,6 +986,20 @@ readPackageAt permission root =
                             )
                 )
         )
+
+
+{-| True for Elm native kernel modules only (`.../Elm/Kernel/Foo.js`).
+-}
+isElmKernelJs : Path -> Bool
+isElmKernelJs file =
+    let
+        path =
+            Path.toPosixString file
+                |> String.replace "\\" "/"
+    in
+    String.toLower file.extension
+        == "js"
+        && String.contains "/Elm/Kernel/" path
 
 
 validateIdentity : Name -> Version -> Manifest -> Task Error Manifest

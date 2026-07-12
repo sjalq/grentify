@@ -35,6 +35,7 @@ import Elm.Manifest as ElmManifest exposing (Manifest)
 import Elm.PackageName as PackageName exposing (Name)
 import Elm.Registry as ElmRegistry
 import Elm.Semver as Semver
+import Emit.Manifest as GrenManifest
 import Emit.Workspace as Workspace
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
@@ -398,6 +399,20 @@ transformOne permissions options registry source =
         , elmHome = options.elmHome
         , files = [ "src" ]
         , offline = options.offline
+        , reviewAppCache =
+            when options.elmHome is
+                Just elmHome ->
+                    -- Sibling of elm-home: <cache>/review-app
+                    when Path.parentPath elmHome is
+                        Just cacheRoot ->
+                            Just (Path.join [ cacheRoot, Path.fromPosixString "review-app" ])
+
+                        Nothing ->
+                            Nothing
+
+                Nothing ->
+                    Nothing
+        , fileSystem = permissions.fileSystem
         }
         |> Task.andThen
             (\extraction ->
@@ -713,6 +728,13 @@ verifyStaging platform permission grenExecutable rootIdentity planned staging =
                                 permission
                                 { packageDirectory = packageDirectory rootIdentity staging package
                                 , grenExecutable = grenExecutable
+                                , isApplication =
+                                    when package.manifest.kind is
+                                        GrenManifest.ApplicationKind ->
+                                            True
+
+                                        GrenManifest.PackageKind ->
+                                            False
                                 }
                         )
             )

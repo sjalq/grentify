@@ -1,0 +1,551 @@
+module Ast.Decode exposing (decode)
+
+{-| Decode the Phase 1 resolved AST JSON produced by `ElmToGren.AstEncode`.
+-}
+
+import Ast.Types as Types exposing
+    ( CaseArm
+    , Declaration(..)
+    , Exposing(..)
+    , Expr(..)
+    , ExposedItem(..)
+    , Field
+    , File
+    , Import
+    , LetDecl(..)
+    , ModuleDef
+    , ModuleKind(..)
+    , NamedRef
+    , Pattern(..)
+    , RecordFieldType
+    , Signature
+    , TypeAnn(..)
+    )
+import Json.Decode as Decode exposing (Decoder)
+import Result exposing (Result(..))
+
+
+decode : Decode.Value -> Result String File
+decode value =
+    when Decode.decodeValue fileDecoder value is
+        Ok file ->
+            Ok file
+
+        Err err ->
+            Err (Decode.errorToString err)
+
+
+fileDecoder : Decoder File
+fileDecoder =
+    Decode.succeed
+        (\schemaVersion moduleDefinition comments imports declarations ->
+            { schemaVersion = schemaVersion
+            , moduleDefinition = moduleDefinition
+            , comments = comments
+            , imports = imports
+            , declarations = declarations
+            }
+        )
+        |> Decode.andMap
+            (Decode.field "schemaVersion" Decode.int
+                |> Decode.andThen
+                    (\version ->
+                        if version == 1 then
+                            Decode.succeed version
+
+                        else
+                            Decode.fail ("Unsupported AST schema " ++ String.fromInt version)
+                    )
+            )
+        |> Decode.andMap (Decode.field "moduleDefinition" moduleDefDecoder)
+        |> Decode.andMap (optional "comments" (Decode.array Decode.string) [])
+        |> Decode.andMap (Decode.field "imports" (Decode.array importDecoder))
+        |> Decode.andMap (Decode.field "declarations" (Decode.array declarationDecoder))
+
+
+moduleDefDecoder : Decoder ModuleDef
+moduleDefDecoder =
+    Decode.map3
+        (\kind moduleName exposing_ ->
+            { kind = kind
+            , moduleName = moduleName
+            , exposing_ = exposing_
+            }
+        )
+        (Decode.field "kind" moduleKindDecoder)
+        (Decode.field "moduleName" Decode.string)
+        (Decode.field "exposing" exposingDecoder)
+
+
+moduleKindDecoder : Decoder ModuleKind
+moduleKindDecoder =
+    Decode.string
+        |> Decode.andThen
+            (\kind ->
+                when kind is
+                    "normal" ->
+                        Decode.succeed NormalModule
+
+                    "port" ->
+                        Decode.succeed PortModule
+
+                    "effect" ->
+                        Decode.succeed EffectModule
+
+                    _ ->
+                        Decode.fail ("Unknown module kind: " ++ kind)
+            )
+
+
+importDecoder : Decoder Import
+importDecoder =
+    Decode.map3
+        (\moduleName alias exposing_ ->
+            { moduleName = moduleName
+            , alias = alias
+            , exposing_ = exposing_
+            }
+        )
+        (Decode.field "moduleName" Decode.string)
+        (Decode.field "alias" (Decode.nullable Decode.string))
+        (Decode.field "exposing" (Decode.nullable exposingDecoder))
+
+
+exposingDecoder : Decoder Exposing
+exposingDecoder =
+    Decode.field "kind" Decode.string
+        |> Decode.andThen
+            (\kind ->
+                when kind is
+                    "all" ->
+                        Decode.succeed ExposeAll
+
+                    "explicit" ->
+                        Decode.map ExposeExplicit
+                            (Decode.field "items" (Decode.array exposedItemDecoder))
+
+                    _ ->
+                        Decode.fail ("Unknown exposing kind: " ++ kind)
+            )
+
+
+exposedItemDecoder : Decoder ExposedItem
+exposedItemDecoder =
+    Decode.field "kind" Decode.string
+        |> Decode.andThen
+            (\kind ->
+                when kind is
+                    "infix" ->
+                        Decode.map ExposeInfix (Decode.field "name" Decode.string)
+
+                    "function" ->
+                        Decode.map ExposeFunction (Decode.field "name" Decode.string)
+
+                    "typeOrAlias" ->
+                        Decode.map ExposeTypeOrAlias (Decode.field "name" Decode.string)
+
+                    "type" ->
+                        Decode.map2
+                            (\name open -> ExposeType { name = name, open = open })
+                            (Decode.field "name" Decode.string)
+                            (Decode.field "open" Decode.bool)
+
+                    _ ->
+                        Decode.fail ("Unknown expose item kind: " ++ kind)
+            )
+
+
+declarationDecoder : Decoder Declaration
+declarationDecoder =
+    Decode.field "kind" Decode.string
+        |> Decode.andThen
+            (\kind ->
+                when kind is
+                    "function" ->
+                        Decode.map5
+                            (\name documentation signature arguments expression ->
+                                DeclFunction
+                                    { name = name
+                                    , documentation = documentation
+                                    , signature = signature
+                                    , arguments = arguments
+                                    , expression = expression
+                                    }
+                            )
+                            (Decode.field "name" Decode.string)
+                            (optional "documentation" (Decode.nullable Decode.string) Nothing)
+                            (Decode.field "signature" (Decode.nullable signatureDecoder))
+                            (Decode.field "arguments" (Decode.array patternDecoder))
+                            (Decode.field "expression" exprDecoder)
+
+                    "alias" ->
+                        Decode.map4
+                            (\name documentation generics typeAnnotation ->
+                                DeclAlias
+                                    { name = name
+                                    , documentation = documentation
+                                    , generics = generics
+                                    , typeAnnotation = typeAnnotation
+                                    }
+                            )
+                            (Decode.field "name" Decode.string)
+                            (optional "documentation" (Decode.nullable Decode.string) Nothing)
+                            (Decode.field "generics" (Decode.array Decode.string))
+                            (Decode.field "typeAnnotation" typeDecoder)
+
+                    "customType" ->
+                        Decode.map4
+                            (\name documentation generics constructors ->
+                                DeclCustomType
+                                    { name = name
+                                    , documentation = documentation
+                                    , generics = generics
+                                    , constructors = constructors
+                                    }
+                            )
+                            (Decode.field "name" Decode.string)
+                            (optional "documentation" (Decode.nullable Decode.string) Nothing)
+                            (Decode.field "generics" (Decode.array Decode.string))
+                            (Decode.field "constructors"
+                                (Decode.array
+                                    (Decode.map2
+                                        (\name arguments -> { name = name, arguments = arguments })
+                                        (Decode.field "name" Decode.string)
+                                        (Decode.field "arguments" (Decode.array typeDecoder))
+                                    )
+                                )
+                            )
+
+                    "port" ->
+                        Decode.map DeclPort (Decode.field "signature" signatureDecoder)
+
+                    "infix" ->
+                        Decode.succeed DeclInfix
+
+                    "destructuring" ->
+                        Decode.map2
+                            (\pattern expression ->
+                                DeclDestructure { pattern = pattern, expression = expression }
+                            )
+                            (Decode.field "pattern" patternDecoder)
+                            (Decode.field "expression" exprDecoder)
+
+                    _ ->
+                        Decode.fail ("Unknown declaration kind: " ++ kind)
+            )
+
+
+signatureDecoder : Decoder Signature
+signatureDecoder =
+    Decode.map2
+        (\name typeAnnotation -> { name = name, typeAnnotation = typeAnnotation })
+        (Decode.field "name" Decode.string)
+        (Decode.field "typeAnnotation" typeDecoder)
+
+
+typeDecoder : Decoder TypeAnn
+typeDecoder =
+    Decode.field "kind" Decode.string
+        |> Decode.andThen
+            (\kind ->
+                when kind is
+                    "generic" ->
+                        Decode.map TypeGeneric (Decode.field "name" Decode.string)
+
+                    "typed" ->
+                        Decode.map2
+                            (\ref arguments -> TypeTyped { ref = ref, arguments = arguments })
+                            (Decode.map2
+                                (\moduleName name -> { moduleName = moduleName, name = name })
+                                (Decode.field "moduleName" (Decode.nullable Decode.string))
+                                (Decode.field "name" Decode.string)
+                            )
+                            (Decode.field "arguments" (Decode.array (Decode.lazy (\_ -> typeDecoder))))
+
+                    "unit" ->
+                        Decode.succeed TypeUnit
+
+                    "tuple" ->
+                        Decode.map TypeTuple
+                            (Decode.field "items" (Decode.array (Decode.lazy (\_ -> typeDecoder))))
+
+                    "record" ->
+                        Decode.map TypeRecord
+                            (Decode.field "fields" (Decode.array recordFieldTypeDecoder))
+
+                    "genericRecord" ->
+                        Decode.map2
+                            (\extension fields ->
+                                TypeGenericRecord { extension = extension, fields = fields }
+                            )
+                            (Decode.field "extension" Decode.string)
+                            (Decode.field "fields" (Decode.array recordFieldTypeDecoder))
+
+                    "function" ->
+                        Decode.map2
+                            (\left right -> TypeFunction { left = left, right = right })
+                            (Decode.field "left" (Decode.lazy (\_ -> typeDecoder)))
+                            (Decode.field "right" (Decode.lazy (\_ -> typeDecoder)))
+
+                    _ ->
+                        Decode.fail ("Unknown type kind: " ++ kind)
+            )
+
+
+recordFieldTypeDecoder : Decoder RecordFieldType
+recordFieldTypeDecoder =
+    Decode.map2
+        (\name typeAnnotation -> { name = name, typeAnnotation = typeAnnotation })
+        (Decode.field "name" Decode.string)
+        (Decode.field "typeAnnotation" (Decode.lazy (\_ -> typeDecoder)))
+
+
+patternDecoder : Decoder Pattern
+patternDecoder =
+    Decode.field "kind" Decode.string
+        |> Decode.andThen
+            (\kind ->
+                when kind is
+                    "all" ->
+                        Decode.succeed PatAll
+
+                    "unit" ->
+                        Decode.succeed PatUnit
+
+                    "char" ->
+                        Decode.map PatChar (Decode.field "value" Decode.string)
+
+                    "string" ->
+                        Decode.map PatString (Decode.field "value" Decode.string)
+
+                    "int" ->
+                        Decode.map PatInt (Decode.field "value" Decode.int)
+
+                    "hex" ->
+                        Decode.map PatHex (Decode.field "value" Decode.int)
+
+                    "float" ->
+                        Decode.map PatFloat (Decode.field "value" Decode.float)
+
+                    "tuple" ->
+                        Decode.map PatTuple
+                            (Decode.field "items" (Decode.array (Decode.lazy (\_ -> patternDecoder))))
+
+                    "record" ->
+                        Decode.map PatRecord
+                            (Decode.field "fields" (Decode.array Decode.string))
+
+                    "cons" ->
+                        Decode.map2
+                            (\head tail -> PatCons { head = head, tail = tail })
+                            (Decode.field "head" (Decode.lazy (\_ -> patternDecoder)))
+                            (Decode.field "tail" (Decode.lazy (\_ -> patternDecoder)))
+
+                    "list" ->
+                        Decode.map PatList
+                            (Decode.field "items" (Decode.array (Decode.lazy (\_ -> patternDecoder))))
+
+                    "var" ->
+                        Decode.map PatVar (Decode.field "name" Decode.string)
+
+                    "named" ->
+                        Decode.map2
+                            (\ref arguments -> PatNamed { ref = ref, arguments = arguments })
+                            (Decode.map2
+                                (\moduleName name -> { moduleName = moduleName, name = name })
+                                (Decode.field "moduleName" (Decode.nullable Decode.string))
+                                (Decode.field "name" Decode.string)
+                            )
+                            (Decode.field "arguments" (Decode.array (Decode.lazy (\_ -> patternDecoder))))
+
+                    "as" ->
+                        Decode.map2
+                            (\pattern name -> PatAs { pattern = pattern, name = name })
+                            (Decode.field "pattern" (Decode.lazy (\_ -> patternDecoder)))
+                            (Decode.field "name" Decode.string)
+
+                    _ ->
+                        Decode.fail ("Unknown pattern kind: " ++ kind)
+            )
+
+
+exprDecoder : Decoder Expr
+exprDecoder =
+    Decode.field "kind" Decode.string
+        |> Decode.andThen
+            (\kind ->
+                when kind is
+                    "unit" ->
+                        Decode.succeed ExprUnit
+
+                    "application" ->
+                        Decode.map ExprApplication
+                            (Decode.field "parts" (Decode.array (Decode.lazy (\_ -> exprDecoder))))
+
+                    "binop" ->
+                        Decode.map3
+                            (\operator left right ->
+                                ExprBinop { operator = operator, left = left, right = right }
+                            )
+                            (Decode.field "operator" Decode.string)
+                            (Decode.field "left" (Decode.lazy (\_ -> exprDecoder)))
+                            (Decode.field "right" (Decode.lazy (\_ -> exprDecoder)))
+
+                    "var" ->
+                        Decode.map ExprVar namedRefDecoder
+
+                    "if" ->
+                        Decode.map3
+                            (\condition then_ else_ ->
+                                ExprIf { condition = condition, then_ = then_, else_ = else_ }
+                            )
+                            (Decode.field "condition" (Decode.lazy (\_ -> exprDecoder)))
+                            (Decode.field "then" (Decode.lazy (\_ -> exprDecoder)))
+                            (Decode.field "else" (Decode.lazy (\_ -> exprDecoder)))
+
+                    "prefix" ->
+                        Decode.map ExprPrefix (Decode.field "operator" Decode.string)
+
+                    "operator" ->
+                        Decode.map ExprOperator (Decode.field "operator" Decode.string)
+
+                    "int" ->
+                        Decode.map ExprInt (Decode.field "value" Decode.int)
+
+                    "hex" ->
+                        Decode.map ExprHex (Decode.field "value" Decode.int)
+
+                    "float" ->
+                        Decode.map ExprFloat (Decode.field "value" Decode.float)
+
+                    "negation" ->
+                        Decode.map ExprNegation
+                            (Decode.field "expression" (Decode.lazy (\_ -> exprDecoder)))
+
+                    "string" ->
+                        Decode.map ExprString (Decode.field "value" Decode.string)
+
+                    "char" ->
+                        Decode.map ExprChar (Decode.field "value" Decode.string)
+
+                    "tuple" ->
+                        Decode.map ExprTuple
+                            (Decode.field "items" (Decode.array (Decode.lazy (\_ -> exprDecoder))))
+
+                    "let" ->
+                        Decode.map2
+                            (\declarations expression ->
+                                ExprLet { declarations = declarations, expression = expression }
+                            )
+                            (Decode.field "declarations" (Decode.array letDeclDecoder))
+                            (Decode.field "expression" (Decode.lazy (\_ -> exprDecoder)))
+
+                    "case" ->
+                        Decode.map2
+                            (\expression cases ->
+                                ExprCase { expression = expression, cases = cases }
+                            )
+                            (Decode.field "expression" (Decode.lazy (\_ -> exprDecoder)))
+                            (Decode.field "cases" (Decode.array caseArmDecoder))
+
+                    "lambda" ->
+                        Decode.map2
+                            (\arguments expression ->
+                                ExprLambda { arguments = arguments, expression = expression }
+                            )
+                            (Decode.field "arguments" (Decode.array patternDecoder))
+                            (Decode.field "expression" (Decode.lazy (\_ -> exprDecoder)))
+
+                    "record" ->
+                        Decode.map ExprRecord
+                            (Decode.field "fields" (Decode.array fieldDecoder))
+
+                    "list" ->
+                        Decode.map ExprList
+                            (Decode.field "items" (Decode.array (Decode.lazy (\_ -> exprDecoder))))
+
+                    "access" ->
+                        Decode.map2
+                            (\record field -> ExprAccess { record = record, field = field })
+                            (Decode.field "record" (Decode.lazy (\_ -> exprDecoder)))
+                            (Decode.field "field" Decode.string)
+
+                    "accessFunction" ->
+                        Decode.map ExprAccessFunction (Decode.field "field" Decode.string)
+
+                    "update" ->
+                        Decode.map2
+                            (\name fields -> ExprUpdate { name = name, fields = fields })
+                            (Decode.field "name" Decode.string)
+                            (Decode.field "fields" (Decode.array fieldDecoder))
+
+                    "glsl" ->
+                        Decode.map ExprGlsl (Decode.field "code" Decode.string)
+
+                    _ ->
+                        Decode.fail ("Unknown expression kind: " ++ kind)
+            )
+
+
+namedRefDecoder : Decoder NamedRef
+namedRefDecoder =
+    Decode.map2
+        (\moduleName name -> { moduleName = moduleName, name = name })
+        (Decode.field "moduleName" (Decode.nullable Decode.string))
+        (Decode.field "name" Decode.string)
+
+
+caseArmDecoder : Decoder CaseArm
+caseArmDecoder =
+    Decode.map2
+        (\pattern body -> { pattern = pattern, body = body })
+        (Decode.field "pattern" patternDecoder)
+        (Decode.field "body" (Decode.lazy (\_ -> exprDecoder)))
+
+
+fieldDecoder : Decoder Field
+fieldDecoder =
+    Decode.map2
+        (\name value -> { name = name, value = value })
+        (Decode.field "name" Decode.string)
+        (Decode.field "value" (Decode.lazy (\_ -> exprDecoder)))
+
+
+letDeclDecoder : Decoder LetDecl
+letDeclDecoder =
+    Decode.field "kind" Decode.string
+        |> Decode.andThen
+            (\kind ->
+                when kind is
+                    "function" ->
+                        Decode.map3
+                            (\name arguments expression ->
+                                LetFunction
+                                    { name = name
+                                    , arguments = arguments
+                                    , expression = expression
+                                    }
+                            )
+                            (Decode.field "name" Decode.string)
+                            (Decode.field "arguments" (Decode.array patternDecoder))
+                            (Decode.field "expression" (Decode.lazy (\_ -> exprDecoder)))
+
+                    "destructure" ->
+                        Decode.map2
+                            (\pattern expression ->
+                                LetDestructure { pattern = pattern, expression = expression }
+                            )
+                            (Decode.field "pattern" patternDecoder)
+                            (Decode.field "expression" (Decode.lazy (\_ -> exprDecoder)))
+
+                    _ ->
+                        Decode.fail ("Unknown let declaration kind: " ++ kind)
+            )
+
+
+optional : String -> Decoder a -> a -> Decoder a
+optional fieldName decoder fallback =
+    Decode.oneOf
+        [ Decode.field fieldName decoder
+        , Decode.succeed fallback
+        ]

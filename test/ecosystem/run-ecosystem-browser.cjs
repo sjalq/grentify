@@ -13,9 +13,9 @@ const catalog = JSON.parse(
   fs.readFileSync(path.join(__dirname, "packages-browser.json"), "utf8"),
 );
 const packages = catalog.packages;
-if (!Array.isArray(packages) || packages.length < 20) {
+if (!Array.isArray(packages) || packages.length < 200) {
   console.error(
-    `browser ecosystem catalog must list at least 20 packages, got ${packages?.length}`,
+    `browser ecosystem catalog must list at least 200 packages, got ${packages?.length}`,
   );
   process.exit(1);
 }
@@ -111,6 +111,7 @@ if (failed > 0) {
   process.exit(1);
 }
 
+const method = catalog.methodology || catalog.selection || catalog.seed;
 console.log(
-  `\nPASS: ${packages.length}/${packages.length} browser ecosystem packages ported and verified (seed ${catalog.seed})`,
+  `\nPASS: ${packages.length}/${packages.length} browser ecosystem packages ported and verified (${typeof method === "string" ? method : JSON.stringify(method)})`,
 );

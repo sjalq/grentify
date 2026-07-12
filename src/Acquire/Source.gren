@@ -333,6 +333,9 @@ readAndInspect permission sourceFile =
                 let
                     hazards =
                         Hazard.detect contents
+                            -- Port modules are valid for applications. Kernel,
+                            -- effect modules, and GLSL remain hard refusals.
+                            |> Array.keepIf (\hazard -> hazard /= Hazard.PortModule)
                 in
                 if Array.isEmpty hazards then
                     Task.succeed

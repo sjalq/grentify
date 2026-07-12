@@ -30,6 +30,7 @@ import Json.Encode as Encode
 import Mapping.Adapter as Adapter exposing (AdapterError(..))
 import Mapping.Load
 import Mapping.Registry as MappingRegistry
+import Mapping.Shim as Shim
 import Mapping.Types as Mapping exposing (MappingKind(..), Registry)
 import Math
 import Node
@@ -122,13 +123,29 @@ run context permissions cliOptions =
                 in
                 Mapping.Load.load permissions.fileSystem assets.mappings overlays
                     |> Task.andThen
-                        (\registry ->
+                        (\loadedRegistry ->
+                            let
+                                -- Strategy A: keep List/Tuple as Elm APIs via injected shims.
+                                registry =
+                                    if cliOptions.shim then
+                                        Shim.applyRegistry loadedRegistry
+
+                                    else
+                                        loadedRegistry
+                            in
                             Acquire.parseInput context.platform context.workingDirectory context.homeDirectory cliOptions.input
                                 |> resultTask identity
                                 |> Task.andThen (Acquire.acquire context.platform permissions acquireOptions)
                                 |> Task.andThen
                                     (\rootSource ->
-                                        resolveGraph permissions acquireOptions registry rootSource
+                                        let
+                                            -- elm/http 1.x apps need Request/send/positional get.
+                                            registryForRoot =
+                                                MappingRegistry.overlayHttp1Compat
+                                                    (dependsOnHttp1 rootSource.manifest)
+                                                    registry
+                                        in
+                                        resolveGraph permissions acquireOptions registryForRoot rootSource
                                             |> Task.andThen
                                                 (\resolution ->
                                                     acquireSources context.platform permissions acquireOptions rootSource resolution
@@ -141,16 +158,16 @@ run context permissions cliOptions =
                                                                     -- qualified references automatically.
                                                                     transformRegistry =
                                                                         if cliOptions.namespaceModules then
-                                                                            overlayPortedModules sources registry
+                                                                            overlayPortedModules sources registryForRoot
 
                                                                         else
-                                                                            registry
+                                                                            registryForRoot
                                                                 in
-                                                                transformSources context permissions cache cliOptions.offline cliOptions.namespaceModules assets transformRegistry resolution sources
+                                                                transformSources context permissions cache cliOptions.offline cliOptions.namespaceModules cliOptions.shim assets transformRegistry resolution sources
                                                             )
                                                         |> Task.andThen
                                                             (\drafts ->
-                                                                planPackages cliOptions registry resolution drafts
+                                                                planPackages cliOptions registryForRoot resolution drafts
                                                                     |> resultTask identity
                                                             )
                                                         |> Task.andThen
@@ -170,7 +187,7 @@ run context permissions cliOptions =
                                                                     finalizeAdd context permissions cliOptions output assets resolution finalPlanned
 
                                                                 else
-                                                                    finalize context permissions cliOptions output overlays assets registry resolution finalPlanned
+                                                                    finalize context permissions cliOptions output overlays assets registryForRoot resolution finalPlanned
                                                             )
                                                 )
                                     )
@@ -293,17 +310,25 @@ transformSources
     -> Path
     -> Bool
     -> Bool
+    -> Bool
     -> Assets
     -> Registry
     -> Resolution
     -> Dict String Acquire.PackageSource
     -> Task Error (Dict String Draft)
-transformSources context permissions cache offline namespaceModules assets registry resolution sources =
+transformSources context permissions cache offline namespaceModules shim assets registry resolution sources =
     let
         elmHome =
             Path.join [ cache, Path.fromPosixString "elm-home" ]
+
+        -- One compiled elm-review app per rule version, shared by every package
+        -- tree under this cache. Avoids recompiling ~1MB review JS per package.
+        reviewAppCache =
+            Path.join [ cache, Path.fromPosixString "review-app" ]
     in
     System.File.ensureDirectory permissions.fileSystem elmHome
+        |> Task.andThen
+            (\_ -> System.File.ensureDirectory permissions.fileSystem reviewAppCache)
         |> Task.andThen
             (\_ ->
                 resolution.order
@@ -323,7 +348,7 @@ transformSources context permissions cache offline namespaceModules assets regis
                                                         ("Acquired source set is missing " ++ key ++ ".")
 
                                             Just source ->
-                                                transformOne context permissions elmHome offline namespaceModules assets registry source
+                                                transformOne context permissions elmHome reviewAppCache offline namespaceModules shim assets registry source
                                                     |> Task.map (\draft -> Dict.set key draft drafts)
                                     )
                         )
@@ -335,13 +360,15 @@ transformOne
     : Context
     -> Permissions
     -> Path
+    -> Path
+    -> Bool
     -> Bool
     -> Bool
     -> Assets
     -> Registry
     -> Acquire.PackageSource
     -> Task Error Draft
-transformOne context permissions elmHome offline namespaceModules assets registry source =
+transformOne context permissions elmHome reviewAppCache offline namespaceModules shim assets registry source =
     Task.map2
         (\extraction sourceFiles -> { extraction = extraction, sourceFiles = sourceFiles })
         (Review.Runner.run context.platform permissions.childProcess
@@ -352,6 +379,8 @@ transformOne context permissions elmHome offline namespaceModules assets registr
             , elmHome = Just elmHome
             , files = [ "src" ]
             , offline = offline
+            , reviewAppCache = Just reviewAppCache
+            , fileSystem = permissions.fileSystem
             }
         )
         (readSources permissions.fileSystem source)
@@ -375,7 +404,15 @@ transformOne context permissions elmHome offline namespaceModules assets registr
                             )
 
                 else
-                    Adapter.generateFromRequirements transformed.requiredAdapters
+                    let
+                        compatRequirements =
+                            if shim then
+                                Shim.filterCompatRequirements transformed.requiredAdapters
+
+                            else
+                                transformed.requiredAdapters
+                    in
+                    Adapter.generateFromRequirements compatRequirements
                         |> Result.mapError adapterFailure
                         |> Result.andThen
                             (\adapters ->
@@ -384,16 +421,26 @@ transformOne context permissions elmHome offline namespaceModules assets registr
                                         (\detectedPlatform ->
                                             let
                                                 -- Feature 2: prefix only ported source modules with Elm.;
-                                                -- compatibility adapters (ElmToGren.Compat.*) are left alone.
+                                                -- compatibility adapters and List/Tuple shims are left alone.
                                                 portedModules =
                                                     if namespaceModules then
                                                         Array.map namespaceGeneratedModule transformed.modules
 
                                                     else
                                                         transformed.modules
+
+                                                withCompat =
+                                                    Array.append portedModules adapters
+
+                                                allModules =
+                                                    if shim then
+                                                        Array.append withCompat Shim.modules
+
+                                                    else
+                                                        withCompat
                                             in
                                             { source = source
-                                            , modules = Array.append portedModules adapters
+                                            , modules = allModules
                                             , diagnostics = transformed.diagnostics
                                             , detectedPlatform = detectedPlatform
                                             }
@@ -660,6 +707,13 @@ verifyStaging platform permission grenExecutable rootIdentity planned staging =
                                 permission
                                 { packageDirectory = packageDirectory rootIdentity planned staging package
                                 , grenExecutable = grenExecutable
+                                , isApplication =
+                                    when package.manifest.kind is
+                                        Manifest.ApplicationKind ->
+                                            True
+
+                                        Manifest.PackageKind ->
+                                            False
                                 }
                         )
             )
@@ -1109,6 +1163,18 @@ references to the namespaced names. Ported module names never collide with the
 built-in stdlib mappings (Elm guarantees globally unique module names), so this
 only ever adds entries.
 -}
+dependsOnHttp1 : Manifest -> Bool
+dependsOnHttp1 manifest =
+    let
+        isHttp1 key dependency =
+            (key == "elm/http")
+                && dependency.constraint.lower.major
+                == 1
+    in
+    Dict.any isHttp1 manifest.dependencies
+        || Dict.any isHttp1 manifest.testDependencies
+
+
 overlayPortedModules : Dict String Acquire.PackageSource -> Registry -> Registry
 overlayPortedModules sources registry =
     let
@@ -1328,6 +1394,13 @@ writeVendored context permissions assets packagesRoot packages verify =
                                                     permissions.childProcess
                                                     { packageDirectory = directory
                                                     , grenExecutable = assets.grenExecutable
+                                                    , isApplication =
+                                                        when package.manifest.kind is
+                                                            Manifest.ApplicationKind ->
+                                                                True
+
+                                                            Manifest.PackageKind ->
+                                                                False
                                                     }
 
                                             else

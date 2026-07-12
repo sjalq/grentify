@@ -89,11 +89,17 @@ scanFrom characters offset edits =
                 scanFrom characters next edits
 
             else if matchesAt characters offset blockCommentStart then
+                -- Module docs (`{-|`) list names in `@docs when`. Code renames
+                -- reserved `when`/`is` identifiers to `when_`/`is_`; keep docs
+                -- in sync so gren docs does not fail on orphan @docs lines.
                 let
-                    next =
+                    commentEnd =
                         skipBlockComment characters (offset + 2) 1
+
+                    nextEdits =
+                        scanReservedDocsEscapesInRange characters (offset + 2) commentEnd edits
                 in
-                scanFrom characters next edits
+                scanFrom characters commentEnd nextEdits
 
             else if matchesAt characters offset glslStart then
                 let
@@ -103,11 +109,43 @@ scanFrom characters offset edits =
                 scanFrom characters next edits
 
             else if matchesAt characters offset multilineQuote then
+                -- Gren requires the contents of a multiline string to start on a
+                -- new line after the opening """. Elm allows `"""html, body {`.
                 let
-                    next =
-                        skipMultilineString characters (offset + 3)
+                    contentStart =
+                        offset + 3
+
+                    stringEnd =
+                        skipMultilineString characters contentStart
+
+                    needsLeadingNewline =
+                        when Array.get contentStart characters is
+                            Just '\n' ->
+                                False
+
+                            Just '\r' ->
+                                False
+
+                            Nothing ->
+                                False
+
+                            Just _ ->
+                                True
+
+                    nextEdits =
+                        if needsLeadingNewline then
+                            Array.pushLast
+                                { startOffset = contentStart
+                                , endOffset = contentStart
+                                , replacement = "\n"
+                                , kind = CustomEdit "multiline-string-newline"
+                                }
+                                edits
+
+                        else
+                            edits
                 in
-                scanFrom characters next edits
+                scanFrom characters stringEnd nextEdits
 
             else if character == '"' then
                 let
@@ -291,6 +329,78 @@ isIdentifierContinuation character =
     isIdentifierStart character
         || Char.isDigit character
         || character == '\''
+
+
+{-| True for bare Gren-keyword identifiers that the review rule renames with a
+trailing underscore in code (`when` → `when_`, `is` → `is_`).
+-}
+isReservedDocsIdentifier : String -> Bool
+isReservedDocsIdentifier token =
+    token == "when" || token == "is"
+
+
+{-| Rewrite reserved identifiers only on `@docs` lines so prose is untouched.
+Tracks whether the current line (since last newline) has seen `@docs`.
+-}
+scanReservedDocsEscapesInRange : Array Char -> Int -> Int -> Array OffsetEdit -> Array OffsetEdit
+scanReservedDocsEscapesInRange characters offset end edits =
+    scanReservedDocsEscapesFrom characters offset end False edits
+
+
+scanReservedDocsEscapesFrom : Array Char -> Int -> Int -> Bool -> Array OffsetEdit -> Array OffsetEdit
+scanReservedDocsEscapesFrom characters offset end onDocsLine edits =
+    if offset >= end then
+        edits
+
+    else
+        when Array.get offset characters is
+            Nothing ->
+                edits
+
+            Just character ->
+                if character == '\n' || character == '\r' then
+                    scanReservedDocsEscapesFrom characters (offset + 1) end False edits
+
+                else if character == '"' then
+                    scanReservedDocsEscapesFrom characters (min end (skipQuoted characters '"' (offset + 1))) end onDocsLine edits
+
+                else if character == '\'' then
+                    scanReservedDocsEscapesFrom characters (min end (skipQuoted characters '\'' (offset + 1))) end onDocsLine edits
+
+                else if matchesAt characters offset docsTag then
+                    scanReservedDocsEscapesFrom characters (offset + 5) end True edits
+
+                else if onDocsLine && isIdentifierStart character then
+                    let
+                        tokenEnd =
+                            min end (scanIdentifierEnd characters (offset + 1))
+
+                        token =
+                            Array.slice offset tokenEnd characters
+                                |> Array.foldl (\c text -> text ++ String.fromChar c) ""
+
+                        nextEdits =
+                            if isReservedDocsIdentifier token then
+                                Array.pushLast
+                                    { startOffset = offset
+                                    , endOffset = tokenEnd
+                                    , replacement = token ++ "_"
+                                    , kind = SyntaxEdit
+                                    }
+                                    edits
+
+                            else
+                                edits
+                    in
+                    scanReservedDocsEscapesFrom characters tokenEnd end onDocsLine nextEdits
+
+                else
+                    scanReservedDocsEscapesFrom characters (offset + 1) end onDocsLine edits
+
+
+docsTag : Array Char
+docsTag =
+    [ '@', 'd', 'o', 'c', 's' ]
 
 
 matchesAt : Array Char -> Int -> Array Char -> Bool

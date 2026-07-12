@@ -316,7 +316,10 @@ errorToString hazard =
             "declares an Elm effect module, which is reserved for core/runtime packages"
 
         PortModule ->
-            "declares an Elm port module; Gren packages cannot expose application ports"
+            -- Port modules are allowed for application ports; package emit still
+            -- refuses them elsewhere if needed. Hazard scanning ignores this
+            -- string when apps are ported (see Source.allowPorts).
+            "declares an Elm port module"
 
         Glsl ->
             "contains an Elm [glsl|...|] shader block, which needs an explicit compatibility mapping"

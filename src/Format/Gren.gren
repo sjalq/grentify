@@ -5,6 +5,10 @@ module Format.Gren exposing (formatPackage)
 The formatter is the community reimplementation of `gren format` (official CLI
 format was removed in Gren 0.5). It must be invoked with the package root as
 cwd so it discovers `gren.json` and walks every source directory.
+
+After formatting, a small Node post-pass collapses multi-line pure-field record
+patterns back to single-line form. Gren accepts multi-line record *expressions*
+but rejects multi-line pure-field record *patterns* (`{ a\\n, b\\n }`).
 -}
 
 import ChildProcess
@@ -37,6 +41,9 @@ formatPackage platform permission options =
 
         arguments =
             [ options.formatExecutable ]
+
+        collapseScript =
+            collapseRecordPatternsScript options.formatExecutable
     in
     System.Process.run permission
         { program = program
@@ -52,3 +59,59 @@ formatPackage platform permission options =
         -- coverage) must not fail an otherwise valid port. Unformatted but
         -- verified Gren is preferred to a hard FORMAT_FAILED.
         |> Task.onError (\_ -> Task.succeed {})
+        |> Task.andThen
+            (\_ ->
+                System.Process.run permission
+                    { program = program
+                    , arguments = [ collapseScript, cwd ]
+                    , workingDirectory = cwd
+                    , environment = Dict.empty
+                    , allowedExitCodes = [ 0 ]
+                    , timeoutMilliseconds = 60 * 1000
+                    , maximumOutputBytes = 4 * 1024 * 1024
+                    }
+                    |> Task.map (\_ -> {})
+                    |> Task.onError (\_ -> Task.succeed {})
+            )
+
+
+{-| Resolve the collapse helper next to the vendored format app.
+-}
+collapseRecordPatternsScript : String -> String
+collapseRecordPatternsScript formatExecutable =
+    let
+        normalized =
+            String.replace "\\" "/" formatExecutable
+
+        marker =
+            "/tools/gren-format/"
+
+        idx =
+            String.indices marker normalized
+                |> Array.first
+    in
+    when idx is
+        Just i ->
+            String.slice 0 (i + String.count marker) normalized
+                ++ "collapse-record-patterns.cjs"
+
+        Nothing ->
+            -- Fallback: sibling of the format executable.
+            let
+                slashes =
+                    String.indices "/" normalized
+
+                slash =
+                    if Array.isEmpty slashes then
+                        -1
+
+                    else
+                        Array.get (Array.length slashes - 1) slashes
+                            |> Maybe.withDefault -1
+            in
+            if slash < 0 then
+                "collapse-record-patterns.cjs"
+
+            else
+                String.slice 0 (slash + 1) normalized
+                    ++ "collapse-record-patterns.cjs"

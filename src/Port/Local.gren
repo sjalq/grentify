@@ -5,6 +5,7 @@ import Cli
 import Dict
 import Elm.Manifest
 import Elm.PackageName
+import Emit.Manifest as GrenManifest
 import Emit.Workspace
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
@@ -79,6 +80,8 @@ run options =
                                             , elmHome = Nothing
                                             , files = []
                                             , offline = options.offline
+                                            , reviewAppCache = Nothing
+                                            , fileSystem = options.fileSystem
                                             }
                                             |> Task.andThen (ensureNoGlobalErrors >> taskFromResult)
                                             |> Task.andThen
@@ -243,6 +246,13 @@ emit options mappingFingerprint manifest targetName builtManifest transformed ex
                                         options.childProcess
                                         { packageDirectory = staging
                                         , grenExecutable = options.grenExecutable
+                                        , isApplication =
+                                            when builtManifest.spec.kind is
+                                                GrenManifest.ApplicationKind ->
+                                                    True
+
+                                                GrenManifest.PackageKind ->
+                                                    False
                                         }
 
                                 else

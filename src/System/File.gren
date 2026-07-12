@@ -1,5 +1,6 @@
 module System.File exposing
-    ( ensureDirectory
+    ( copyDirectoryContents
+    , ensureDirectory
     , exists
     , listFilesRecursively
     , pathFromString
@@ -150,4 +151,74 @@ writeText permission path contents =
                             PortError.create "FILE_WRITE_FAILED"
                                 ("Could not write " ++ Path.toPosixString path ++ ": " ++ FileSystem.errorToString error)
                         )
+            )
+
+
+{-| Copy every file under `source` into `destination`, creating directories.
+Best-effort: failures on individual missing sources are not fatal for callers
+that check `exists` first.
+-}
+copyDirectoryContents : FileSystem.Permission -> Path -> Path -> Task Error {}
+copyDirectoryContents permission source destination =
+    listFilesRecursively permission source
+        |> Task.andThen
+            (\files ->
+                let
+                    sourcePrefix =
+                        String.trimRight (Path.toPosixString source) ++ "/"
+                in
+                files
+                    |> Array.foldl
+                        (\file pending ->
+                            pending
+                                |> Task.andThen
+                                    (\_ ->
+                                        let
+                                            absolute =
+                                                Path.toPosixString file
+
+                                            relative =
+                                                if String.startsWith sourcePrefix absolute then
+                                                    String.dropFirst (String.count sourcePrefix) absolute
+
+                                                else
+                                                    -- Fallback: last path segment
+                                                    absolute
+                                                        |> String.split "/"
+                                                        |> Array.last
+                                                        |> Maybe.withDefault absolute
+
+                                            target =
+                                                Path.join
+                                                    [ destination
+                                                    , Path.fromPosixString relative
+                                                    ]
+                                        in
+                                        ensureDirectory permission
+                                            (when Path.parentPath target is
+                                                Just parent ->
+                                                    parent
+
+                                                Nothing ->
+                                                    destination
+                                            )
+                                            |> Task.andThen
+                                                (\_ ->
+                                                    FileSystem.copyFile permission target file
+                                                        |> Task.mapError
+                                                            (\error ->
+                                                                PortError.create "FILE_COPY_FAILED"
+                                                                    ("Could not copy "
+                                                                        ++ absolute
+                                                                        ++ " to "
+                                                                        ++ Path.toPosixString target
+                                                                        ++ ": "
+                                                                        ++ FileSystem.errorToString error
+                                                                    )
+                                                            )
+                                                        |> Task.map (\_ -> {})
+                                                )
+                                    )
+                        )
+                        (Task.succeed {})
             )

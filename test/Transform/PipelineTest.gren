@@ -301,8 +301,9 @@ appliesAndClassifiesReviewEdits =
                   , importedModules = []
                   , requiredAdapters = []
                   , references = []
-          , importFacts = []
-          , detectedPlatform = "common"
+                  , importFacts = []
+                  , detectedPlatform = "common"
+                  , ast = Nothing
                   }
                 ]
             , diagnostics = []
@@ -497,6 +498,7 @@ reportsUnsupportedRuntimeBoundaries =
                 , ""
                 ]
 
+        -- Port modules pass through (application ports). Kernel/effect stay hard errors.
         portCodes =
             diagnosticCodes (Pipeline.transform registry (extractionFor portPath "Ports") [ { path = portPath, source = portSource } ])
 
@@ -512,7 +514,7 @@ reportsUnsupportedRuntimeBoundaries =
     in
     outcome
         "port, effect, and kernel boundaries produce hard diagnostics"
-        (Array.member "UNSUPPORTED_PORT" portCodes
+        (Array.isEmpty portCodes
             && Array.member "UNSUPPORTED_KERNEL" kernelCodes
             && Array.any (String.contains "effect modules") effectMessages
         )
@@ -602,6 +604,7 @@ extractionFor path moduleName =
           , references = []
           , importFacts = []
           , detectedPlatform = "common"
+          , ast = Nothing
           }
         ]
     , diagnostics = []
@@ -796,6 +799,7 @@ structuralExtraction =
                 ]
           , importFacts = []
           , detectedPlatform = "common"
+          , ast = Nothing
           }
         ]
     , diagnostics = []

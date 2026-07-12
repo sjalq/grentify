@@ -34,6 +34,7 @@ type alias Options =
     , json : Bool
     , namespaceModules : Bool
     , vendor : Bool
+    , shim : Bool
     }
 
 
@@ -55,6 +56,7 @@ type alias ParseState =
     , json : Bool
     , namespaceModules : Bool
     , vendor : Bool
+    , shim : Bool
     }
 
 
@@ -104,6 +106,7 @@ parse defaults rawArguments =
             , json = False
             , namespaceModules = selection.vendor
             , vendor = selection.vendor
+            , shim = False
             }
     in
     if selection.vendor then
@@ -167,6 +170,9 @@ parseArguments state arguments =
 
                 "--json" ->
                     parseArguments { state | json = True } rest
+
+                "--shim" ->
+                    parseArguments { state | shim = True } rest
 
                 "--elm-namespace" ->
                     parseArguments { state | namespaceModules = True } rest
@@ -313,6 +319,7 @@ finalize state =
                     , json = state.json
                     , namespaceModules = state.namespaceModules
                     , vendor = state.vendor
+                    , shim = state.shim
                     }
 
 
@@ -344,6 +351,8 @@ Options:
       --elm-namespace        Prefix ported modules with Elm. (default for add)
       --no-elm-namespace     Do not prefix ported modules (default for port)
       --mapping <file>       Add or override mappings; may be repeated
+      --shim                 Keep Elm List/Tuple APIs via injected shims
+                             (syntax still ports; no List→Array renames)
       --offline              Use cached registry data only
       --no-verify            Skip the final Gren compiler check
       --json                 Print the final report as JSON

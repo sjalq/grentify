@@ -7,12 +7,13 @@ module Mapping.Registry exposing
     , moduleMappingFor
     , overlayDocument
     , overlayDocuments
+    , overlayHttp1Compat
     , packagesInOrder
     )
 
 import Array
 import Dict exposing (Dict)
-import Mapping.Types exposing (MappingDocument, ModuleMapping, PackageMapping, Platform(..), PlatformInferenceError(..), Registry, mappingElmPackage, mappingModules, mappingPlatform, platformName)
+import Mapping.Types exposing (MappingDocument, ModuleMapping, PackageDetails, PackageMapping(..), Platform(..), PlatformInferenceError(..), Registry, mappingElmPackage, mappingModules, mappingPlatform, platformName)
 import Maybe exposing (Maybe(..))
 import Result exposing (Result(..))
 
@@ -89,6 +90,56 @@ mappingFor packageName registry =
 moduleMappingFor : String -> Registry -> Maybe ModuleMapping
 moduleMappingFor moduleName registry =
     Dict.get moduleName registry.modules
+
+
+{-| When the ported project depends on `elm/http` 1.x, overlay value/type maps
+for the 1.x surface (`Request`, `send`, positional `get`/`post`, …) onto the
+existing absorbed Http package entry.
+-}
+overlayHttp1Compat : Bool -> Registry -> Registry
+overlayHttp1Compat needed registry =
+    if not needed then
+        registry
+
+    else
+        let
+            httpModule : ModuleMapping
+            httpModule =
+                { source = "Http"
+                , target = "Http"
+                , values =
+                    Dict.empty
+                        |> Dict.set "get" "ElmToGren.Compat.Http.get"
+                        |> Dict.set "post" "ElmToGren.Compat.Http.post"
+                        |> Dict.set "request" "ElmToGren.Compat.Http.request"
+                        |> Dict.set "send" "ElmToGren.Compat.Http.send"
+                        |> Dict.set "toTask" "ElmToGren.Compat.Http.toTask"
+                        |> Dict.set "expectJson" "ElmToGren.Compat.Http.expectJson"
+                        |> Dict.set "expectString" "ElmToGren.Compat.Http.expectString"
+                        |> Dict.set "BadUrl" "ElmToGren.Compat.Http.BadUrl"
+                        |> Dict.set "Timeout" "ElmToGren.Compat.Http.Timeout"
+                        |> Dict.set "NetworkError" "ElmToGren.Compat.Http.NetworkError"
+                        |> Dict.set "BadStatus" "ElmToGren.Compat.Http.BadStatus"
+                        |> Dict.set "BadPayload" "ElmToGren.Compat.Http.BadPayload"
+                , types =
+                    Dict.empty
+                        |> Dict.set "Request" "ElmToGren.Compat.Http.Request"
+                        |> Dict.set "Expect" "ElmToGren.Compat.Http.Expect"
+                        |> Dict.set "Error" "ElmToGren.Compat.Http.Error"
+                        |> Dict.set "Response" "ElmToGren.Compat.Http.Response"
+                }
+
+            details : PackageDetails
+            details =
+                { elmPackage = "elm/http"
+                , grenPackage = "gren-lang/browser"
+                , grenVersion = "6.0.2"
+                , platform = Browser
+                , modules = [ httpModule ]
+                }
+        in
+        overlayPackage (Absorbed details) registry
+            |> rebuildModules
 
 
 packagesInOrder : Registry -> Array PackageMapping

@@ -16,21 +16,53 @@ verify
     ->
         { packageDirectory : Path
         , grenExecutable : String
+        , isApplication : Bool
         }
     -> Task Error {}
 verify platform permission options =
-    System.Process.run permission
-        { program = options.grenExecutable
-        , arguments = [ "docs", "--output=/dev/null", "--report=json" ]
-        , workingDirectory = System.File.pathToString platform options.packageDirectory
-        , environment = Dict.empty
-        , allowedExitCodes = [ 0 ]
-        , timeoutMilliseconds = 10 * 60 * 1000
-        , maximumOutputBytes = 64 * 1024 * 1024
-        }
-        |> Task.map (\_ -> {})
-        |> Task.mapError
-            (\error ->
-                PortError.create "GREN_VERIFY_FAILED" (PortError.message error)
-                    |> PortError.withHint "Inspect elm-to-gren.report.json for the transformed package diagnostics."
-            )
+    -- Applications must use gren make (docs rejects them).
+    -- Packages try make first (Main present), else fall back to gren docs.
+    let
+        workingDir =
+            System.File.pathToString platform options.packageDirectory
+
+        makeArgs =
+            [ "make", "Main", "--output=/dev/null", "--report=json" ]
+
+        docsArgs =
+            [ "docs", "--output=/dev/null", "--report=json" ]
+
+        runGren args allowed =
+            System.Process.run permission
+                { program = options.grenExecutable
+                , arguments = args
+                , workingDirectory = workingDir
+                , environment = Dict.empty
+                , allowedExitCodes = allowed
+                , timeoutMilliseconds = 10 * 60 * 1000
+                , maximumOutputBytes = 64 * 1024 * 1024
+                }
+    in
+    if options.isApplication then
+        runGren makeArgs [ 0 ]
+            |> Task.map (\_ -> {})
+            |> Task.mapError verifyFailed
+
+    else
+        runGren makeArgs [ 0, 1 ]
+            |> Task.andThen
+                (\makeOutput ->
+                    if makeOutput.exitCode == 0 then
+                        Task.succeed {}
+
+                    else
+                        runGren docsArgs [ 0 ]
+                            |> Task.map (\_ -> {})
+                )
+            |> Task.mapError verifyFailed
+
+
+verifyFailed : Error -> Error
+verifyFailed error =
+    PortError.create "GREN_VERIFY_FAILED" (PortError.message error)
+        |> PortError.withHint "Inspect elm-to-gren.report.json for the transformed package diagnostics."

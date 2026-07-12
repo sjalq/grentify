@@ -11,7 +11,7 @@ module Review.Protocol exposing
     , decode
     )
 
-import Json.Decode as Decode exposing (Decoder)
+import Json.Decode as Decode exposing (Decoder, Value)
 import Port.Error as PortError exposing (Error)
 
 
@@ -78,6 +78,9 @@ type alias ModuleExtraction =
     , references : Array ResolvedReference
     , importFacts : Array ImportFact
     , detectedPlatform : String
+    , -- Phase 1: optional resolved AST. When present the host may print via
+      -- Ast.NameSub + Ast.Print instead of applying source edits.
+      ast : Maybe Value
     }
 
 
@@ -244,8 +247,8 @@ extractionDecoder =
 
 moduleDecoder : Decoder ModuleExtraction
 moduleDecoder =
-    Decode.map8
-        (\path moduleName edits diagnostics importedModules requiredAdapters mapping detectedPlatform ->
+    Decode.succeed
+        (\path moduleName edits diagnostics importedModules requiredAdapters mapping detectedPlatform ast ->
             { path = path
             , moduleName = moduleName
             , edits = edits
@@ -255,20 +258,23 @@ moduleDecoder =
             , references = mapping.references
             , importFacts = mapping.importFacts
             , detectedPlatform = detectedPlatform
+            , ast = ast
             }
         )
-        (Decode.field "path" Decode.string)
-        (Decode.field "moduleName" Decode.string)
-        (Decode.field "edits" (Decode.array editDecoder))
-        (optional "diagnostics" (Decode.array diagnosticDecoder) [])
-        (optional "importedModules" (Decode.array Decode.string) [])
-        (optional "requiredAdapters" (Decode.array Decode.string) [])
-        (Decode.map2
-            (\references importFacts -> { references = references, importFacts = importFacts })
-            (optional "references" (Decode.array referenceDecoder) [])
-            (optional "importFacts" (Decode.array importFactDecoder) [])
-        )
-        (optional "detectedPlatform" Decode.string "common")
+        |> Decode.andMap (Decode.field "path" Decode.string)
+        |> Decode.andMap (Decode.field "moduleName" Decode.string)
+        |> Decode.andMap (Decode.field "edits" (Decode.array editDecoder))
+        |> Decode.andMap (optional "diagnostics" (Decode.array diagnosticDecoder) [])
+        |> Decode.andMap (optional "importedModules" (Decode.array Decode.string) [])
+        |> Decode.andMap (optional "requiredAdapters" (Decode.array Decode.string) [])
+        |> Decode.andMap
+            (Decode.map2
+                (\references importFacts -> { references = references, importFacts = importFacts })
+                (optional "references" (Decode.array referenceDecoder) [])
+                (optional "importFacts" (Decode.array importFactDecoder) [])
+            )
+        |> Decode.andMap (optional "detectedPlatform" Decode.string "common")
+        |> Decode.andMap (optional "ast" (Decode.map Just Decode.value) Nothing)
 
 
 referenceDecoder : Decoder ResolvedReference

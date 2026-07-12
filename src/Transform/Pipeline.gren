@@ -20,6 +20,9 @@ one pass, and finalizes the small lexical syntax differences.
 -}
 
 import Array exposing (Array)
+import Ast.Decode as AstDecode
+import Ast.NameSub as AstNameSub
+import Ast.Print as AstPrint
 import Char
 import Dict exposing (Dict)
 import Mapping.Adapter as Adapter
@@ -226,7 +229,7 @@ referenceEdit registry aliases reference =
                             Nothing ->
                                 mapping.target
 
-                    replacement =
+                    rewritten =
                         when mappedSymbol mapping reference.name is
                             Just target ->
                                 if String.contains "." target then
@@ -251,6 +254,15 @@ referenceEdit registry aliases reference =
                                     -- Values are always qualified: rewritten
                                     -- imports may otherwise expose ambiguous names.
                                     prefix ++ "." ++ reference.name
+
+                    -- Constructor pattern ranges may include trailing space before
+                    -- the payload (`Ok rawValue`); keep that whitespace so we do
+                    -- not emit `Result.OkrawValue`.
+                    trailing =
+                        String.dropFirst (String.count (String.trimRight reference.text)) reference.text
+
+                    replacement =
+                        rewritten ++ trailing
                 in
                 if replacement == reference.text then
                     Nothing
@@ -380,81 +392,189 @@ transformModule registry input extraction =
     toGrenSourcePath input.path
         |> Result.andThen
             (\outputPath ->
-                validateModuleExtraction input extraction
+                -- Phase 1 dual path: prefer resolved AST → name-sub → print when
+                -- the extractor supplied an AST and it decodes cleanly. Fall back
+                -- to the range-edit pipeline otherwise (hand-crafted tests, older
+                -- extracts, or shapes the Phase 1 printer does not yet cover).
+                when tryAstTransform registry input extraction outputPath is
+                    Just transformed ->
+                        transformed
+
+                    Nothing ->
+                        transformModuleViaEdits registry input extraction outputPath
+            )
+
+
+{-| Attempt AST print path. Returns Nothing to signal edit-path fallback.
+-}
+tryAstTransform :
+    Registry
+    -> SourceFile
+    -> Protocol.ModuleExtraction
+    -> String
+    -> Maybe (Result Error TransformedModule)
+tryAstTransform registry input extraction outputPath =
+    when extraction.ast is
+        Nothing ->
+            Nothing
+
+        Just astValue ->
+            when AstDecode.decode astValue is
+                Err _ ->
+                    Nothing
+
+                Ok file ->
+                    let
+                        printed =
+                            file
+                                |> AstNameSub.apply registry
+                                |> AstPrint.print
+                    in
+                    -- Refuse AST path when Phase 1 printer left unported markers.
+                    if String.contains "unported-cons-pattern" printed then
+                        Nothing
+
+                    else
+                        Just
+                            (finalizeTransformedModule registry input extraction outputPath printed [] [] [])
+
+
+transformModuleViaEdits :
+    Registry
+    -> SourceFile
+    -> Protocol.ModuleExtraction
+    -> String
+    -> Result Error TransformedModule
+transformModuleViaEdits registry input extraction outputPath =
+    validateModuleExtraction input extraction
+        |> Result.andThen
+            (\reviewEdits ->
+                let
+                    collectedMapping =
+                        collectMappingEdits registry extraction
+
+                    -- A structural edit and a catalog edit can target the same
+                    -- span (e.g. an arity>1 constructor is both eta-expanded and
+                    -- resolved as a reference). Drop the colliding mapping edit so
+                    -- applyEdits does not fail, but fold its replacement into the
+                    -- structural wrapper when the ranges are identical: the wrapper
+                    -- embeds the original constructor text (`Other.Ctor`), which
+                    -- must become the mapped form (`Elm.Other.Ctor`) under module
+                    -- namespacing.
+                    reviewEditsWithMappings =
+                        Array.map
+                            (foldEqualRangeMappings input.source collectedMapping)
+                            reviewEdits
+
+                    mappingEdits =
+                        collectedMapping
+                            |> Array.keepIf
+                                (\edit ->
+                                    not (Array.any (\structural -> rangesOverlap structural.range edit.range) reviewEditsWithMappings)
+                                )
+
+                    combinedEdits =
+                        Array.append reviewEditsWithMappings mappingEdits
+                in
+                applySourceEdits input.path input.source combinedEdits
                     |> Result.andThen
-                        (\reviewEdits ->
-                            let
-                                collectedMapping =
-                                    collectMappingEdits registry extraction
-
-                                -- A structural edit and a catalog edit can target the same
-                                -- span (e.g. an arity>1 constructor is both eta-expanded and
-                                -- resolved as a reference). Drop the colliding mapping edit so
-                                -- applyEdits does not fail, but fold its replacement into the
-                                -- structural wrapper when the ranges are identical: the wrapper
-                                -- embeds the original constructor text (`Other.Ctor`), which
-                                -- must become the mapped form (`Elm.Other.Ctor`) under module
-                                -- namespacing.
-                                reviewEditsWithMappings =
-                                    Array.map
-                                        (foldEqualRangeMappings input.source collectedMapping)
-                                        reviewEdits
-
-                                mappingEdits =
-                                    collectedMapping
-                                        |> Array.keepIf
-                                            (\edit ->
-                                                not (Array.any (\structural -> rangesOverlap structural.range edit.range) reviewEditsWithMappings)
-                                            )
-
-                                combinedEdits =
-                                    Array.append reviewEditsWithMappings mappingEdits
-                            in
-                            applySourceEdits input.path input.source combinedEdits
-                                |> Result.andThen
-                                    (\reviewed ->
-                                        Lexical.transform reviewed
-                                            |> Result.mapError (sourceEditError input.path)
-                                    )
-                                |> Result.andThen
-                                    (\lexical ->
-                                        requiredModules lexical.source
-                                            |> Result.andThen
-                                                (\requirements ->
-                                                    normalizeRequiredAdapters
-                                                        (Array.append extraction.requiredAdapters requirements.adapters)
-                                                        |> Result.map
-                                                            (\requiredAdapters ->
-                                                                let
-                                                                    finalSource =
-                                                                        ensureModuleImports lexical.source requirements.imports
-
-                                                                    extractedDiagnostics =
-                                                                        Array.map
-                                                                            (attachDiagnostic (Just input.path) (Just extraction.moduleName))
-                                                                            extraction.diagnostics
-
-                                                                    diagnostics =
-                                                                        addUnsupportedDiagnostics input extraction finalSource extractedDiagnostics
-                                                                in
-                                                                { generated =
-                                                                    { moduleName = extraction.moduleName
-                                                                    , relativePath = outputPath
-                                                                    , source = ensureTrailingNewline finalSource
-                                                                    }
-                                                                , inputPath = input.path
-                                                                , reviewEdits = reviewEditsWithMappings
-                                                                , lexicalEdits = lexical.edits
-                                                                , mappingEdits = mappingEdits
-                                                                , diagnostics = diagnostics
-                                                                , requiredAdapters = requiredAdapters
-                                                                , detectedPlatform = extraction.detectedPlatform
-                                                                }
-                                                            )
-                                                )
-                                    )
+                        (\reviewed ->
+                            Lexical.transform reviewed
+                                |> Result.mapError (sourceEditError input.path)
+                        )
+                    |> Result.andThen
+                        (\lexical ->
+                            finalizeTransformedModule registry
+                                input
+                                extraction
+                                outputPath
+                                lexical.source
+                                reviewEditsWithMappings
+                                lexical.edits
+                                mappingEdits
                         )
             )
+
+
+finalizeTransformedModule :
+    Registry
+    -> SourceFile
+    -> Protocol.ModuleExtraction
+    -> String
+    -> String
+    -> Array SourceEdit
+    -> Array SourceEdit
+    -> Array SourceEdit
+    -> Result Error TransformedModule
+finalizeTransformedModule registry input extraction outputPath source reviewEdits lexicalEdits mappingEdits =
+    requiredModules source
+        |> Result.andThen
+            (\requirements ->
+                normalizeRequiredAdapters
+                    (Array.append extraction.requiredAdapters requirements.adapters)
+                    |> Result.map
+                        (\requiredAdapters ->
+                            let
+                                -- Elm default-imports List/Tuple; Gren does not.
+                                -- When the catalog keeps those as identity targets
+                                -- (shim strategy), inject the missing imports.
+                                defaultUniverseImports =
+                                    explicitImportsForDefaultedModules registry extraction
+
+                                finalSource =
+                                    ensureModuleImports source
+                                        (Array.append requirements.imports defaultUniverseImports)
+
+                                extractedDiagnostics =
+                                    Array.map
+                                        (attachDiagnostic (Just input.path) (Just extraction.moduleName))
+                                        extraction.diagnostics
+
+                                diagnostics =
+                                    addUnsupportedDiagnostics input extraction finalSource extractedDiagnostics
+                            in
+                            { generated =
+                                { moduleName = extraction.moduleName
+                                , relativePath = outputPath
+                                , source = ensureTrailingNewline finalSource
+                                }
+                            , inputPath = input.path
+                            , reviewEdits = reviewEdits
+                            , lexicalEdits = lexicalEdits
+                            , mappingEdits = mappingEdits
+                            , diagnostics = diagnostics
+                            , requiredAdapters = requiredAdapters
+                            , detectedPlatform = extraction.detectedPlatform
+                            }
+                        )
+            )
+
+
+{-| Modules Elm injects by default that Gren does not. If the mapping leaves the
+module name unchanged (shim List/Tuple), references still resolve to that name
+and need an explicit import.
+-}
+explicitImportsForDefaultedModules : Registry -> Protocol.ModuleExtraction -> Array String
+explicitImportsForDefaultedModules registry extraction =
+    let
+        elmDefaultModules =
+            [ "List", "Tuple" ]
+    in
+    extraction.references
+        |> Array.map .moduleName
+        |> Array.keepIf
+            (\moduleName ->
+                Array.member moduleName elmDefaultModules
+                    && (when Registry.moduleMappingFor moduleName registry is
+                            Just mapping ->
+                                mapping.target == moduleName
+
+                            Nothing ->
+                                False
+                       )
+            )
+        |> Array.foldl (\name names -> Dict.set name {} names) Dict.empty
+        |> Dict.keys
 
 
 validateExtraction : Protocol.Extraction -> Array SourceFile -> Result Error {}
@@ -1229,27 +1349,9 @@ addUnsupportedDiagnostics input extraction source diagnostics =
                     False
                     tokens
 
+        -- Port modules and port declarations pass through for application ports.
         withPortModule =
-            if isPortModule then
-                addSyntheticDiagnostic input extraction
-                    "UNSUPPORTED_PORT"
-                    "Elm port modules require an explicit Gren platform implementation."
-                    "Replace ports with a Gren Node or browser API boundary and provide a mapping for it."
-                    diagnostics
-
-            else
-                diagnostics
-
-        withPortDeclaration =
-            if hasPortDeclaration && not isPortModule then
-                addSyntheticDiagnostic input extraction
-                    "UNSUPPORTED_PORT"
-                    "Elm ports need a Gren-specific implementation."
-                    "Replace this port with an explicit Gren Node or browser API boundary."
-                    withPortModule
-
-            else
-                withPortModule
+            diagnostics
 
         withEffect =
             if isEffectModule then
@@ -1257,10 +1359,10 @@ addUnsupportedDiagnostics input extraction source diagnostics =
                     "UNSUPPORTED_KERNEL"
                     "Elm effect modules depend on privileged runtime and kernel APIs."
                     "Map this module to a Gren runtime package or replace the effect manager with ordinary Gren code."
-                    withPortDeclaration
+                    withPortModule
 
             else
-                withPortDeclaration
+                withPortModule
     in
     if kernelImport then
         addSyntheticDiagnostic input extraction

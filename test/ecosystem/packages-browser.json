@@ -1,7 +1,8 @@
 {
   "schemaVersion": 1,
-  "seed": 45,
-  "selection": "Browser platform packages proven by port+gren docs verification (direct deps \u2286 browser set, \u22651 browser-surface dep).",
+  "methodology": "reverse-dependency-popularity",
+  "selection": "Most popular qualifying packages by reverse-dependency count (how many published Elm packages list this package in direct dependencies of their latest elm.json). Pure: direct deps \u2286 {elm/core, elm/json, elm/time, elm/random, elm/bytes, elm/regex, elm/url, elm/parser}. Browser: direct deps \u2286 pure set + {elm/browser, elm/html, elm/svg, elm/virtual-dom, elm/http, elm/file} and \u22651 browser-surface dep. Platform packages (elm/*, elm-explorations/*) excluded as subjects. Failures (kernel/ports/GLSL/mapping/etc.) skipped in popularity order until 200 verified each. No pure/browser overlap.",
+  "target": 200,
   "platformSet": [
     "elm/browser",
     "elm/bytes",
@@ -20,104 +21,268 @@
   ],
   "packages": [
     {
-      "name": "whale9490/elm-split-pane",
+      "name": "krisajenkins/remotedata",
+      "version": "6.1.0"
+    },
+    {
+      "name": "debois/elm-dom",
+      "version": "1.3.0"
+    },
+    {
+      "name": "elm-community/html-extra",
+      "version": "3.4.0"
+    },
+    {
+      "name": "eriktim/elm-protocol-buffers",
+      "version": "1.2.0"
+    },
+    {
+      "name": "pablohirafuji/elm-syntax-highlight",
+      "version": "3.7.1"
+    },
+    {
+      "name": "jinjor/elm-debounce",
+      "version": "3.0.0"
+    },
+    {
+      "name": "ohanhi/keyboard",
+      "version": "2.0.1"
+    },
+    {
+      "name": "tesk9/accessible-html",
+      "version": "6.2.0"
+    },
+    {
+      "name": "FabienHenon/elm-infinite-list-view",
+      "version": "3.3.1"
+    },
+    {
+      "name": "lukewestby/elm-http-builder",
+      "version": "8.0.0"
+    },
+    {
+      "name": "mdgriffith/elm-style-animation",
+      "version": "4.0.0"
+    },
+    {
+      "name": "arowM/elm-mixin",
+      "version": "4.0.0"
+    },
+    {
+      "name": "lobanov/elm-taskport",
+      "version": "2.0.1"
+    },
+    {
+      "name": "NoRedInk/elm-string-conversions",
+      "version": "1.0.1"
+    },
+    {
+      "name": "arowM/elm-html-internal",
       "version": "1.0.0"
     },
     {
-      "name": "wsowens/term",
-      "version": "2.0.6"
-    },
-    {
-      "name": "proda-ai/formatting",
-      "version": "1.0.0"
+      "name": "kirchner/elm-selectize",
+      "version": "2.0.7"
     },
     {
       "name": "BrianHicks/elm-particle",
       "version": "1.5.0"
     },
     {
-      "name": "showell/binary-tree-diagram",
-      "version": "1.0.1"
+      "name": "ThinkAlexandria/elm-drag-locations",
+      "version": "3.1.0"
     },
     {
-      "name": "larribas/elm-multi-input",
-      "version": "2.0.0"
-    },
-    {
-      "name": "iodevs/elm-validate",
-      "version": "3.0.3"
-    },
-    {
-      "name": "jsuder-xx/seven-segment",
-      "version": "1.0.1"
+      "name": "alex-tan/postgrest-client",
+      "version": "3.0.0"
     },
     {
       "name": "annaghi/dnd-list",
       "version": "6.0.1"
     },
     {
-      "name": "panthershark/snackbar",
-      "version": "1.0.0"
-    },
-    {
-      "name": "7hoenix/elm-chess",
-      "version": "1.0.0"
-    },
-    {
-      "name": "norpan/elm-html5-drag-drop",
-      "version": "3.1.4"
-    },
-    {
-      "name": "eldesh/alt-core-elm",
-      "version": "1.2.0"
-    },
-    {
-      "name": "ThinkAlexandria/elm-primer-tooltips",
-      "version": "2.1.0"
-    },
-    {
-      "name": "billstclair/elm-popup-picker",
-      "version": "1.1.0"
-    },
-    {
-      "name": "ccapndave/focus",
-      "version": "3.0.0"
-    },
-    {
-      "name": "cekrem/elm-form",
-      "version": "1.1.1"
-    },
-    {
-      "name": "getto-systems/elm-html-table",
-      "version": "1.0.0"
-    },
-    {
-      "name": "mauroc8/elm-html-pipeline",
-      "version": "3.0.0"
-    },
-    {
-      "name": "nibrivia/animator",
+      "name": "choonkeat/elm-ext-http",
       "version": "2.0.0"
     },
     {
-      "name": "ryan-senn/elm-compiler-error-sscce",
-      "version": "6.0.0"
+      "name": "choonkeat/html-data",
+      "version": "4.0.0"
+    },
+    {
+      "name": "ericgj/elm-bem",
+      "version": "1.1.0"
+    },
+    {
+      "name": "etaque/elm-transit",
+      "version": "7.0.5"
+    },
+    {
+      "name": "fapian/elm-html-aria",
+      "version": "1.4.0"
+    },
+    {
+      "name": "jinjor/elm-contextmenu",
+      "version": "2.0.0"
+    },
+    {
+      "name": "jzxhuang/http-extras",
+      "version": "2.1.0"
+    },
+    {
+      "name": "prikhi/http-tasks",
+      "version": "1.0.0"
+    },
+    {
+      "name": "proda-ai/formatting",
+      "version": "1.0.0"
+    },
+    {
+      "name": "stoeffel/editable",
+      "version": "2.0.1"
     },
     {
       "name": "stoeffel/set-extra",
       "version": "1.2.3"
     },
     {
+      "name": "uncover-co/elm-theme-provider",
+      "version": "2.0.0"
+    },
+    {
+      "name": "3kyro/xsrf-protection",
+      "version": "2.1.0"
+    },
+    {
+      "name": "7hoenix/elm-chess",
+      "version": "1.0.0"
+    },
+    {
+      "name": "Arkham/elm-rttl",
+      "version": "1.0.0"
+    },
+    {
+      "name": "Bernardoow/elm-alert-timer-message",
+      "version": "1.0.1"
+    },
+    {
+      "name": "Bernardoow/elm-rating-component",
+      "version": "2.0.2"
+    },
+    {
+      "name": "ChristophP/elm-mark",
+      "version": "2.0.4"
+    },
+    {
+      "name": "Confidenceman02/elm-animate-height",
+      "version": "4.2.1"
+    },
+    {
+      "name": "EdutainmentLIVE/elm-dropdown",
+      "version": "1.0.0"
+    },
+    {
+      "name": "FabienHenon/elm-ckeditor5",
+      "version": "1.4.0"
+    },
+    {
+      "name": "FabienHenon/elm-infinite-scroll",
+      "version": "3.0.4"
+    },
+    {
+      "name": "FabienHenon/elm-placeholder-loading",
+      "version": "1.0.0"
+    },
+    {
+      "name": "FordLabs/elm-star-rating",
+      "version": "2.0.1"
+    },
+    {
+      "name": "Gizra/elm-attribute-builder",
+      "version": "1.0.1"
+    },
+    {
+      "name": "Gizra/elm-form",
+      "version": "1.0.0"
+    },
+    {
+      "name": "Gizra/elm-storage-key",
+      "version": "1.1.1"
+    },
+    {
       "name": "GlobalWebIndex/class-namespaces",
       "version": "3.1.0"
+    },
+    {
+      "name": "GlobalWebIndex/quantify",
+      "version": "1.0.0"
+    },
+    {
+      "name": "GoldentTuft/elm-infinite-scroll",
+      "version": "1.0.0"
+    },
+    {
+      "name": "JohanWinther/elm-pan-and-zoom",
+      "version": "3.0.0"
     },
     {
       "name": "Juli4nG/elm-json-render",
       "version": "2.0.0"
     },
     {
+      "name": "Kurren123/k-dropdown-container",
+      "version": "1.0.0"
+    },
+    {
+      "name": "Massolari/elm-mask",
+      "version": "1.1.1"
+    },
+    {
+      "name": "Microsoft/elm-json-tree-view",
+      "version": "2.0.1"
+    },
+    {
       "name": "NoRedInk/elm-debug-controls-without-datepicker",
       "version": "1.0.1"
+    },
+    {
+      "name": "NoRedInk/elm-rails",
+      "version": "9.0.1"
+    },
+    {
+      "name": "NoRedInk/elm-sweet-poll",
+      "version": "6.0.0"
+    },
+    {
+      "name": "NoRedInk/http-upgrade-shim",
+      "version": "1.0.0"
+    },
+    {
+      "name": "Orasund/elm-bag",
+      "version": "1.0.0"
+    },
+    {
+      "name": "Orasund/elm-jsonstore",
+      "version": "2.0.1"
+    },
+    {
+      "name": "Orasund/elm-layout",
+      "version": "3.0.0"
+    },
+    {
+      "name": "Orasund/elm-svg-writer",
+      "version": "2.0.1"
+    },
+    {
+      "name": "PaackEng/elm-google-maps",
+      "version": "2.5.0"
+    },
+    {
+      "name": "ThinkAlexandria/elm-html-in-elm",
+      "version": "1.0.2"
+    },
+    {
+      "name": "ThinkAlexandria/elm-primer-tooltips",
+      "version": "2.1.0"
     },
     {
       "name": "abinayasudhir/elm-treeview",
@@ -128,36 +293,280 @@
       "version": "2.0.0"
     },
     {
+      "name": "agustinrhcp/elm-mask",
+      "version": "1.0.2"
+    },
+    {
       "name": "akheron/elm-easter",
       "version": "1.1.0"
+    },
+    {
+      "name": "alex-tan/loadable",
+      "version": "3.1.2"
+    },
+    {
+      "name": "andrewMacmurray/elm-simple-animation",
+      "version": "2.3.2"
     },
     {
       "name": "arowM/elm-css-modules-helper",
       "version": "1.0.1"
     },
     {
+      "name": "arowM/elm-html-with-context",
+      "version": "1.0.2"
+    },
+    {
+      "name": "asgr-dk/elm-msg-replay",
+      "version": "2.0.0"
+    },
+    {
+      "name": "atzzCokeK/elm-inputtext-with-count",
+      "version": "1.0.1"
+    },
+    {
+      "name": "bburdette/httpjsontask",
+      "version": "1.0.0"
+    },
+    {
       "name": "bellroy/elm-embed-youtube",
       "version": "1.1.0"
+    },
+    {
+      "name": "benjajaja/radar-chart",
+      "version": "1.0.0"
+    },
+    {
+      "name": "bigbinary/elm-form-field",
+      "version": "1.1.0"
+    },
+    {
+      "name": "bigbinary/elm-reader",
+      "version": "1.1.0"
+    },
+    {
+      "name": "billstclair/elm-css",
+      "version": "1.0.0"
+    },
+    {
+      "name": "billstclair/elm-dialog",
+      "version": "1.0.1"
+    },
+    {
+      "name": "billstclair/elm-popup-picker",
+      "version": "1.1.0"
+    },
+    {
+      "name": "billstclair/elm-svg-button",
+      "version": "4.0.0"
+    },
+    {
+      "name": "boianr/multilingual",
+      "version": "1.0.0"
+    },
+    {
+      "name": "brainrake/elm-mathml",
+      "version": "1.0.1"
+    },
+    {
+      "name": "ccapndave/elm-translator",
+      "version": "2.2.0"
+    },
+    {
+      "name": "ccapndave/focus",
+      "version": "3.0.0"
+    },
+    {
+      "name": "ceddlyburge/dnd-list",
+      "version": "1.0.0"
     },
     {
       "name": "cedricss/elm-progress-ring",
       "version": "1.0.1"
     },
     {
+      "name": "cekrem/elm-form",
+      "version": "1.1.1"
+    },
+    {
+      "name": "cekrem/html-helpers",
+      "version": "2.1.0"
+    },
+    {
+      "name": "cultureamp/elm-css-modules-loader",
+      "version": "2.0.10"
+    },
+    {
       "name": "curtissimo/elm-inertial-scroll-detection",
       "version": "3.1.1"
     },
     {
-      "name": "etaque/elm-transit",
-      "version": "7.0.5"
+      "name": "curtissimo/elm-native-modal-dialog",
+      "version": "3.0.1"
+    },
+    {
+      "name": "danhandrea/elm-router",
+      "version": "4.3.0"
+    },
+    {
+      "name": "dosarf/elm-yet-another-polling",
+      "version": "1.0.2"
+    },
+    {
+      "name": "driebit/elm-swipe-events",
+      "version": "1.0.0"
+    },
+    {
+      "name": "dwayne/elm-json-rpc",
+      "version": "1.0.0"
+    },
+    {
+      "name": "dwyl/elm-criteria",
+      "version": "2.2.1"
+    },
+    {
+      "name": "eldesh/alt-core-elm",
+      "version": "1.2.0"
+    },
+    {
+      "name": "enbala/elm-form",
+      "version": "1.0.0"
+    },
+    {
+      "name": "evancz/elm-playground",
+      "version": "1.0.3"
+    },
+    {
+      "name": "fedragon/elm-typed-dropdown",
+      "version": "2.0.2"
+    },
+    {
+      "name": "fredcy/elm-debouncer",
+      "version": "2.0.1"
     },
     {
       "name": "genthaler/elm-enum",
       "version": "1.0.2"
     },
     {
+      "name": "getto-systems/elm-html-table",
+      "version": "1.0.0"
+    },
+    {
+      "name": "ghivert/elm-graphql",
+      "version": "5.0.0"
+    },
+    {
+      "name": "gribouille/elm-bulma",
+      "version": "1.0.2"
+    },
+    {
+      "name": "gribouille/elm-combo",
+      "version": "1.0.0"
+    },
+    {
+      "name": "gribouille/elm-graphql",
+      "version": "2.0.2"
+    },
+    {
+      "name": "gribouille/elm-multiselect",
+      "version": "1.0.0"
+    },
+    {
+      "name": "gribouille/elm-spinner",
+      "version": "1.0.0"
+    },
+    {
+      "name": "gribouille/elm-treeview",
+      "version": "2.0.2"
+    },
+    {
+      "name": "grotsev/elm-debouncer",
+      "version": "1.0.0"
+    },
+    {
+      "name": "hallelujahdrive/elm-accordion",
+      "version": "1.0.4"
+    },
+    {
+      "name": "hallelujahdrive/elm-croppie",
+      "version": "1.0.3"
+    },
+    {
+      "name": "hanifhefaz/elm-tf-idf",
+      "version": "1.0.0"
+    },
+    {
+      "name": "hanifhefaz/elm-word-search",
+      "version": "1.0.1"
+    },
+    {
+      "name": "hanifhefaz/elm-word2dict-matcher",
+      "version": "5.1.1"
+    },
+    {
+      "name": "hayleigh-dot-dev/elm-limiter",
+      "version": "1.0.0"
+    },
+    {
+      "name": "hayleigh-dot-dev/elm-lustre-ui",
+      "version": "1.0.0"
+    },
+    {
+      "name": "henriquecbuss/elm-eos",
+      "version": "1.1.0"
+    },
+    {
+      "name": "iodevs/elm-validate",
+      "version": "3.0.3"
+    },
+    {
+      "name": "ir4y/elm-dnd",
+      "version": "3.0.2"
+    },
+    {
+      "name": "jackfranklin/elm-parse-link-header",
+      "version": "2.0.2"
+    },
+    {
+      "name": "jaredramirez/elm-field",
+      "version": "1.1.2"
+    },
+    {
+      "name": "jinjor/elm-req",
+      "version": "3.0.0"
+    },
+    {
+      "name": "jjagielka/select-menu",
+      "version": "1.0.1"
+    },
+    {
+      "name": "jjant/elm-fps",
+      "version": "1.0.0"
+    },
+    {
+      "name": "jouderianjr/elm-loaders",
+      "version": "1.0.2"
+    },
+    {
+      "name": "jschomay/elm-narrative-engine",
+      "version": "6.0.3"
+    },
+    {
+      "name": "jsuder-xx/seven-segment",
+      "version": "1.0.1"
+    },
+    {
+      "name": "jxxcarlson/elm-graph",
+      "version": "3.1.0"
+    },
+    {
       "name": "kikytokamuro/elm-linerbar",
       "version": "1.0.1"
+    },
+    {
+      "name": "kkazuo/expect-bytes",
+      "version": "1.0.0"
     },
     {
       "name": "kkpoon/elm-echarts",
@@ -168,16 +577,255 @@
       "version": "2.1.0"
     },
     {
+      "name": "kmbn/elm-hotkeys",
+      "version": "1.1.1"
+    },
+    {
+      "name": "larribas/elm-multi-input",
+      "version": "2.0.0"
+    },
+    {
+      "name": "laserpants/elm-burrito-update",
+      "version": "3.0.4"
+    },
+    {
+      "name": "laurentpayot/minidenticons-elm",
+      "version": "1.0.1"
+    },
+    {
+      "name": "lettenj61/elm-reusable-html",
+      "version": "2.0.0"
+    },
+    {
+      "name": "lgcantarelli/emusic",
+      "version": "1.0.0"
+    },
+    {
+      "name": "lionar/select",
+      "version": "1.0.0"
+    },
+    {
+      "name": "ljuglaret/fraction",
+      "version": "2.0.3"
+    },
+    {
+      "name": "marshallformula/arrangeable-list",
+      "version": "1.1.1"
+    },
+    {
+      "name": "marshallformula/elm-swiper",
+      "version": "1.0.2"
+    },
+    {
+      "name": "martouta/elm-emojis-converter",
+      "version": "1.0.0"
+    },
+    {
+      "name": "martouta/html-key-events",
+      "version": "1.0.0"
+    },
+    {
+      "name": "massung/elm-css",
+      "version": "1.1.2"
+    },
+    {
+      "name": "mauroc8/elm-html-pipeline",
+      "version": "3.0.0"
+    },
+    {
+      "name": "mercurymedia/elm-message-toast",
+      "version": "3.0.0"
+    },
+    {
+      "name": "mhoare/elm-stack",
+      "version": "3.1.2"
+    },
+    {
+      "name": "mpizenberg/elm-file",
+      "version": "1.0.0"
+    },
+    {
+      "name": "nibrivia/animator",
+      "version": "2.0.0"
+    },
+    {
+      "name": "noordstar/elm-matrix-webhooks",
+      "version": "1.0.0"
+    },
+    {
+      "name": "norpan/elm-html5-drag-drop",
+      "version": "3.1.4"
+    },
+    {
+      "name": "ohanhi/autoexpand",
+      "version": "3.0.0"
+    },
+    {
+      "name": "ohanhi/lorem",
+      "version": "1.0.2"
+    },
+    {
+      "name": "panthershark/snackbar",
+      "version": "1.0.0"
+    },
+    {
+      "name": "paul-freeman/elm-ipfs",
+      "version": "1.0.0"
+    },
+    {
+      "name": "peterszerzo/elm-json-tree-view",
+      "version": "1.0.0"
+    },
+    {
+      "name": "proberge-dev/browser-keyboard",
+      "version": "1.0.0"
+    },
+    {
+      "name": "proberge-dev/elm-grid",
+      "version": "1.0.0"
+    },
+    {
+      "name": "proda-ai/elm-dropzone",
+      "version": "1.0.1"
+    },
+    {
+      "name": "renanpvaz/elm-bem",
+      "version": "1.0.2"
+    },
+    {
+      "name": "rgrempel/elm-http-decorators",
+      "version": "3.0.0"
+    },
+    {
+      "name": "rielas/measurement",
+      "version": "1.0.0"
+    },
+    {
+      "name": "rjbma/elm-listview",
+      "version": "1.0.0"
+    },
+    {
+      "name": "rl-king/elm-inview",
+      "version": "2.0.1"
+    },
+    {
+      "name": "rl-king/elm-masonry",
+      "version": "1.0.0"
+    },
+    {
+      "name": "robotmay/s3-direct-file-upload",
+      "version": "1.0.0"
+    },
+    {
+      "name": "rsignavong/elm-cloudinary-video-player",
+      "version": "1.0.4"
+    },
+    {
+      "name": "rsignavong/elm-leaflet-map",
+      "version": "4.1.0"
+    },
+    {
+      "name": "ryan-haskell/graphql",
+      "version": "1.0.0"
+    },
+    {
+      "name": "ryan-senn/elm-compiler-error-sscce",
+      "version": "6.0.0"
+    },
+    {
+      "name": "samuelstevens/elm-csv",
+      "version": "1.0.1"
+    },
+    {
+      "name": "sashaafm/eetf",
+      "version": "2.0.0"
+    },
+    {
+      "name": "sh4r3m4n/elm-piano",
+      "version": "2.0.3"
+    },
+    {
+      "name": "showell/binary-tree-diagram",
+      "version": "1.0.1"
+    },
+    {
+      "name": "showell/dict-dot-dot",
+      "version": "1.0.1"
+    },
+    {
+      "name": "simplystuart/elm-scroll-to",
+      "version": "1.0.0"
+    },
+    {
+      "name": "skovsboll/elm-crontab",
+      "version": "1.0.3"
+    },
+    {
+      "name": "slashmili/phoenix-socket",
+      "version": "4.2.1"
+    },
+    {
       "name": "sli/autotable",
       "version": "1.0.0"
+    },
+    {
+      "name": "sophiecollard/jsonpath",
+      "version": "2.0.0"
+    },
+    {
+      "name": "stephenreddek/elm-time-picker",
+      "version": "1.0.4"
+    },
+    {
+      "name": "stoeffel/resetable",
+      "version": "1.1.0"
+    },
+    {
+      "name": "terezka/elm-diff",
+      "version": "1.0.0"
+    },
+    {
+      "name": "the-sett/elm-animate",
+      "version": "1.1.0"
     },
     {
       "name": "tj/elm-svg-loaders",
       "version": "1.0.0"
     },
     {
-      "name": "Bernardoow/elm-alert-timer-message",
-      "version": "1.0.1"
+      "name": "tremlab/bugsnag-elm",
+      "version": "2.0.0"
+    },
+    {
+      "name": "turboMaCk/glue",
+      "version": "6.2.0"
+    },
+    {
+      "name": "ursi/elm-scroll",
+      "version": "1.0.0"
+    },
+    {
+      "name": "w0rm/elm-slice-show",
+      "version": "6.0.0"
+    },
+    {
+      "name": "whale9490/elm-split-pane",
+      "version": "1.0.0"
+    },
+    {
+      "name": "xdelph/elm-sortable-table",
+      "version": "1.0.2"
+    },
+    {
+      "name": "yotamDvir/elm-katex",
+      "version": "2.0.2"
     }
-  ]
+  ],
+  "meta": {
+    "pureVerified": 200,
+    "browserVerified": 200,
+    "pureCandidates": 620,
+    "browserCandidates": 344,
+    "updatedAt": "2026-07-12T14:51:33.569457Z"
+  }
 }

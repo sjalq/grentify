@@ -134,22 +134,26 @@ If `filter` had no mapping, the tool might still emit `List.filter` (or a half-r
 
 ## Ecosystem smoke tests
 
-`npm run test:ecosystem` ports 40 randomly selected (seeded) pure Elm packages
-whose direct dependencies stay within the supported common platform set
-(`elm/core`, `elm/json`, `elm/time`, `elm/random`, `elm/bytes`, `elm/regex`,
-`elm/url`, `elm/parser`) and checks that each run completes with verification.
+`npm run test:ecosystem` ports the **200 most popular** qualifying pure Elm
+packages (by reverse-dependency count) whose direct dependencies stay within
+the supported common platform set (`elm/core`, `elm/json`, `elm/time`,
+`elm/random`, `elm/bytes`, `elm/regex`, `elm/url`, `elm/parser`) and checks that
+each run completes with verification.
 
-`npm run test:ecosystem-browser` ports another 40 packages whose direct
-dependencies stay within the browser platform set (common set plus
-`elm/browser`, `elm/html`, `elm/svg`, `elm/virtual-dom`, `elm/http`, `elm/file`)
-and verifies each with `gren docs` on platform browser.
+`npm run test:ecosystem-browser` ports the **200 most popular** browser-platform
+packages (no pure overlap) whose direct dependencies stay within the browser
+platform set (common set plus `elm/browser`, `elm/html`, `elm/svg`,
+`elm/virtual-dom`, `elm/http`, `elm/file`), with at least one browser-surface
+dependency, and verifies each with `gren docs`. Packages that hit hard refusals
+(kernel/JS), download/integrity failures, timeouts, or structural gaps
+(list-cons, unmapped APIs) are skipped in popularity order until 200 verify.
 
 ## Development
 
 ```sh
 npm run test:all               # unit, rule fixtures, e2e, ecosystem suites (network)
-npm run test:ecosystem         # 40 seeded pure packages from package.elm-lang.org
-npm run test:ecosystem-browser # 40 seeded browser-platform packages
+npm run test:ecosystem         # 200 most popular pure packages
+npm run test:ecosystem-browser # 200 most popular browser-platform packages
 ```
 
 - `src/` — the Gren CLI (acquire, resolve, transform, format, emit, verify)
@@ -157,7 +161,8 @@ npm run test:ecosystem-browser # 40 seeded browser-platform packages
 - `mappings/builtin.json` — the Elm→Gren package/API catalog
 - `tools/gren-format/` — vendored gilramir/gren-format binary (`scripts/build-gren-format.sh` rebuilds it)
 - `test/` — unit, format, end-to-end, and ecosystem suites
-- `test/ecosystem/packages.json` — seeded sample of qualifying registry packages
+- `test/ecosystem/packages.json` — 200 most popular qualifying pure packages
+- `test/ecosystem/packages-browser.json` — 200 most popular qualifying browser packages
 
 ## License
 

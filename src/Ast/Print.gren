@@ -1,0 +1,834 @@
+module Ast.Print exposing (print)
+
+{-| Pretty-print a resolved, name-substituted AST as Gren source.
+
+Phase 1 structural lowers:
+- `case`/`of` → `when`/`is`
+- unit `()` → `{}`
+- N-tuples → `{ first, second, … }` records
+- list cons already rewritten by NameSub to `Array.pushFirst`
+-}
+
+import Array exposing (Array)
+import Ast.Types as Types exposing
+    ( CaseArm
+    , Declaration(..)
+    , Exposing(..)
+    , Expr(..)
+    , ExposedItem(..)
+    , Field
+    , File
+    , Import
+    , LetDecl(..)
+    , ModuleDef
+    , ModuleKind(..)
+    , NamedRef
+    , Pattern(..)
+    , Signature
+    , TypeAnn(..)
+    )
+import Char
+import Maybe exposing (Maybe(..))
+
+
+print : File -> String
+print file =
+    let
+        -- Gren wants module docs *after* the module line (Elm often puts them
+        -- before). Emit header first so the compiler never sees a doc block
+        -- that looks like a free-floating comment before `module`.
+        header =
+            printModuleDef file.moduleDefinition
+
+        moduleDocs =
+            moduleDocumentation file.comments
+
+        imports =
+            file.imports
+                |> Array.map printImport
+                |> Array.keepIf (\line -> not (String.isEmpty line))
+                |> String.join "\n"
+
+        declarations =
+            file.declarations
+                |> Array.map printDeclaration
+                |> Array.keepIf (\block -> not (String.isEmpty block))
+                |> String.join "\n\n"
+
+        bodyParts =
+            [ header
+            , moduleDocs
+            , imports
+            , declarations
+            ]
+                |> Array.keepIf (\part -> not (String.isEmpty part))
+    in
+    String.join "\n\n" bodyParts ++ "\n"
+
+
+moduleDocumentation : Array String -> String
+moduleDocumentation comments =
+    comments
+        |> Array.keepIf (\comment -> String.startsWith "{-|" comment)
+        |> Array.first
+        |> Maybe.withDefault ""
+
+
+printModuleDef : ModuleDef -> String
+printModuleDef moduleDef =
+    let
+        keyword =
+            when moduleDef.kind is
+                NormalModule ->
+                    "module"
+
+                PortModule ->
+                    "port module"
+
+                EffectModule ->
+                    "effect module"
+
+        exposingPart =
+            printExposing moduleDef.exposing_
+    in
+    keyword ++ " " ++ moduleDef.moduleName ++ " exposing " ++ exposingPart
+
+
+printImport : Import -> String
+printImport import_ =
+    let
+        aliasPart =
+            when import_.alias is
+                Just aliasName ->
+                    " as " ++ aliasName
+
+                Nothing ->
+                    ""
+
+        exposingPart =
+            when import_.exposing_ is
+                Nothing ->
+                    ""
+
+                Just ExposeAll ->
+                    " exposing (..)"
+
+                Just (ExposeExplicit items) ->
+                    if Array.isEmpty items then
+                        ""
+
+                    else
+                        " exposing ("
+                            ++ String.join ", " (Array.map printExposedItem items)
+                            ++ ")"
+    in
+    "import " ++ import_.moduleName ++ aliasPart ++ exposingPart
+
+
+printExposing : Exposing -> String
+printExposing exposing_ =
+    when exposing_ is
+        ExposeAll ->
+            "(..)"
+
+        ExposeExplicit items ->
+            "(" ++ String.join ", " (Array.map printExposedItem items) ++ ")"
+
+
+printExposedItem : ExposedItem -> String
+printExposedItem item =
+    when item is
+        ExposeInfix name ->
+            "(" ++ name ++ ")"
+
+        ExposeFunction name ->
+            name
+
+        ExposeTypeOrAlias name ->
+            name
+
+        ExposeType { name = name, open = open } ->
+            if open then
+                name ++ "(..)"
+
+            else
+                name
+
+
+printDeclaration : Declaration -> String
+printDeclaration declaration =
+    when declaration is
+        DeclFunction fn ->
+            let
+                docs =
+                    when fn.documentation is
+                        Just text ->
+                            text ++ "\n"
+
+                        Nothing ->
+                            ""
+
+                signature =
+                    when fn.signature is
+                        Just sig ->
+                            printSignature sig ++ "\n"
+
+                        Nothing ->
+                            ""
+
+                args =
+                    if Array.isEmpty fn.arguments then
+                        ""
+
+                    else
+                        " " ++ String.join " " (Array.map (printPattern 0) fn.arguments)
+
+                body =
+                    printExpr 0 fn.expression
+            in
+            docs ++ signature ++ fn.name ++ args ++ " =\n    " ++ indentBlock 1 body
+
+        DeclAlias aliasDecl ->
+            let
+                docs =
+                    when aliasDecl.documentation is
+                        Just text ->
+                            text ++ "\n"
+
+                        Nothing ->
+                            ""
+
+                generics =
+                    if Array.isEmpty aliasDecl.generics then
+                        ""
+
+                    else
+                        " " ++ String.join " " aliasDecl.generics
+            in
+            docs
+                ++ "type alias "
+                ++ aliasDecl.name
+                ++ generics
+                ++ " =\n    "
+                ++ printType 0 aliasDecl.typeAnnotation
+
+        DeclCustomType custom ->
+            let
+                docs =
+                    when custom.documentation is
+                        Just text ->
+                            text ++ "\n"
+
+                        Nothing ->
+                            ""
+
+                generics =
+                    if Array.isEmpty custom.generics then
+                        ""
+
+                    else
+                        " " ++ String.join " " custom.generics
+
+                ctors =
+                    custom.constructors
+                        |> Array.map printConstructor
+                        |> String.join "\n    | "
+            in
+            docs
+                ++ "type "
+                ++ custom.name
+                ++ generics
+                ++ "\n    = "
+                ++ ctors
+
+        DeclPort signature ->
+            "port " ++ printSignature signature
+
+        DeclInfix ->
+            ""
+
+        DeclDestructure { pattern = pattern, expression = expression } ->
+            printPattern 0 pattern ++ " =\n    " ++ printExpr 0 expression
+
+
+printConstructor : { name : String, arguments : Array TypeAnn } -> String
+printConstructor ctor =
+    if Array.isEmpty ctor.arguments then
+        ctor.name
+
+    else
+        ctor.name
+            ++ " "
+            ++ String.join " " (Array.map (printType 1) ctor.arguments)
+
+
+printSignature : Signature -> String
+printSignature signature =
+    signature.name ++ " : " ++ printType 0 signature.typeAnnotation
+
+
+printType : Int -> TypeAnn -> String
+printType prec typeAnn =
+    when typeAnn is
+        TypeGeneric name ->
+            name
+
+        TypeTyped { ref = ref, arguments = args } ->
+            let
+                head =
+                    printNamedRef True ref
+
+                rendered =
+                    if Array.isEmpty args then
+                        head
+
+                    else
+                        head ++ " " ++ String.join " " (Array.map (printType 1) args)
+            in
+            if prec > 0 && not (Array.isEmpty args) then
+                "(" ++ rendered ++ ")"
+
+            else
+                rendered
+
+        TypeUnit ->
+            "{}"
+
+        TypeTuple items ->
+            printTupleType items
+
+        TypeRecord fields ->
+            if Array.isEmpty fields then
+                "{}"
+
+            else
+                "{ "
+                    ++ String.join ", "
+                        (Array.map
+                            (\field ->
+                                field.name ++ " : " ++ printType 0 field.typeAnnotation
+                            )
+                            fields
+                        )
+                    ++ " }"
+
+        TypeGenericRecord { extension = ext, fields = fields } ->
+            "{ "
+                ++ ext
+                ++ " | "
+                ++ String.join ", "
+                    (Array.map
+                        (\field ->
+                            field.name ++ " : " ++ printType 0 field.typeAnnotation
+                        )
+                        fields
+                    )
+                ++ " }"
+
+        TypeFunction { left = left, right = right } ->
+            let
+                rendered =
+                    printType 1 left ++ " -> " ++ printType 0 right
+            in
+            if prec > 0 then
+                "(" ++ rendered ++ ")"
+
+            else
+                rendered
+
+
+printTupleType : Array TypeAnn -> String
+printTupleType items =
+    let
+        labels =
+            tupleFieldLabels (Array.length items)
+    in
+    if Array.isEmpty items then
+        "{}"
+
+    else
+        "{ "
+            ++ String.join ", "
+                (Array.map2
+                    (\label item ->
+                        label ++ " : " ++ printType 0 item
+                    )
+                    labels
+                    items
+                )
+            ++ " }"
+
+
+printPattern : Int -> Pattern -> String
+printPattern prec pattern =
+    when pattern is
+        PatAll ->
+            "_"
+
+        PatUnit ->
+            "{}"
+
+        PatChar value ->
+            "'" ++ escapeChar value ++ "'"
+
+        PatString value ->
+            "\"" ++ escapeString value ++ "\""
+
+        PatInt value ->
+            String.fromInt value
+
+        PatHex value ->
+            "0x" ++ String.fromInt value
+
+        PatFloat value ->
+            String.fromFloat value
+
+        PatTuple items ->
+            printTuplePattern items
+
+        PatRecord fields ->
+            "{ " ++ String.join ", " fields ++ " }"
+
+        PatCons { head = head, tail = tail } ->
+            printConsPattern head tail
+
+        PatList items ->
+            "[" ++ String.join ", " (Array.map (printPattern 0) items) ++ "]"
+
+        PatVar name ->
+            name
+
+        PatNamed { ref = ref, arguments = args } ->
+            let
+                head =
+                    printNamedRef False ref
+
+                rendered =
+                    if Array.isEmpty args then
+                        head
+
+                    else
+                        head ++ " " ++ String.join " " (Array.map (printPattern 1) args)
+            in
+            if prec > 0 && not (Array.isEmpty args) then
+                "(" ++ rendered ++ ")"
+
+            else
+                rendered
+
+        PatAs { pattern = inner, name = name } ->
+            let
+                rendered =
+                    printPattern 1 inner ++ " as " ++ name
+            in
+            if prec > 0 then
+                "(" ++ rendered ++ ")"
+
+            else
+                rendered
+
+
+printConsPattern : Pattern -> Pattern -> String
+printConsPattern head tail =
+    when head is
+        PatVar h ->
+            when tail is
+                PatVar t ->
+                    "{ first = " ++ h ++ ", rest = " ++ t ++ " }"
+
+                PatList items ->
+                    if Array.isEmpty items then
+                        "{ first = " ++ h ++ ", rest = [] }"
+
+                    else
+                        "_ {- unported-cons-pattern -}"
+
+                _ ->
+                    "_ {- unported-cons-pattern -}"
+
+        _ ->
+            "_ {- unported-cons-pattern -}"
+
+
+printTuplePattern : Array Pattern -> String
+printTuplePattern items =
+    let
+        labels =
+            tupleFieldLabels (Array.length items)
+    in
+    if Array.isEmpty items then
+        "{}"
+
+    else
+        "{ "
+            ++ String.join ", "
+                (Array.map2
+                    (\label item ->
+                        label ++ " = " ++ printPattern 0 item
+                    )
+                    labels
+                    items
+                )
+            ++ " }"
+
+
+printExpr : Int -> Expr -> String
+printExpr prec expr =
+    when expr is
+        ExprUnit ->
+            "{}"
+
+        ExprApplication parts ->
+            when Array.popFirst parts is
+                Nothing ->
+                    "()"
+
+                Just { first = first, rest = rest } ->
+                    let
+                        rendered =
+                            if Array.isEmpty rest then
+                                printExpr 1 first
+
+                            else
+                                printExpr 1 first
+                                    ++ " "
+                                    ++ String.join " " (Array.map (printExpr 1) rest)
+                    in
+                    if prec > 0 then
+                        "(" ++ rendered ++ ")"
+
+                    else
+                        rendered
+
+        ExprBinop { operator = op, left = left, right = right } ->
+            let
+                rendered =
+                    printExpr 1 left ++ " " ++ op ++ " " ++ printExpr 1 right
+            in
+            if prec > 0 then
+                "(" ++ rendered ++ ")"
+
+            else
+                rendered
+
+        ExprVar ref ->
+            printNamedRef False ref
+
+        ExprIf { condition = condition, then_ = ifTrue, else_ = ifFalse } ->
+            let
+                rendered =
+                    "if "
+                        ++ printExpr 0 condition
+                        ++ " then\n    "
+                        ++ indentBlock 1 (printExpr 0 ifTrue)
+                        ++ "\n\nelse\n    "
+                        ++ indentBlock 1 (printExpr 0 ifFalse)
+            in
+            if prec > 0 then
+                "(" ++ rendered ++ ")"
+
+            else
+                rendered
+
+        ExprPrefix op ->
+            "(" ++ op ++ ")"
+
+        ExprOperator op ->
+            op
+
+        ExprInt value ->
+            String.fromInt value
+
+        ExprHex value ->
+            "0x" ++ String.fromInt value
+
+        ExprFloat value ->
+            String.fromFloat value
+
+        ExprNegation inner ->
+            "-" ++ printExpr 1 inner
+
+        ExprString value ->
+            "\"" ++ escapeString value ++ "\""
+
+        ExprChar value ->
+            "'" ++ escapeChar value ++ "'"
+
+        ExprTuple items ->
+            printTupleExpr items
+
+        ExprLet { declarations = declarations, expression = body } ->
+            let
+                decls =
+                    declarations
+                        |> Array.map printLetDecl
+                        |> String.join "\n\n    "
+
+                rendered =
+                    "let\n    "
+                        ++ decls
+                        ++ "\nin\n"
+                        ++ printExpr 0 body
+            in
+            if prec > 0 then
+                "(" ++ rendered ++ ")"
+
+            else
+                rendered
+
+        ExprCase { expression = scrutinee, cases = arms } ->
+            let
+                armText =
+                    arms
+                        |> Array.map printCaseArm
+                        |> String.join "\n\n    "
+
+                rendered =
+                    "when "
+                        ++ printExpr 0 scrutinee
+                        ++ " is\n    "
+                        ++ armText
+            in
+            if prec > 0 then
+                "(" ++ rendered ++ ")"
+
+            else
+                rendered
+
+        ExprLambda { arguments = arguments, expression = body } ->
+            let
+                rendered =
+                    "\\"
+                        ++ String.join " " (Array.map (printPattern 1) arguments)
+                        ++ " -> "
+                        ++ printExpr 0 body
+            in
+            if prec > 0 then
+                "(" ++ rendered ++ ")"
+
+            else
+                rendered
+
+        ExprRecord fields ->
+            if Array.isEmpty fields then
+                "{}"
+
+            else
+                "{ "
+                    ++ String.join ", "
+                        (Array.map
+                            (\field ->
+                                field.name ++ " = " ++ printExpr 0 field.value
+                            )
+                            fields
+                        )
+                    ++ " }"
+
+        ExprList items ->
+            "[" ++ String.join ", " (Array.map (printExpr 0) items) ++ "]"
+
+        ExprAccess { record = record, field = field } ->
+            printExpr 1 record ++ "." ++ field
+
+        ExprAccessFunction field ->
+            "." ++ field
+
+        ExprUpdate { name = name, fields = fields } ->
+            "{ "
+                ++ name
+                ++ " | "
+                ++ String.join ", "
+                    (Array.map
+                        (\field ->
+                            field.name ++ " = " ++ printExpr 0 field.value
+                        )
+                        fields
+                    )
+                ++ " }"
+
+        ExprGlsl code ->
+            "[glsl| " ++ code ++ " |]"
+
+
+printTupleExpr : Array Expr -> String
+printTupleExpr items =
+    let
+        labels =
+            tupleFieldLabels (Array.length items)
+    in
+    if Array.isEmpty items then
+        "{}"
+
+    else
+        "{ "
+            ++ String.join ", "
+                (Array.map2
+                    (\label item ->
+                        label ++ " = " ++ printExpr 0 item
+                    )
+                    labels
+                    items
+                )
+            ++ " }"
+
+
+printCaseArm : CaseArm -> String
+printCaseArm arm =
+    printPattern 0 arm.pattern
+        ++ " ->\n        "
+        ++ indentBlock 2 (printExpr 0 arm.body)
+
+
+printLetDecl : LetDecl -> String
+printLetDecl declaration =
+    when declaration is
+        LetFunction fn ->
+            let
+                args =
+                    if Array.isEmpty fn.arguments then
+                        ""
+
+                    else
+                        " " ++ String.join " " (Array.map (printPattern 0) fn.arguments)
+            in
+            fn.name ++ args ++ " =\n        " ++ indentBlock 2 (printExpr 0 fn.expression)
+
+        LetDestructure { pattern = pattern, expression = expression } ->
+            printPattern 0 pattern
+                ++ " =\n        "
+                ++ indentBlock 2 (printExpr 0 expression)
+
+
+printNamedRef : Bool -> NamedRef -> String
+printNamedRef isType ref =
+    when ref.moduleName is
+        Nothing ->
+            ref.name
+
+        Just moduleName ->
+            if isType then
+                if moduleName == ref.name || String.endsWith ("." ++ ref.name) moduleName then
+                    ref.name
+
+                else
+                    moduleName ++ "." ++ ref.name
+
+            else if isDefaultCtor moduleName ref.name then
+                ref.name
+
+            else
+                moduleName ++ "." ++ ref.name
+
+
+isDefaultCtor : String -> String -> Bool
+isDefaultCtor moduleName name =
+    startsUpper name
+        && Array.member moduleName
+            [ "Maybe"
+            , "Result"
+            , "Order"
+            , "Basics"
+            ]
+
+
+startsUpper : String -> Bool
+startsUpper name =
+    when String.popFirst name is
+        Just { first = first } ->
+            Char.isUpper first
+
+        Nothing ->
+            False
+
+
+tupleFieldLabels : Int -> Array String
+tupleFieldLabels count =
+    Array.initialize count 0 fieldLabel
+
+
+fieldLabel : Int -> String
+fieldLabel index =
+    when index is
+        0 ->
+            "first"
+
+        1 ->
+            "second"
+
+        2 ->
+            "third"
+
+        3 ->
+            "fourth"
+
+        4 ->
+            "fifth"
+
+        5 ->
+            "sixth"
+
+        6 ->
+            "seventh"
+
+        7 ->
+            "eighth"
+
+        8 ->
+            "ninth"
+
+        _ ->
+            "field" ++ String.fromInt (index + 1)
+
+
+indentBlock : Int -> String -> String
+indentBlock levels text =
+    let
+        pad =
+            String.repeat (levels * 4) " "
+    in
+    text
+        |> String.split "\n"
+        |> Array.indexedMap
+            (\index line ->
+                if index == 0 then
+                    line
+
+                else if String.isEmpty line then
+                    line
+
+                else
+                    pad ++ line
+            )
+        |> String.join "\n"
+
+
+escapeString : String -> String
+escapeString value =
+    value
+        |> String.replace "\\" "\\\\"
+        |> String.replace "\"" "\\\""
+        |> String.replace "\n" "\\n"
+        |> String.replace "\t" "\\t"
+        |> String.replace "\r" "\\r"
+
+
+escapeChar : String -> String
+escapeChar value =
+    when value is
+        "\\" ->
+            "\\\\"
+
+        "'" ->
+            "\\'"
+
+        "\n" ->
+            "\\n"
+
+        "\t" ->
+            "\\t"
+
+        "\r" ->
+            "\\r"
+
+        _ ->
+            value

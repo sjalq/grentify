@@ -17,7 +17,7 @@ import Dict exposing (Dict)
 import Elm.Manifest exposing (Manifest)
 import Elm.PackageName as PackageName
 import Elm.Semver as Semver
-import Emit.Manifest as GrenManifest exposing (Dependency(..), ExposedModules(..), Spec)
+import Emit.Manifest as GrenManifest exposing (Dependency(..), ExposedModules(..), Spec, SpecKind(..))
 import Emit.Workspace
 import Mapping.Registry as MappingRegistry
 import Mapping.Types as Mapping exposing (MappingKind(..), PackageMapping(..), Registry)
@@ -194,14 +194,31 @@ buildManifest options =
         options.source.dependencies
         |> Result.map
             (\dependencies ->
-                { platform = toCompilerPlatform options.identity.platform
+                { kind =
+                    if options.source.isApplication then
+                        ApplicationKind
+
+                    else
+                        PackageKind
+                , platform = toCompilerPlatform options.identity.platform
                 , name = options.identity.grenName
                 , summary = options.source.summary
                 , license = options.source.license
                 , version = options.identity.version
                 , exposedModules = ExposedArray options.source.exposedModules
-                , grenVersion = "0.6.0 <= v < 0.7.0"
+                , grenVersion =
+                    if options.source.isApplication then
+                        "0.6.6"
+
+                    else
+                        "0.6.0 <= v < 0.7.0"
                 , dependencies = dependencies
+                , sourceDirectories =
+                    if Array.isEmpty options.source.sourceDirectories then
+                        [ "src" ]
+
+                    else
+                        options.source.sourceDirectories
                 }
             )
 

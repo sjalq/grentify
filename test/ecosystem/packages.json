@@ -1,66 +1,685 @@
 {
   "schemaVersion": 1,
-  "seed": 42,
-  "selection": "Seeded random samples (seeds 42-44) of packages with direct deps \u2286 supported platform set. Packages that fail download integrity, review stack limits, or known unsupported patterns were replaced.",
+  "methodology": "reverse-dependency-popularity",
+  "selection": "Most popular qualifying packages by reverse-dependency count (how many published Elm packages list this package in direct dependencies of their latest elm.json). Pure: direct deps \u2286 {elm/core, elm/json, elm/time, elm/random, elm/bytes, elm/regex, elm/url, elm/parser}. Browser: direct deps \u2286 pure set + {elm/browser, elm/html, elm/svg, elm/virtual-dom, elm/http, elm/file} and \u22651 browser-surface dep. Platform packages (elm/*, elm-explorations/*) excluded as subjects. Failures (kernel/ports/GLSL/mapping/etc.) skipped in popularity order until 200 verified each. No pure/browser overlap.",
+  "target": 200,
+  "platformSet": [
+    "elm/bytes",
+    "elm/core",
+    "elm/json",
+    "elm/parser",
+    "elm/random",
+    "elm/regex",
+    "elm/time",
+    "elm/url"
+  ],
   "packages": [
     {
-      "name": "edkv/elm-generic-dict",
+      "name": "elm-community/list-extra",
+      "version": "8.7.0"
+    },
+    {
+      "name": "avh4/elm-color",
       "version": "1.0.0"
     },
     {
-      "name": "alex-tan/postgrest-queries",
-      "version": "7.2.0"
+      "name": "elm-community/maybe-extra",
+      "version": "5.3.0"
     },
     {
-      "name": "jxxcarlson/markdown-to-scripta",
-      "version": "1.0.4"
+      "name": "NoRedInk/elm-json-decode-pipeline",
+      "version": "1.0.1"
     },
     {
-      "name": "malinoff/elm-uniform",
-      "version": "2.0.0"
-    },
-    {
-      "name": "emilianobovetti/list-assoc",
+      "name": "rtfeldman/elm-hex",
       "version": "1.0.0"
     },
     {
-      "name": "tad-lispy/springs",
-      "version": "1.0.5"
+      "name": "rtfeldman/elm-iso8601-date-strings",
+      "version": "1.1.4"
     },
     {
-      "name": "wittjosiah/elm-ordered-dict",
-      "version": "1.0.2"
+      "name": "justinmimbs/date",
+      "version": "4.1.0"
     },
     {
-      "name": "jinjor/elm-map-debug",
+      "name": "ianmackenzie/elm-units",
+      "version": "2.10.0"
+    },
+    {
+      "name": "elm-community/result-extra",
+      "version": "2.4.0"
+    },
+    {
+      "name": "mgold/elm-nonempty-list",
+      "version": "4.2.0"
+    },
+    {
+      "name": "elm-community/dict-extra",
+      "version": "2.4.0"
+    },
+    {
+      "name": "elm-community/random-extra",
+      "version": "3.2.0"
+    },
+    {
+      "name": "miniBill/elm-codec",
+      "version": "2.3.1"
+    },
+    {
+      "name": "danfishgold/base64-bytes",
       "version": "1.1.0"
     },
     {
-      "name": "alexandrepiveteau/elm-gap-buffer",
+      "name": "pzp1997/assoc-list",
       "version": "1.0.0"
     },
     {
-      "name": "jonoabroad/commatosed",
+      "name": "truqu/elm-base64",
+      "version": "2.0.4"
+    },
+    {
+      "name": "miniBill/elm-fast-dict",
+      "version": "1.2.6"
+    },
+    {
+      "name": "elm-community/basics-extra",
+      "version": "4.1.0"
+    },
+    {
+      "name": "the-sett/elm-pretty-printer",
+      "version": "3.3.1"
+    },
+    {
+      "name": "robinheghan/murmur3",
       "version": "1.0.0"
     },
     {
-      "name": "stil4m/structured-writer",
-      "version": "1.0.3"
+      "name": "elm-community/intdict",
+      "version": "3.1.0"
+    },
+    {
+      "name": "the-sett/elm-refine",
+      "version": "1.4.0"
+    },
+    {
+      "name": "ryan-haskell/date-format",
+      "version": "1.0.0"
+    },
+    {
+      "name": "toastal/either",
+      "version": "3.6.3"
+    },
+    {
+      "name": "elm-community/array-extra",
+      "version": "2.6.0"
+    },
+    {
+      "name": "ianmackenzie/elm-float-extra",
+      "version": "1.1.0"
+    },
+    {
+      "name": "chelovek0v/bbase64",
+      "version": "1.0.1"
+    },
+    {
+      "name": "zwilias/elm-utf-tools",
+      "version": "2.0.1"
+    },
+    {
+      "name": "TSFoster/elm-bytes-extra",
+      "version": "1.3.0"
+    },
+    {
+      "name": "arturopala/elm-monocle",
+      "version": "2.2.0"
+    },
+    {
+      "name": "jinjor/elm-diff",
+      "version": "1.0.6"
+    },
+    {
+      "name": "miyamoen/select-list",
+      "version": "4.1.0"
+    },
+    {
+      "name": "the-sett/json-optional",
+      "version": "1.0.0"
+    },
+    {
+      "name": "Chadtech/elm-bool-extra",
+      "version": "2.4.2"
+    },
+    {
+      "name": "K-Adam/elm-dom",
+      "version": "1.0.0"
+    },
+    {
+      "name": "ianmackenzie/elm-1d-parameter",
+      "version": "1.0.1"
+    },
+    {
+      "name": "lue-bird/elm-allowable-state",
+      "version": "1.0.2"
+    },
+    {
+      "name": "lydell/elm-app-url",
+      "version": "1.0.4"
+    },
+    {
+      "name": "SwiftsNamesake/proper-keyboard",
+      "version": "4.0.0"
+    },
+    {
+      "name": "elm-community/easing-functions",
+      "version": "2.0.0"
+    },
+    {
+      "name": "folkertdev/elm-deque",
+      "version": "3.0.1"
+    },
+    {
+      "name": "lue-bird/elm-no-record-type-alias-constructor-function",
+      "version": "1.0.8"
+    },
+    {
+      "name": "the-sett/elm-string-case",
+      "version": "1.0.2"
+    },
+    {
+      "name": "turboMaCk/any-dict",
+      "version": "3.0.0"
+    },
+    {
+      "name": "BrianHicks/elm-trend",
+      "version": "2.1.3"
+    },
+    {
+      "name": "Spaxe/svg-pathd",
+      "version": "3.0.2"
+    },
+    {
+      "name": "danhandrea/elm-time-extra",
+      "version": "1.1.0"
+    },
+    {
+      "name": "danyx23/elm-uuid",
+      "version": "2.1.2"
+    },
+    {
+      "name": "etaque/elm-response",
+      "version": "3.1.0"
+    },
+    {
+      "name": "json-tools/json-value",
+      "version": "1.0.1"
+    },
+    {
+      "name": "lukewestby/elm-string-interpolate",
+      "version": "1.0.4"
+    },
+    {
+      "name": "pilatch/flip",
+      "version": "1.0.0"
     },
     {
       "name": "Janiczek/transform",
       "version": "1.1.1"
     },
     {
+      "name": "TSFoster/elm-tuple-extra",
+      "version": "2.0.0"
+    },
+    {
+      "name": "ccapndave/elm-flat-map",
+      "version": "1.2.0"
+    },
+    {
+      "name": "ccapndave/elm-update-extra",
+      "version": "4.0.0"
+    },
+    {
+      "name": "danyx23/elm-mimetype",
+      "version": "4.0.1"
+    },
+    {
+      "name": "elm-cardano/x-bytes",
+      "version": "1.1.0"
+    },
+    {
+      "name": "hrldcpr/elm-cons",
+      "version": "3.1.0"
+    },
+    {
+      "name": "j-maas/elm-ordered-containers",
+      "version": "1.0.0"
+    },
+    {
+      "name": "lue-bird/elm-partial-or-complete",
+      "version": "1.0.2"
+    },
+    {
+      "name": "stil4m/structured-writer",
+      "version": "1.0.3"
+    },
+    {
+      "name": "turboMaCk/non-empty-list-alias",
+      "version": "1.4.0"
+    },
+    {
+      "name": "ContaSystemer/elm-effects",
+      "version": "1.0.1"
+    },
+    {
+      "name": "Fresheyeball/elm-return",
+      "version": "7.1.0"
+    },
+    {
+      "name": "Janiczek/cmd-extra",
+      "version": "1.1.0"
+    },
+    {
+      "name": "NoRedInk/elm-compare",
+      "version": "2.0.0"
+    },
+    {
+      "name": "UbiqueLambda/elm-with-ui-backend",
+      "version": "1.0.0"
+    },
+    {
+      "name": "allo-media/canopy",
+      "version": "1.0.0"
+    },
+    {
+      "name": "bburdette/toop",
+      "version": "1.2.1"
+    },
+    {
+      "name": "bitsoflogic/elm-radixint",
+      "version": "2.0.0"
+    },
+    {
+      "name": "dmy/elm-pratt-parser",
+      "version": "2.0.0"
+    },
+    {
+      "name": "dwayne/elm-validation",
+      "version": "1.0.0"
+    },
+    {
+      "name": "edkv/elm-generic-dict",
+      "version": "1.0.0"
+    },
+    {
+      "name": "elm-cardano/base64",
+      "version": "1.0.1"
+    },
+    {
+      "name": "elm-cardano/float16",
+      "version": "1.0.0"
+    },
+    {
+      "name": "elm-community/undo-redo",
+      "version": "3.0.0"
+    },
+    {
+      "name": "fredcy/elm-parseint",
+      "version": "2.0.1"
+    },
+    {
+      "name": "georgesboris/elm-attributes",
+      "version": "1.0.0"
+    },
+    {
+      "name": "jluckyiv/elm-utc-date-strings",
+      "version": "1.0.0"
+    },
+    {
+      "name": "joneshf/elm-tagged",
+      "version": "2.1.1"
+    },
+    {
+      "name": "jschomay/elm-bounded-number",
+      "version": "2.1.2"
+    },
+    {
+      "name": "kokizzu/elm-date-format",
+      "version": "1.0.0"
+    },
+    {
+      "name": "kudzu-forest/elm-constant-time-queue",
+      "version": "1.4.0"
+    },
+    {
+      "name": "lovasoa/elm-rolling-list",
+      "version": "1.1.4"
+    },
+    {
+      "name": "prozacchiwawa/elm-urlbase64",
+      "version": "1.0.6"
+    },
+    {
+      "name": "red-g/filter",
+      "version": "2.0.3"
+    },
+    {
+      "name": "red-g/sort",
+      "version": "1.0.1"
+    },
+    {
+      "name": "robinheghan/fnv1a",
+      "version": "1.0.0"
+    },
+    {
+      "name": "rtfeldman/console-print",
+      "version": "1.0.1"
+    },
+    {
+      "name": "rtfeldman/elm-validate",
+      "version": "4.0.2"
+    },
+    {
+      "name": "thaterikperson/elm-strftime",
+      "version": "2.0.2"
+    },
+    {
+      "name": "the-sett/elm-state-machines",
+      "version": "1.0.1"
+    },
+    {
+      "name": "wernerdegroot/listzipper",
+      "version": "4.0.0"
+    },
+    {
+      "name": "Chadtech/return",
+      "version": "1.0.3"
+    },
+    {
+      "name": "ChristophP/elm-i18next",
+      "version": "4.2.1"
+    },
+    {
+      "name": "EngageSoftware/elm-mustache",
+      "version": "1.0.0"
+    },
+    {
+      "name": "FabienHenon/env",
+      "version": "1.0.0"
+    },
+    {
+      "name": "Herteby/enum",
+      "version": "1.0.1"
+    },
+    {
+      "name": "IzumiSy/elm-typed",
+      "version": "4.1.0"
+    },
+    {
+      "name": "Janiczek/elm-vlq",
+      "version": "1.0.0"
+    },
+    {
+      "name": "JohnBugner/elm-matrix",
+      "version": "1.0.0"
+    },
+    {
+      "name": "MackeyRMS/string-util",
+      "version": "1.0.0"
+    },
+    {
+      "name": "NoRedInk/elm-random-general",
+      "version": "1.0.0"
+    },
+    {
+      "name": "NoRedInk/elm-simple-fuzzy",
+      "version": "1.0.3"
+    },
+    {
+      "name": "TSFoster/elm-md5",
+      "version": "2.0.1"
+    },
+    {
+      "name": "abradley2/edn-parser",
+      "version": "2.2.2"
+    },
+    {
+      "name": "andrewMacmurray/elm-delay",
+      "version": "4.0.0"
+    },
+    {
+      "name": "arowM/elm-sequence-id",
+      "version": "1.0.2"
+    },
+    {
+      "name": "bellroy/elm-actor-framework-template",
+      "version": "1.0.0"
+    },
+    {
+      "name": "bonzaico/murmur3",
+      "version": "1.0.0"
+    },
+    {
+      "name": "dillonkearns/elm-xml-encode",
+      "version": "1.0.1"
+    },
+    {
+      "name": "dividat/elm-semver",
+      "version": "2.0.0"
+    },
+    {
+      "name": "edkelly303/elm-nested-tuples",
+      "version": "1.0.3"
+    },
+    {
+      "name": "elm-community/list-split",
+      "version": "1.0.3"
+    },
+    {
+      "name": "elm-toulouse/float16",
+      "version": "1.0.1"
+    },
+    {
+      "name": "fabiommendes/elm-roman",
+      "version": "1.0.0"
+    },
+    {
+      "name": "folkertdev/elm-state",
+      "version": "3.0.1"
+    },
+    {
+      "name": "garados007/triple",
+      "version": "1.0.0"
+    },
+    {
+      "name": "getto-systems/elm-url",
+      "version": "1.0.0"
+    },
+    {
+      "name": "ggb/numeral-elm",
+      "version": "1.5.0"
+    },
+    {
+      "name": "harmboschloo/elm-dict-intersect",
+      "version": "1.0.0"
+    },
+    {
+      "name": "harrysarson/elm-hacky-unique",
+      "version": "1.0.0"
+    },
+    {
+      "name": "janjelinek/creditcard-validation",
+      "version": "1.0.2"
+    },
+    {
+      "name": "jonathanfishbein1/elm-semigroup",
+      "version": "1.0.2"
+    },
+    {
+      "name": "jorgengranseth/elm-string-format",
+      "version": "1.0.1"
+    },
+    {
+      "name": "jweir/elm-iso8601",
+      "version": "7.0.1"
+    },
+    {
+      "name": "lambda-phi/disjoint-set",
+      "version": "3.1.0"
+    },
+    {
+      "name": "lazamar/dict-parser",
+      "version": "1.0.2"
+    },
+    {
+      "name": "lue-bird/elm-and-or",
+      "version": "1.0.0"
+    },
+    {
+      "name": "lue-bird/elm-typed-value",
+      "version": "8.2.0"
+    },
+    {
+      "name": "lukewestby/elm-template",
+      "version": "3.0.0"
+    },
+    {
+      "name": "lynn/elm-arithmetic",
+      "version": "3.0.0"
+    },
+    {
+      "name": "mgold/elm-geojson",
+      "version": "2.0.1"
+    },
+    {
+      "name": "micahhahn/elm-safe-recursion",
+      "version": "2.2.0"
+    },
+    {
+      "name": "miyamoen/tree-with-zipper",
+      "version": "1.0.0"
+    },
+    {
+      "name": "ozmat/elm-validation",
+      "version": "2.2.1"
+    },
+    {
+      "name": "pd9333/elm-time2",
+      "version": "2.1.0"
+    },
+    {
+      "name": "pdamoc/elm-hashids",
+      "version": "1.0.4"
+    },
+    {
+      "name": "periodic/elm-csv",
+      "version": "2.0.2"
+    },
+    {
+      "name": "proda-ai/murmur3",
+      "version": "1.0.0"
+    },
+    {
+      "name": "ralphtq/elm-rdf-n3-quads",
+      "version": "1.0.0"
+    },
+    {
+      "name": "rl-king/elm-iso3166-country-codes",
+      "version": "2.0.1"
+    },
+    {
+      "name": "rluiten/sparsevector",
+      "version": "1.0.4"
+    },
+    {
+      "name": "rluiten/stemmer",
+      "version": "1.0.4"
+    },
+    {
+      "name": "rluiten/stringdistance",
+      "version": "1.0.4"
+    },
+    {
+      "name": "rluiten/trie",
+      "version": "2.1.1"
+    },
+    {
+      "name": "s6o/elm-recase",
+      "version": "1.0.1"
+    },
+    {
+      "name": "samhstn/time-format",
+      "version": "1.0.0"
+    },
+    {
+      "name": "stoeffel/elm-verify",
+      "version": "5.0.0"
+    },
+    {
+      "name": "tad-lispy/springs",
+      "version": "1.0.5"
+    },
+    {
       "name": "techbelly/elm-zmachine",
       "version": "1.1.0"
     },
     {
-      "name": "Orasund/elm-game-ai-minimax",
+      "name": "the-sett/decode-generic",
       "version": "1.0.0"
     },
     {
-      "name": "alexanderkiel/list-selection",
+      "name": "toastal/endo",
+      "version": "1.1.3"
+    },
+    {
+      "name": "tortus/elm-array-2d",
+      "version": "3.0.0"
+    },
+    {
+      "name": "tripokey/elm-fuzzy",
+      "version": "5.2.1"
+    },
+    {
+      "name": "truqu/elm-dictset",
+      "version": "2.1.0"
+    },
+    {
+      "name": "turboMaCk/queue",
+      "version": "1.2.0"
+    },
+    {
+      "name": "uncover-co/elm-submodules",
+      "version": "1.1.0"
+    },
+    {
+      "name": "z5h/jaro-winkler",
+      "version": "1.0.2"
+    },
+    {
+      "name": "zgohr/elm-csv",
+      "version": "1.0.1"
+    },
+    {
+      "name": "zwilias/elm-bytes-parser",
+      "version": "1.0.0"
+    },
+    {
+      "name": "0ui/elm-task-parallel",
+      "version": "2.0.0"
+    },
+    {
+      "name": "1602/json-value",
+      "version": "3.0.1"
+    },
+    {
+      "name": "Janiczek/elm-list-cartesian",
+      "version": "1.0.2"
+    },
+    {
+      "name": "JoelQ/elm-toggleable",
+      "version": "1.1.1"
+    },
+    {
+      "name": "Orasund/elm-game-ai-minimax",
       "version": "1.0.0"
     },
     {
@@ -68,67 +687,99 @@
       "version": "2.0.0"
     },
     {
-      "name": "insurello/elm-swedish-bank-account-number",
-      "version": "2.0.3"
+      "name": "SupercedeTech/elm-validation",
+      "version": "1.0.0"
     },
     {
-      "name": "rluiten/trie",
-      "version": "2.1.1"
+      "name": "abradley2/elm-game-logic",
+      "version": "1.2.1"
+    },
+    {
+      "name": "adauguet/elm-pbkdf2",
+      "version": "1.0.0"
     },
     {
       "name": "adauguet/elm-spanned-string",
       "version": "1.0.1"
     },
     {
-      "name": "0ui/elm-task-parallel",
-      "version": "2.0.0"
-    },
-    {
-      "name": "prozacchiwawa/elm-urlbase64",
-      "version": "1.0.6"
-    },
-    {
-      "name": "b0oh/elm-do",
-      "version": "1.0.0"
-    },
-    {
-      "name": "oaalto/time-values",
-      "version": "2.0.0"
-    },
-    {
-      "name": "arturopala/elm-monocle",
-      "version": "2.2.0"
-    },
-    {
-      "name": "rtfeldman/elm-iso8601-date-strings",
-      "version": "1.1.4"
-    },
-    {
-      "name": "JoelQ/elm-toggleable",
-      "version": "1.1.1"
-    },
-    {
-      "name": "fabiommendes/elm-roman",
-      "version": "1.0.0"
-    },
-    {
-      "name": "red-g/filter",
-      "version": "2.0.3"
-    },
-    {
-      "name": "zgohr/elm-csv",
+      "name": "ahstro/elm-luhn",
       "version": "1.0.1"
     },
     {
-      "name": "Janiczek/elm-list-cartesian",
-      "version": "1.0.2"
+      "name": "alex-tan/postgrest-queries",
+      "version": "7.2.0"
     },
     {
-      "name": "mtamc/and-collect",
+      "name": "alex-tan/task-extra",
+      "version": "1.1.0"
+    },
+    {
+      "name": "alexanderkiel/list-selection",
       "version": "1.0.0"
     },
     {
-      "name": "SupercedeTech/elm-validation",
+      "name": "alexandrepiveteau/elm-gap-buffer",
+      "version": "1.0.0"
+    },
+    {
+      "name": "allo-media/elm-es-simple-query-string",
+      "version": "4.0.0"
+    },
+    {
+      "name": "alma/elm-sms-length",
+      "version": "2.0.1"
+    },
+    {
+      "name": "andre-dietrich/elm-conditional",
+      "version": "1.0.0"
+    },
+    {
+      "name": "andre-dietrich/elm-url-extension",
+      "version": "1.0.0"
+    },
+    {
+      "name": "andreasewering/intl-proxy",
+      "version": "2.0.1"
+    },
+    {
+      "name": "andrewMacmurray/elm-url-query-pipeline",
+      "version": "1.0.1"
+    },
+    {
+      "name": "andys8/elm-geohash",
+      "version": "1.1.3"
+    },
+    {
+      "name": "anmolitor/intl-proxy",
+      "version": "1.0.0"
+    },
+    {
+      "name": "arowM/elm-data-url",
+      "version": "1.1.0"
+    },
+    {
+      "name": "arowM/elm-decimal-char",
+      "version": "2.0.0"
+    },
+    {
+      "name": "arowM/elm-init-builder",
+      "version": "1.1.0"
+    },
+    {
+      "name": "arowM/elm-multiline-string",
+      "version": "1.0.0"
+    },
+    {
+      "name": "arowM/elm-parser-test",
+      "version": "1.1.0"
+    },
+    {
+      "name": "arowM/elm-reference",
+      "version": "1.0.7"
+    },
+    {
+      "name": "b0oh/elm-do",
       "version": "1.0.0"
     },
     {
@@ -136,37 +787,39 @@
       "version": "1.1.0"
     },
     {
-      "name": "NoRedInk/elm-simple-fuzzy",
-      "version": "1.0.3"
+      "name": "insurello/elm-swedish-bank-account-number",
+      "version": "2.0.3"
     },
     {
-      "name": "ntreu14/elm-stack",
+      "name": "jinjor/elm-map-debug",
       "version": "1.1.0"
+    },
+    {
+      "name": "jonoabroad/commatosed",
+      "version": "1.0.0"
+    },
+    {
+      "name": "jxxcarlson/markdown-to-scripta",
+      "version": "1.0.4"
     },
     {
       "name": "kkpoon/elm-auth0-urlparser",
       "version": "2.0.1"
     },
     {
-      "name": "elm-community/list-extra",
-      "version": "8.7.0"
-    },
-    {
-      "name": "1602/json-value",
-      "version": "3.0.1"
+      "name": "malinoff/elm-uniform",
+      "version": "2.0.0"
     },
     {
       "name": "mpizenberg/elm-placeholder-pkg",
       "version": "1.0.0"
-    },
-    {
-      "name": "rtfeldman/elm-hex",
-      "version": "1.0.0"
     }
   ],
-  "seeds": [
-    42,
-    43,
-    44
-  ]
+  "meta": {
+    "pureVerified": 200,
+    "browserVerified": 200,
+    "pureCandidates": 620,
+    "browserCandidates": 344,
+    "updatedAt": "2026-07-12T14:51:33.568723Z"
+  }
 }

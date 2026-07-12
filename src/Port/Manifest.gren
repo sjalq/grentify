@@ -52,15 +52,37 @@ build options =
                                     (\platform ->
                                         let
                                             spec =
-                                                { platform = platform
-                                                , name = options.targetName
-                                                , summary = options.source.summary
-                                                , license = options.source.license
-                                                , version = Elm.Semver.versionToString options.source.version
-                                                , exposedModules = GrenManifest.ExposedArray options.source.exposedModules
-                                                , grenVersion = "0.6.0 <= v < 0.7.0"
-                                                , dependencies = dependencies
-                                                }
+                                                if options.source.isApplication then
+                                                    { kind = GrenManifest.ApplicationKind
+                                                    , platform = platform
+                                                    , name = options.targetName
+                                                    , summary = options.source.summary
+                                                    , license = options.source.license
+                                                    , version = Elm.Semver.versionToString options.source.version
+                                                    , exposedModules = GrenManifest.ExposedArray options.source.exposedModules
+                                                    -- Applications pin an exact compiler version.
+                                                    , grenVersion = "0.6.6"
+                                                    , dependencies = dependencies
+                                                    , sourceDirectories =
+                                                        if Array.isEmpty options.source.sourceDirectories then
+                                                            [ "src" ]
+
+                                                        else
+                                                            options.source.sourceDirectories
+                                                    }
+
+                                                else
+                                                    { kind = GrenManifest.PackageKind
+                                                    , platform = platform
+                                                    , name = options.targetName
+                                                    , summary = options.source.summary
+                                                    , license = options.source.license
+                                                    , version = Elm.Semver.versionToString options.source.version
+                                                    , exposedModules = GrenManifest.ExposedArray options.source.exposedModules
+                                                    , grenVersion = "0.6.0 <= v < 0.7.0"
+                                                    , dependencies = dependencies
+                                                    , sourceDirectories = [ "src" ]
+                                                    }
                                         in
                                         GrenManifest.encode spec
                                             |> Result.map
@@ -129,6 +151,8 @@ addMapped targetName details dependencies =
         Ok dependencies
 
     else
+        -- Applications pin exact versions; packages use ranges. Detect via
+        -- whether the gren version string already looks like a pin.
         setDependency details.grenPackage (GrenManifest.VersionRange (mappedRange details.grenVersion)) dependencies
 
 

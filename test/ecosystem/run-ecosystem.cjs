@@ -13,9 +13,9 @@ const catalog = JSON.parse(
   fs.readFileSync(path.join(__dirname, "packages.json"), "utf8"),
 );
 const packages = catalog.packages;
-if (!Array.isArray(packages) || packages.length < 20) {
+if (!Array.isArray(packages) || packages.length < 200) {
   console.error(
-    `ecosystem catalog must list at least 20 packages, got ${packages?.length}`,
+    `ecosystem catalog must list at least 200 packages, got ${packages?.length}`,
   );
   process.exit(1);
 }
@@ -111,7 +111,7 @@ if (failed > 0) {
   process.exit(1);
 }
 
-const seeds = catalog.seeds || catalog.seed;
+const method = catalog.methodology || catalog.selection || catalog.seed;
 console.log(
-  `\nPASS: ${packages.length}/${packages.length} ecosystem packages ported and verified (seeds ${JSON.stringify(seeds)})`,
+  `\nPASS: ${packages.length}/${packages.length} ecosystem packages ported and verified (${typeof method === "string" ? method : JSON.stringify(method)})`,
 );

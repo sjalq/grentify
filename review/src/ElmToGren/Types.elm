@@ -16,7 +16,7 @@ module ElmToGren.Types exposing
     )
 
 import Elm.Syntax.Range exposing (Range)
-
+import Json.Encode as Encode
 
 type EditKind
     = CaseKeyword
@@ -115,6 +115,9 @@ type alias ModuleExtraction =
     , references : List ResolvedReference
     , importFacts : List ImportFact
     , detectedPlatform : Platform
+    , -- Phase 1: resolved simplified AST for the host pipeline (Json.Encode.Value).
+      -- Encoded as a JSON object; host decodes independently of edit application.
+      ast : Encode.Value
     }
 
 

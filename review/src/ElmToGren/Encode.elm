@@ -40,6 +40,7 @@ moduleExtraction value =
         , ( "references", Encode.list resolvedReference value.references )
         , ( "importFacts", Encode.list importFact value.importFacts )
         , ( "detectedPlatform", Encode.string (Types.platformToString value.detectedPlatform) )
+        , ( "ast", value.ast )
         ]
 
 

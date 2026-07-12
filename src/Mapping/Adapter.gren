@@ -40,16 +40,21 @@ all =
     , DictAdapter
     , HtmlAttributesAdapter
     , HtmlEventsAdapter
+    , HtmlKeyedAdapter
+    , HttpAdapter
     , JsonDecodeAdapter
     , JsonEncodeAdapter
     , ListAdapter
+    , MarkdownAdapter
     , MaybeAdapter
     , RandomAdapter
     , ResultAdapter
     , SetAdapter
     , StringAdapter
+    , SvgKeyedAdapter
     , TaskAdapter
     , TupleAdapter
+    , VirtualDomKeyedAdapter
     ]
 
 
@@ -208,6 +213,12 @@ sourceFor adapterId =
         HtmlEventsAdapter ->
             htmlEventsSource
 
+        HtmlKeyedAdapter ->
+            htmlKeyedSource
+
+        HttpAdapter ->
+            httpSource
+
         JsonDecodeAdapter ->
             jsonDecodeSource
 
@@ -216,6 +227,9 @@ sourceFor adapterId =
 
         ListAdapter ->
             listSource
+
+        MarkdownAdapter ->
+            markdownSource
 
         MaybeAdapter ->
             maybeSource
@@ -232,11 +246,17 @@ sourceFor adapterId =
         StringAdapter ->
             stringSource
 
+        SvgKeyedAdapter ->
+            svgKeyedSource
+
         TaskAdapter ->
             taskSource
 
         TupleAdapter ->
             tupleSource
+
+        VirtualDomKeyedAdapter ->
+            virtualDomKeyedSource
 
 
 {-| Elm TEA returns `(model, Cmd msg)` which ports to `{ first, second }`.
@@ -393,6 +413,324 @@ custom :
     -> Attribute msg
 custom event decoder =
     Html.Events.custom event decoder
+"""
+
+
+{-| Elm Keyed nodes take `List (String, Html msg)` which becomes
+`Array { first : String, second : Html msg }`. Gren expects
+`Array { key : String, node : Html msg }`.
+-}
+htmlKeyedSource : String
+htmlKeyedSource =
+    """
+module ElmToGren.Compat.Html.Keyed exposing (node, ol, ul)
+
+import Array exposing (Array)
+import Html exposing (Attribute, Html)
+import Html.Keyed as Keyed
+
+
+keyedChildren : Array { first : String, second : Html msg } -> Array { key : String, node : Html msg }
+keyedChildren entries =
+    Array.map (\\entry -> { key = entry.first, node = entry.second }) entries
+
+
+node : String -> Array (Attribute msg) -> Array { first : String, second : Html msg } -> Html msg
+node tag attributes entries =
+    Keyed.node tag attributes (keyedChildren entries)
+
+
+ol : Array (Attribute msg) -> Array { first : String, second : Html msg } -> Html msg
+ol attributes entries =
+    Keyed.ol attributes (keyedChildren entries)
+
+
+ul : Array (Attribute msg) -> Array { first : String, second : Html msg } -> Html msg
+ul attributes entries =
+    Keyed.ul attributes (keyedChildren entries)
+"""
+
+
+svgKeyedSource : String
+svgKeyedSource =
+    """
+module ElmToGren.Compat.Svg.Keyed exposing (node)
+
+import Array exposing (Array)
+import Svg exposing (Attribute, Svg)
+import Svg.Keyed as Keyed
+
+
+node : String -> Array (Attribute msg) -> Array { first : String, second : Svg msg } -> Svg msg
+node tag attributes entries =
+    Keyed.node tag attributes
+        (Array.map (\\entry -> { key = entry.first, node = entry.second }) entries)
+"""
+
+
+{-| Elm keyed nodes pass `List (String, node)`. After the tuple rewrite that is
+`Array { first, second }`. Gren VirtualDom expects `{ key, node }`.
+-}
+virtualDomKeyedSource : String
+virtualDomKeyedSource =
+    """
+module ElmToGren.Compat.VirtualDom.Keyed exposing (keyedNode, keyedNodeNS)
+
+import Array exposing (Array)
+import VirtualDom exposing (Attribute, Node)
+
+
+keyedChildren : Array { first : String, second : Node msg } -> Array { key : String, node : Node msg }
+keyedChildren entries =
+    Array.map (\\entry -> { key = entry.first, node = entry.second }) entries
+
+
+keyedNode : String -> Array (Attribute msg) -> Array { first : String, second : Node msg } -> Node msg
+keyedNode tag attributes entries =
+    VirtualDom.keyedNode tag attributes (keyedChildren entries)
+
+
+keyedNodeNS : String -> String -> Array (Attribute msg) -> Array { first : String, second : Node msg } -> Node msg
+keyedNodeNS namespace tag attributes entries =
+    VirtualDom.keyedNodeNS namespace tag attributes (keyedChildren entries)
+"""
+
+
+{-| Elm 0.19 `elm/http` 1.x used `Request a` + `send` and positional `get`/`post`.
+Gren (and Elm http 2.x) use record configs and expect-in-request. This adapter
+restores the 1.x surface on top of Gren's Http.
+-}
+httpSource : String
+httpSource =
+    """
+module ElmToGren.Compat.Http exposing
+    ( Request
+    , Expect
+    , Error(..)
+    , Response
+    , get
+    , post
+    , request
+    , send
+    , toTask
+    , expectString
+    , expectJson
+    )
+
+import Array exposing (Array)
+import Dict exposing (Dict)
+import Http
+import Json.Decode as Decode
+import Maybe exposing (Maybe(..))
+import Result exposing (Result(..))
+import Task exposing (Task)
+
+
+{-| elm/http 1.x error surface (Response body on BadStatus/BadPayload).
+-}
+type Error
+    = BadUrl String
+    | Timeout
+    | NetworkError
+    | BadStatus (Response String)
+    | BadPayload { message : String, response : Response String }
+
+
+type alias Response body =
+    { url : String
+    , status : { code : Int, message : String }
+    , headers : Dict String String
+    , body : body
+    }
+
+
+type Expect a
+    = ExpectJson (Decode.Decoder a)
+
+
+type Request a
+    = Request
+        { method : String
+        , headers : Array Http.Header
+        , url : String
+        , body : Http.Body
+        , expect : Expect a
+        , timeout : Maybe Float
+        }
+
+
+expectString : Expect String
+expectString =
+    ExpectJson Decode.string
+
+
+expectJson : Decode.Decoder a -> Expect a
+expectJson decoder =
+    ExpectJson decoder
+
+
+get : String -> Decode.Decoder a -> Request a
+get url decoder =
+    request
+        { method = "GET"
+        , headers = []
+        , url = url
+        , body = Http.emptyBody
+        , expect = expectJson decoder
+        , timeout = Nothing
+        , withCredentials = False
+        }
+
+
+post : String -> Http.Body -> Decode.Decoder a -> Request a
+post url body decoder =
+    request
+        { method = "POST"
+        , headers = []
+        , url = url
+        , body = body
+        , expect = expectJson decoder
+        , timeout = Nothing
+        , withCredentials = False
+        }
+
+
+request :
+    { method : String
+    , headers : Array Http.Header
+    , url : String
+    , body : Http.Body
+    , expect : Expect a
+    , timeout : Maybe Float
+    , withCredentials : Bool
+    }
+    -> Request a
+request config =
+    Request
+        { method = config.method
+        , headers = config.headers
+        , url = config.url
+        , body = config.body
+        , expect = config.expect
+        , timeout = config.timeout
+        }
+
+
+send : (Result Error a -> msg) -> Request a -> Cmd msg
+send toMsg (Request config) =
+    let
+        (ExpectJson decoder) =
+            config.expect
+    in
+    Http.request
+        { method = config.method
+        , headers = config.headers
+        , url = config.url
+        , body = config.body
+        , expect =
+            Http.expectStringResponse toMsg (interpretResponse decoder)
+        , timeout = config.timeout
+        , tracker = Nothing
+        }
+
+
+toTask : Request a -> Task Error a
+toTask (Request config) =
+    let
+        (ExpectJson decoder) =
+            config.expect
+    in
+    Http.task
+        { method = config.method
+        , headers = config.headers
+        , url = config.url
+        , body = config.body
+        , resolver = Http.stringResolver (interpretResponse decoder)
+        , timeout = config.timeout
+        }
+
+
+interpretResponse : Decode.Decoder a -> Http.Response String -> Result Error a
+interpretResponse decoder response =
+    when response is
+        Http.BadUrl_ url ->
+            Err (BadUrl url)
+
+        Http.Timeout_ ->
+            Err Timeout
+
+        Http.NetworkError_ ->
+            Err NetworkError
+
+        Http.BadStatus_ { metadata, body } ->
+            Err
+                (BadStatus
+                    { url = metadata.url
+                    , status = { code = metadata.statusCode, message = metadata.statusText }
+                    , headers = metadata.headers
+                    , body = body
+                    }
+                )
+
+        Http.GoodStatus_ { metadata, body } ->
+            when Decode.decodeString decoder body is
+                Ok value ->
+                    Ok value
+
+                Err decodeError ->
+                    Err
+                        (BadPayload
+                            { message = Decode.errorToString decodeError
+                            , response =
+                                { url = metadata.url
+                                , status = { code = metadata.statusCode, message = metadata.statusText }
+                                , headers = metadata.headers
+                                , body = body
+                                }
+                            }
+                        )
+"""
+
+
+{-| elm-explorations/markdown is a kernel package. For application ports we emit
+a pure-Gren stub that renders the raw markdown string as text so apps compile.
+Runtime HTML rendering of markdown is out of scope for the port pipeline.
+-}
+markdownSource : String
+markdownSource =
+    """
+module ElmToGren.Compat.Markdown exposing (toHtml, toHtmlWith, defaultOptions, Options)
+
+import Array exposing (Array)
+import Html exposing (Attribute, Html)
+import Maybe exposing (Maybe(..))
+
+
+type alias Options =
+    { githubFlavored : Maybe { tables : Bool, breaks : Bool }
+    , defaultHighlighting : Maybe String
+    , sanitize : Bool
+    , smartypants : Bool
+    }
+
+
+defaultOptions : Options
+defaultOptions =
+    { githubFlavored = Just { tables = False, breaks = False }
+    , defaultHighlighting = Nothing
+    , sanitize = True
+    , smartypants = False
+    }
+
+
+toHtml : Array (Attribute msg) -> String -> Html msg
+toHtml attributes markdown =
+    toHtmlWith defaultOptions attributes markdown
+
+
+toHtmlWith : Options -> Array (Attribute msg) -> String -> Html msg
+toHtmlWith _ attributes markdown =
+    Html.div attributes [ Html.text markdown ]
 """
 
 

@@ -21,8 +21,10 @@ import Elm.Syntax.Pattern exposing (Pattern(..))
 import Elm.Syntax.Range exposing (Location, Range)
 import Elm.Syntax.Type exposing (ValueConstructor)
 import Elm.Syntax.TypeAnnotation exposing (TypeAnnotation(..))
+import ElmToGren.AstEncode as AstEncode
 import ElmToGren.Encode as Encode
 import ElmToGren.Types as Types exposing (ConstructorInfo, Diagnostic, EditKind, ModuleExtraction, Platform, RecordAliasInfo, SourceEdit)
+import Json.Encode as JsonEncode
 import Review.ModuleNameLookupTable as ModuleNameLookupTable exposing (ModuleNameLookupTable)
 import Review.Rule as Rule exposing (Rule)
 
@@ -71,6 +73,8 @@ type alias ModuleContext =
     , imports : List ImportInfo
     , lookupTable : ModuleNameLookupTable
     , detectedPlatform : Platform
+    , -- Phase 1: resolved simplified AST snapshot for the host print path.
+      ast : JsonEncode.Value
     }
 
 
@@ -135,6 +139,8 @@ fromProjectToModule =
             , imports = List.map (Node.value >> importInfo) ast.imports
             , lookupTable = lookupTable
             , detectedPlatform = Types.Common
+            , -- Phase 1: resolved AST snapshot for the host pipeline.
+              ast = AstEncode.encodeFile lookupTable ast
             }
         )
         |> Rule.withFilePath
@@ -161,6 +167,7 @@ fromModuleToProject =
                     , references = List.reverse context.references
                     , importFacts = List.reverse context.importFacts
                     , detectedPlatform = context.detectedPlatform
+                    , ast = context.ast
                     }
             , definitions = Dict.singleton context.moduleName context.ownDefinitions
             }
@@ -254,13 +261,9 @@ diagnosticsForModuleDefinition : Node Module -> List Diagnostic
 diagnosticsForModuleDefinition (Node range moduleDefinition) =
     case moduleDefinition of
         PortModule _ ->
-            [ { code = "UNMAPPED_MODULE"
-              , severity = Types.Error
-              , message = "Elm port modules require an explicit Gren platform boundary."
-              , range = Just range
-              , help = Just "Replace ports with a Gren Node or browser API and provide a mapping for that boundary."
-              }
-            ]
+            -- Port modules are valid application targets: keep declarations and
+            -- let the Gren app emitter preserve them as Elm-side interop only.
+            []
 
         EffectModule _ ->
             [ { code = "UNSUPPORTED_KERNEL"
@@ -568,17 +571,11 @@ declarationVisitor (Node range declaration) direction context =
                     ( [], withConstructorShapes )
 
                 PortDeclaration signature ->
+                    -- Keep port declarations intact for application interop.
                     ( []
                     , context
                         |> addReservedIdentifierNode signature.name
                         |> collectTypeAnnotation signature.typeAnnotation
-                        |> addDiagnostic
-                            { code = "UNMAPPED_SYMBOL"
-                            , severity = Types.Error
-                            , message = "Elm ports need a Gren-specific implementation."
-                            , range = Just range
-                            , help = Just "Replace this port with an explicit Gren Node or browser API boundary."
-                            }
                     )
 
                 Destructuring pattern _ ->
@@ -660,9 +657,15 @@ expressionVisitor ((Node range expression) as expressionNode) context =
                 ( [], context )
 
         RecordUpdateExpression recordName setters ->
+            -- The base of a record update (`{ defaultOptions | ... }`) is a
+            -- bare value reference and must be rewritten when its module is
+            -- mapped (e.g. Markdown.defaultOptions → Compat).
             ( []
             , setters
-                |> List.foldl collectRecordSetterName (addReservedIdentifierNode recordName context)
+                |> List.foldl collectRecordSetterName
+                    (addResolvedReference recordName (Node.value recordName) False
+                        (addReservedIdentifierNode recordName context)
+                    )
             )
 
         FunctionOrValue moduleParts name ->
@@ -698,26 +701,63 @@ expressionVisitor ((Node range expression) as expressionNode) context =
                     withReference =
                         addResolvedReference expressionNode name False context
                 in
-                case resolveReference expressionNode moduleParts name withReference of
-                    Resolved (ConstructorReference constructor) ->
-                        if constructor.arity > 1 then
-                            ( [], addEdit Types.CustomConstructor range (constructorFunction context.extract range constructor.arity) withReference )
+                case namedPlatformPayloadFields moduleParts name of
+                    Just fieldNames ->
+                        ( []
+                        , addEdit Types.CustomConstructor
+                            range
+                            (namedConstructorFunction context.extract range fieldNames)
+                            withReference
+                        )
 
-                        else
-                            ( [], withReference )
+                    Nothing ->
+                        case resolveReference expressionNode moduleParts name withReference of
+                            Resolved (ConstructorReference constructor) ->
+                                if constructor.arity > 1 then
+                                    ( [], addEdit Types.CustomConstructor range (constructorFunction context.extract range constructor.arity) withReference )
 
-                    Resolved (RecordAliasReference aliasInfo) ->
-                        if List.isEmpty aliasInfo.fields then
-                            ( [], addEdit Types.RecordAliasConstructor range "{}" withReference )
+                                else
+                                    ( [], withReference )
 
-                        else
-                            ( [], addEdit Types.RecordAliasConstructor range (recordAliasFunction aliasInfo.fields) withReference )
+                            Resolved (RecordAliasReference aliasInfo) ->
+                                if List.isEmpty aliasInfo.fields then
+                                    ( [], addEdit Types.RecordAliasConstructor range "{}" withReference )
 
-                    AmbiguousReference modules ->
-                        ( [], addAmbiguousReferenceDiagnostic range name modules withReference )
+                                else
+                                    ( [], addEdit Types.RecordAliasConstructor range (recordAliasFunction aliasInfo.fields) withReference )
 
-                    UnresolvedReference ->
-                        ( [], withReference )
+                            AmbiguousReference modules ->
+                                ( [], addAmbiguousReferenceDiagnostic range name modules withReference )
+
+                            UnresolvedReference ->
+                                -- Bare Json.Decode.Error constructors after exposing (..)
+                                case ( name, True ) of
+                                    ( "Field", True ) ->
+                                        ( []
+                                        , addEdit Types.CustomConstructor
+                                            range
+                                            (namedConstructorFunction context.extract range [ "name", "error" ])
+                                            withReference
+                                        )
+
+                                    ( "Index", True ) ->
+                                        ( []
+                                        , addEdit Types.CustomConstructor
+                                            range
+                                            (namedConstructorFunction context.extract range [ "index", "error" ])
+                                            withReference
+                                        )
+
+                                    ( "Failure", True ) ->
+                                        ( []
+                                        , addEdit Types.CustomConstructor
+                                            range
+                                            (namedConstructorFunction context.extract range [ "message", "value" ])
+                                            withReference
+                                        )
+
+                                    _ ->
+                                        ( [], withReference )
 
         _ ->
             -- Child expressions are visited by elm-review.  Keeping this rule
@@ -751,7 +791,12 @@ collectCaseExpression range caseBlock context =
         shortMatchFallback =
             nothingMatchFallback "elm-to-gren: multi-cons did not match" caseBlock.cases withKeyword
     in
-    if
+    -- Total list-shape compiler: length dispatch covers exact multi-depth
+    -- lattices and open multi with named rests in one generic mechanism.
+    if isPureListShapeCase patterns then
+        collectPureListShapeCase range caseBlock context
+
+    else if
         List.any isUnconsPattern patterns
             && List.all canRewriteArrayCasePattern patterns
             && multiConsFallthroughOk patterns
@@ -759,7 +804,7 @@ collectCaseExpression range caseBlock context =
             && multiConsNestFallbackOk patterns caseBlock.cases
     then
         caseBlock.cases
-            |> List.foldl (collectArrayCase shortMatchFallback)
+            |> List.foldl (collectArrayCase caseBlock.cases shortMatchFallback)
                 (addCallAroundExpression Types.ListConsExpression "Array.popFirst" caseBlock.expression withKeyword)
 
     else if
@@ -778,7 +823,7 @@ collectCaseExpression range caseBlock context =
             && multiConsNestFallbackOk (wrappedListShapePatterns patterns) caseBlock.cases
     then
         caseBlock.cases
-            |> List.foldl (collectMaybeUnconsCase shortMatchFallback)
+            |> List.foldl (collectMaybeUnconsCase caseBlock.cases shortMatchFallback)
                 (addCallAroundExpression Types.ListConsExpression "Maybe.map Array.popFirst" caseBlock.expression withKeyword)
 
     else if
@@ -788,7 +833,7 @@ collectCaseExpression range caseBlock context =
             && multiConsNestFallbackOk (wrappedListShapePatterns patterns) caseBlock.cases
     then
         caseBlock.cases
-            |> List.foldl (collectResultUnconsCase shortMatchFallback)
+            |> List.foldl (collectResultUnconsCase caseBlock.cases shortMatchFallback)
                 (addCallAroundExpression Types.ListConsExpression "Result.map Array.popFirst" caseBlock.expression withKeyword)
 
     else if isCtorEmbeddedUnconsCase patterns && embeddedUnconsFallbackOk caseBlock.cases then
@@ -798,6 +843,975 @@ collectCaseExpression range caseBlock context =
 
     else
         List.foldl collectPattern withKeyword patterns
+
+
+{-| Every arm is a pure list shape with simple heads: `[]`, fixed lists,
+`h1 :: h2 :: … :: rest` (vars/`_` heads), or catch-all. No ctor/tuple nesting.
+-}
+isPureListShapeCase : List (Node Pattern) -> Bool
+isPureListShapeCase patterns =
+    List.any isListShapeMatch patterns
+        && List.all isPureListShapePattern patterns
+
+
+isListShapeMatch : Node Pattern -> Bool
+isListShapeMatch patternNode =
+    case Node.value (unwrapParenthesized patternNode) of
+        ListPattern _ ->
+            True
+
+        UnConsPattern _ _ ->
+            True
+
+        AsPattern inner _ ->
+            case asUnconsParts inner of
+                Just _ ->
+                    True
+
+                Nothing ->
+                    parseConsChain (unwrapParenthesized inner) /= Nothing
+
+        _ ->
+            False
+
+
+isPureListShapePattern : Node Pattern -> Bool
+isPureListShapePattern patternNode =
+    case Node.value (unwrapParenthesized patternNode) of
+        AllPattern ->
+            True
+
+        VarPattern _ ->
+            True
+
+        ListPattern members ->
+            not (List.any patternContainsUncons members)
+                && List.all isSimpleListHead members
+
+        UnConsPattern _ _ ->
+            case parseConsChain (unwrapParenthesized patternNode) of
+                Just chain ->
+                    List.all isSimpleListHead chain.heads
+                        && isSimpleRest chain.rest
+
+                Nothing ->
+                    False
+
+        AsPattern inner asName ->
+            case asUnconsParts inner of
+                Just parts ->
+                    isSimpleListHead parts.left
+                        && isSimpleRest parts.right
+
+                Nothing ->
+                    case parseConsChain (unwrapParenthesized inner) of
+                        Just chain ->
+                            List.all isSimpleListHead chain.heads
+                                && isSimpleRest chain.rest
+
+                        Nothing ->
+                            case Node.value (unwrapParenthesized inner) of
+                                AllPattern ->
+                                    True
+
+                                VarPattern _ ->
+                                    True
+
+                                _ ->
+                                    False
+
+        ParenthesizedPattern inner ->
+            isPureListShapePattern inner
+
+        _ ->
+            False
+
+
+isSimpleListHead : Node Pattern -> Bool
+isSimpleListHead patternNode =
+    case Node.value (unwrapParenthesized patternNode) of
+        VarPattern _ ->
+            True
+
+        AllPattern ->
+            True
+
+        _ ->
+            False
+
+
+isSimpleRest : Node Pattern -> Bool
+isSimpleRest patternNode =
+    case Node.value (unwrapParenthesized patternNode) of
+        VarPattern _ ->
+            True
+
+        AllPattern ->
+            True
+
+        ListPattern [] ->
+            True
+
+        AsPattern inner _ ->
+            isSimpleRest (unwrapParenthesized inner)
+
+        ParenthesizedPattern inner ->
+            isSimpleRest inner
+
+        _ ->
+            False
+
+
+type alias PureListArm =
+    { minLength : Int
+    , isOpen : Bool
+    , isCatchAll : Bool
+    , heads : List String
+    , restName : Maybe String
+    , asName : Maybe String
+    , body : Node Expression
+    }
+
+
+{-| Compile a pure list case via `Array.length` dispatch. Each arm becomes an
+exact length (or final open `_`), with heads bound by nested `popFirst` and
+named rests bound to the remaining array. One mechanism covers exact lattices
+and open multi-cons with named tails.
+-}
+collectPureListShapeCase : Range -> Elm.Syntax.Expression.CaseBlock -> ModuleContext -> ModuleContext
+collectPureListShapeCase range caseBlock context =
+    case List.filterMap (parsePureListArm context) caseBlock.cases of
+        [] ->
+            List.foldl collectPattern context (List.map Tuple.first caseBlock.cases)
+
+        arms ->
+            let
+                scrutinee =
+                    parenthesizeExpr context caseBlock.expression
+
+                rendered =
+                    renderPureListCase context scrutinee arms range.start.column
+
+                -- Reserved renames on heads/bodies only. Do NOT collectPattern on
+                -- uncons arms (that emits refuse diagnostics we are compiling away).
+                withScans =
+                    List.foldl
+                        (\( patternNode, body ) ctx ->
+                            collectPureListArmNames patternNode ctx
+                                |> (\c -> collectExpressionShallow body c)
+                        )
+                        context
+                        caseBlock.cases
+            in
+            addEdit Types.ListConsExpression range rendered withScans
+
+
+{-| Reserved-identifier pass for pure list arms without refusing `::`.
+-}
+collectPureListArmNames : Node Pattern -> ModuleContext -> ModuleContext
+collectPureListArmNames patternNode context =
+    case Node.value (unwrapParenthesized patternNode) of
+        VarPattern name ->
+            addReservedIdentifier (Node.range patternNode) name context
+
+        AllPattern ->
+            context
+
+        ListPattern members ->
+            List.foldl collectPureListArmNames context members
+
+        UnConsPattern left right ->
+            collectPureListArmNames right (collectPureListArmNames left context)
+
+        AsPattern inner asName ->
+            collectPureListArmNames inner context
+                |> addReservedIdentifierNode asName
+
+        ParenthesizedPattern inner ->
+            collectPureListArmNames inner context
+
+        NamedPattern _ args ->
+            List.foldl collectPureListArmNames context args
+
+        TuplePattern members ->
+            List.foldl collectPureListArmNames context members
+
+        RecordPattern fields ->
+            List.foldl addReservedIdentifierNode context fields
+
+        _ ->
+            context
+
+
+parsePureListArm : ModuleContext -> ( Node Pattern, Node Expression ) -> Maybe PureListArm
+parsePureListArm context ( patternNode, body ) =
+    case Node.value (unwrapParenthesized patternNode) of
+        AllPattern ->
+            Just
+                { minLength = 0
+                , isOpen = True
+                , isCatchAll = True
+                , heads = []
+                , restName = Nothing
+                , asName = Nothing
+                , body = body
+                }
+
+        VarPattern name ->
+            Just
+                { minLength = 0
+                , isOpen = True
+                , isCatchAll = True
+                , heads = []
+                , restName = Nothing
+                , asName = Just name
+                , body = body
+                }
+
+        ListPattern members ->
+            if List.any patternContainsUncons members then
+                Nothing
+
+            else
+                Just
+                    { minLength = List.length members
+                    , isOpen = False
+                    , isCatchAll = False
+                    , heads = List.map (simpleHeadName context) members
+                    , restName = Nothing
+                    , asName = Nothing
+                    , body = body
+                    }
+
+        UnConsPattern _ _ ->
+            parseConsChain (unwrapParenthesized patternNode)
+                |> Maybe.andThen (consChainToArm context Nothing body)
+
+        AsPattern inner asName ->
+            case asUnconsParts inner of
+                Just parts ->
+                    Just
+                        { minLength = 1
+                        , isOpen = True
+                        , isCatchAll = False
+                        , heads = [ simpleHeadName context parts.left ]
+                        , restName = simpleRestName parts.right
+                        , asName = Just (Node.value asName)
+                        , body = body
+                        }
+
+                Nothing ->
+                    case parseConsChain (unwrapParenthesized inner) of
+                        Just chain ->
+                            consChainToArm context (Just (Node.value asName)) body chain
+
+                        Nothing ->
+                            case Node.value (unwrapParenthesized inner) of
+                                AllPattern ->
+                                    Just
+                                        { minLength = 0
+                                        , isOpen = True
+                                        , isCatchAll = True
+                                        , heads = []
+                                        , restName = Nothing
+                                        , asName = Just (Node.value asName)
+                                        , body = body
+                                        }
+
+                                VarPattern name ->
+                                    Just
+                                        { minLength = 0
+                                        , isOpen = True
+                                        , isCatchAll = True
+                                        , heads = []
+                                        , restName = Nothing
+                                        , asName = Just name
+                                        , body = body
+                                        }
+
+                                _ ->
+                                    Nothing
+
+        ParenthesizedPattern inner ->
+            parsePureListArm context ( inner, body )
+
+        _ ->
+            Nothing
+
+
+consChainToArm : ModuleContext -> Maybe String -> Node Expression -> ConsChain -> Maybe PureListArm
+consChainToArm context asName body chain =
+    let
+        open =
+            not (isEmptyListRest chain.rest)
+    in
+    Just
+        { minLength = List.length chain.heads
+        , isOpen = open
+        , isCatchAll = False
+        , heads = List.map (simpleHeadName context) chain.heads
+        , restName =
+            if open then
+                simpleRestName chain.rest
+
+            else
+                Nothing
+        , asName = asName
+        , body = body
+        }
+
+
+simpleHeadName : ModuleContext -> Node Pattern -> String
+simpleHeadName context patternNode =
+    case Node.value (unwrapParenthesized patternNode) of
+        VarPattern name ->
+            name
+
+        AllPattern ->
+            "_"
+
+        _ ->
+            grenPatternText context patternNode
+
+
+simpleRestName : Node Pattern -> Maybe String
+simpleRestName patternNode =
+    case Node.value (unwrapParenthesized patternNode) of
+        VarPattern name ->
+            Just name
+
+        AllPattern ->
+            Nothing
+
+        ListPattern [] ->
+            Nothing
+
+        AsPattern inner asName ->
+            case simpleRestName (unwrapParenthesized inner) of
+                Just name ->
+                    Just name
+
+                Nothing ->
+                    Just (Node.value asName)
+
+        ParenthesizedPattern inner ->
+            simpleRestName inner
+
+        _ ->
+            Nothing
+
+
+{-| Render a scrutinee expression as Gren, including `::` → `Array.pushFirst`.
+Whole-case replacement would otherwise leave Elm cons in the bound scrutinee.
+-}
+parenthesizeExpr : ModuleContext -> Node Expression -> String
+parenthesizeExpr context exprNode =
+    let
+        text =
+            grenExprText context exprNode
+
+        needsParens =
+            case Node.value exprNode of
+                FunctionOrValue _ _ ->
+                    False
+
+                Integer _ ->
+                    False
+
+                Floatable _ ->
+                    False
+
+                Literal _ ->
+                    False
+
+                Hex _ ->
+                    False
+
+                ParenthesizedExpression _ ->
+                    False
+
+                _ ->
+                    True
+    in
+    if needsParens then
+        "(" ++ text ++ ")"
+
+    else
+        text
+
+
+grenExprText : ModuleContext -> Node Expression -> String
+grenExprText context (Node range expression) =
+    case expression of
+        OperatorApplication "::" _ left right ->
+            "Array.pushFirst ("
+                ++ grenExprText context left
+                ++ ") ("
+                ++ grenExprText context right
+                ++ ")"
+
+        ParenthesizedExpression inner ->
+            "(" ++ grenExprText context inner ++ ")"
+
+        TupledExpression members ->
+            let
+                fields =
+                    members
+                        |> List.indexedMap
+                            (\index member ->
+                                fieldLabel index ++ " = " ++ grenExprText context member
+                            )
+                        |> String.join ", "
+            in
+            "{ " ++ fields ++ " }"
+
+        UnitExpr ->
+            "{}"
+
+        ListExpr elements ->
+            elements
+                |> List.map (grenExprText context)
+                |> String.join ", "
+                |> (\inner -> "[" ++ inner ++ "]")
+
+        Application values ->
+            case values of
+                [] ->
+                    ""
+
+                first :: rest ->
+                    grenExprText context first
+                        ++ (rest
+                                |> List.map (\v -> " (" ++ grenExprText context v ++ ")")
+                                |> String.join ""
+                           )
+
+        OperatorApplication op _ left right ->
+            "("
+                ++ grenExprText context left
+                ++ " "
+                ++ op
+                ++ " "
+                ++ grenExprText context right
+                ++ ")"
+
+        IfBlock condition ifTrue ifFalse ->
+            "(if "
+                ++ grenExprText context condition
+                ++ " then "
+                ++ grenExprText context ifTrue
+                ++ " else "
+                ++ grenExprText context ifFalse
+                ++ ")"
+
+        Negation inner ->
+            "(-" ++ grenExprText context inner ++ ")"
+
+        FunctionOrValue modules name ->
+            case modules of
+                [] ->
+                    -- Whole-case pure-list rewrites embed bodies before the
+                    -- catalog mapping pass; apply known Gren renames here.
+                    case bareGrenRename name of
+                        Just renamed ->
+                            renamed
+
+                        Nothing ->
+                            name
+
+                _ ->
+                    let
+                        mod =
+                            String.join "." modules
+                    in
+                    case qualifiedGrenRename mod name of
+                        Just renamed ->
+                            renamed
+
+                        Nothing ->
+                            mod ++ "." ++ name
+
+        Integer n ->
+            String.fromInt n
+
+        Hex n ->
+            context.extract range
+
+        Floatable n ->
+            context.extract range
+
+        Literal s ->
+            context.extract range
+
+        CharLiteral _ ->
+            context.extract range
+
+        PrefixOperator op ->
+            if op == "::" then
+                "Array.pushFirst"
+
+            else
+                "(" ++ op ++ ")"
+
+        RecordAccess record (Node _ field) ->
+            grenExprText context record ++ "." ++ field
+
+        RecordAccessFunction field ->
+            if String.startsWith "." field then
+                field
+
+            else
+                "." ++ field
+
+        LambdaExpression lambda ->
+            "(\\"
+                ++ (lambda.args
+                        |> List.map (grenPatternText context)
+                        |> String.join " "
+                   )
+                ++ " -> "
+                ++ grenExprText context lambda.expression
+                ++ ")"
+
+        LetExpression letBlock ->
+            let
+                decls =
+                    letBlock.declarations
+                        |> List.map (grenLetDeclaration context)
+                        |> String.join "\n  "
+            in
+            "(let\n  "
+                ++ decls
+                ++ "\nin\n  "
+                ++ grenExprText context letBlock.expression
+                ++ ")"
+
+        CaseExpression caseBlock ->
+            -- Nested cases embedded in whole-case list rewrites must keep
+            -- multi-line when/is structure. Flattening via String.words made
+            -- arms share a line and gren rejected the unexpected arrows.
+            let
+                arms =
+                    caseBlock.cases
+                        |> List.map
+                            (\( pattern, body ) ->
+                                grenPatternText context pattern
+                                    ++ " ->\n        "
+                                    ++ grenExprText context body
+                            )
+                        |> String.join "\n\n    "
+            in
+            "(when "
+                ++ grenExprText context caseBlock.expression
+                ++ " is\n    "
+                ++ arms
+                ++ ")"
+
+        _ ->
+            context.extract range
+                |> String.words
+                |> String.join " "
+
+
+{-| Bare names that moved off Elm's default Basics into Math.
+-}
+bareGrenRename : String -> Maybe String
+bareGrenRename name =
+    if isGrenMathBasics name then
+        Just ("Math." ++ name)
+
+    else
+        Nothing
+
+
+isGrenMathBasics : String -> Bool
+isGrenMathBasics name =
+    -- Note: never include single-letter locals like `e` / bare `pi` here —
+    -- FunctionOrValue [] cannot tell local bindings from Basics.
+    List.member name
+        [ "round"
+        , "floor"
+        , "ceiling"
+        , "truncate"
+        , "modBy"
+        , "remainderBy"
+        , "abs"
+        , "sqrt"
+        , "logBase"
+        , "cos"
+        , "sin"
+        , "tan"
+        , "acos"
+        , "asin"
+        , "atan"
+        , "atan2"
+        , "degrees"
+        , "radians"
+        , "turns"
+        ]
+
+
+{-| Qualified renames that mirror mappings/builtin for pure-list body embedding.
+-}
+qualifiedGrenRename : String -> String -> Maybe String
+qualifiedGrenRename moduleName name =
+    case ( moduleName, name ) of
+        ( "Basics", n ) ->
+            if isGrenMathBasics n || n == "e" || n == "pi" then
+                Just ("Math." ++ n)
+
+            else
+                Nothing
+
+        ( "String", "length" ) ->
+            Just "String.count"
+
+        ( "String", "left" ) ->
+            Just "String.takeFirst"
+
+        ( "String", "right" ) ->
+            Just "String.takeLast"
+
+        ( "String", "dropLeft" ) ->
+            Just "String.dropFirst"
+
+        ( "String", "dropRight" ) ->
+            Just "String.dropLast"
+
+        ( "String", "indexes" ) ->
+            Just "String.indices"
+
+        ( "String", "cons" ) ->
+            Just "String.pushFirst"
+
+        ( "String", "toList" ) ->
+            Just "String.toArray"
+
+        ( "String", "fromList" ) ->
+            Just "String.fromArray"
+
+        ( "String", "filter" ) ->
+            Just "String.keepIf"
+
+        ( "String", "uncons" ) ->
+            Just "ElmToGren.Compat.String.uncons"
+
+        ( "String", "concat" ) ->
+            Just "ElmToGren.Compat.String.concat"
+
+        ( "List", n ) ->
+            -- Catalog List → Array (and a few value renames). Embedded bodies
+            -- skip the host mapping pass, so apply the same renames here.
+            case n of
+                "filter" ->
+                    Just "Array.keepIf"
+
+                "filterMap" ->
+                    Just "Array.mapAndKeepJust"
+
+                "concat" ->
+                    Just "Array.flatten"
+
+                "concatMap" ->
+                    Just "Array.mapAndFlatten"
+
+                "head" ->
+                    Just "Array.first"
+
+                "take" ->
+                    Just "Array.takeFirst"
+
+                "drop" ->
+                    Just "Array.dropFirst"
+
+                "sum" ->
+                    Just "ElmToGren.Compat.List.sum"
+
+                "product" ->
+                    Just "ElmToGren.Compat.List.product"
+
+                "tail" ->
+                    Just "ElmToGren.Compat.List.tail"
+
+                "partition" ->
+                    Just "ElmToGren.Compat.List.partition"
+
+                "unzip" ->
+                    Just "ElmToGren.Compat.List.unzip"
+
+                "map4" ->
+                    Just "ElmToGren.Compat.List.map4"
+
+                "map5" ->
+                    Just "ElmToGren.Compat.List.map5"
+
+                _ ->
+                    Just ("Array." ++ n)
+
+        ( "Tuple", "mapFirst" ) ->
+            Just "Tuple.mapFirst"
+
+        ( "Tuple", "mapSecond" ) ->
+            Just "Tuple.mapSecond"
+
+        _ ->
+            Nothing
+
+
+grenLetDeclaration : ModuleContext -> Node Elm.Syntax.Expression.LetDeclaration -> String
+grenLetDeclaration context (Node _ decl) =
+    case decl of
+        Elm.Syntax.Expression.LetFunction function ->
+            let
+                impl =
+                    Node.value function.declaration
+
+                name =
+                    Node.value impl.name
+            in
+            name
+                ++ " = "
+                ++ grenExprText context impl.expression
+
+        Elm.Syntax.Expression.LetDestructuring pattern expr ->
+            grenPatternText context pattern
+                ++ " = "
+                ++ grenExprText context expr
+
+
+renderPureListCase : ModuleContext -> String -> List PureListArm -> Int -> String
+renderPureListCase context scrutinee arms caseCol =
+    let
+        indent n =
+            String.repeat (max 0 (caseCol - 1 + n)) " "
+
+        scrutName =
+            "list_scrut_elmToGren"
+
+        -- Emit arms for lengths 0,1,...,maxMin-1 as exact, then open/catchall.
+        maxExact =
+            arms
+                |> List.filter (\a -> not a.isCatchAll)
+                |> List.map .minLength
+                |> List.maximum
+                |> Maybe.withDefault 0
+
+        lengthPatterns : List ( String, PureListArm )
+        lengthPatterns =
+            List.range 0 maxExact
+                |> List.filterMap
+                    (\len ->
+                        pickArmForLength len arms
+                            |> Maybe.map (\arm -> ( String.fromInt len, arm ))
+                    )
+
+        -- If some open/catchall remains for length > maxExact, add `_`.
+        openTail : List ( String, PureListArm )
+        openTail =
+            case pickArmForLength (maxExact + 1) arms of
+                Just arm ->
+                    if arm.isOpen || arm.isCatchAll then
+                        [ ( "_", arm ) ]
+
+                    else
+                        []
+
+                Nothing ->
+                    []
+
+        allBranches =
+            lengthPatterns ++ openTail
+
+        renderBranch ( pat, arm ) =
+            indent 4
+                ++ pat
+                ++ " ->\n"
+                ++ indent 8
+                ++ renderArmBody context scrutName arm (caseCol + 8)
+
+        body =
+            allBranches
+                |> List.map renderBranch
+                |> String.join "\n\n"
+    in
+    "let\n"
+        ++ indent 4
+        ++ scrutName
+        ++ " =\n"
+        ++ indent 8
+        ++ scrutinee
+        ++ "\n"
+        ++ indent 0
+        ++ "in\n"
+        ++ indent 0
+        ++ "when Array.length "
+        ++ scrutName
+        ++ " is\n"
+        ++ body
+
+
+pickArmForLength : Int -> List PureListArm -> Maybe PureListArm
+pickArmForLength len arms =
+    -- Elm order: first arm that matches this length.
+    case arms of
+        [] ->
+            Nothing
+
+        arm :: rest ->
+            if armMatchesLength len arm then
+                Just arm
+
+            else
+                pickArmForLength len rest
+
+
+armMatchesLength : Int -> PureListArm -> Bool
+armMatchesLength len arm =
+    if arm.isCatchAll then
+        True
+
+    else if arm.isOpen then
+        len >= arm.minLength
+
+    else
+        len == arm.minLength
+
+
+renderArmBody : ModuleContext -> String -> PureListArm -> Int -> String
+renderArmBody context scrutName arm bodyCol =
+    let
+        -- Nested when/let in grenExprText are multi-line; reindent every
+        -- continuation line to the insertion column so Gren's layout rules
+        -- still see patterns under their `when`.
+        bodyTextRaw =
+            grenExprText context arm.body
+
+        bodyAt col =
+            reindentBlock col bodyTextRaw
+
+        -- Absolute column indent (1-based column bodyCol).
+        pad col =
+            String.repeat (max 0 (col - 1)) " "
+
+        letBind name value col =
+            "let\n"
+                ++ pad (col + 4)
+                ++ name
+                ++ " =\n"
+                ++ pad (col + 8)
+                ++ value
+                ++ "\n"
+                ++ pad col
+                ++ "in\n"
+                ++ pad col
+
+        bindHeads : List String -> String -> Int -> Int -> String
+        bindHeads heads source depth col =
+            case heads of
+                [] ->
+                    let
+                        restBind =
+                            case arm.restName of
+                                Just name ->
+                                    letBind name source col
+
+                                Nothing ->
+                                    ""
+
+                        asBind =
+                            case arm.asName of
+                                Just name ->
+                                    letBind name scrutName col
+
+                                Nothing ->
+                                    ""
+                    in
+                    restBind ++ asBind ++ bodyAt col
+
+                headName :: more ->
+                    let
+                        restN =
+                            "r" ++ String.fromInt depth ++ "_elmToGren"
+                    in
+                    "when Array.popFirst "
+                        ++ source
+                        ++ " is\n"
+                        ++ pad (col + 4)
+                        ++ "Just { first = "
+                        ++ headName
+                        ++ ", rest = "
+                        ++ restN
+                        ++ " } ->\n"
+                        ++ pad (col + 8)
+                        ++ bindHeads more restN (depth + 1) (col + 8)
+                        ++ "\n"
+                        ++ pad (col + 4)
+                        ++ "Nothing ->\n"
+                        ++ pad (col + 8)
+                        ++ "Debug.todo \"elm-to-gren: list length mismatch\""
+    in
+    if arm.isCatchAll then
+        case arm.asName of
+            Just name ->
+                letBind name scrutName bodyCol ++ bodyAt bodyCol
+
+            Nothing ->
+                bodyAt bodyCol
+
+    else if List.isEmpty arm.heads then
+        bodyAt bodyCol
+
+    else
+        bindHeads arm.heads scrutName 0 bodyCol
+
+
+{-| Reindent continuation lines of a multi-line body.
+
+The first line is already positioned by the caller at column `col` (1-based).
+Each later non-blank line keeps its *relative* indent from the block's left
+edge and is shifted so that relative 0 lands at `col`.
+-}
+reindentBlock : Int -> String -> String
+reindentBlock col text =
+    let
+        pad : Int -> String
+        pad absoluteCol =
+            String.repeat (max 0 (absoluteCol - 1)) " "
+
+        leadingSpaces : String -> Int
+        leadingSpaces line =
+            String.length line - String.length (String.trimLeft line)
+    in
+    text
+        |> String.lines
+        |> List.indexedMap
+            (\index line ->
+                if index == 0 then
+                    line
+
+                else if String.isEmpty (String.trim line) then
+                    ""
+
+                else
+                    pad (col + leadingSpaces line) ++ String.trimLeft line
+            )
+        |> String.join "\n"
+
+
+{-| Visit an expression only for reserved-identifier edits on its free names.
+Full case/list rewriting is owned by the outer pure-list compiler.
+-}
+collectExpressionShallow : Node Expression -> ModuleContext -> ModuleContext
+collectExpressionShallow (Node range expression) context =
+    case expression of
+        FunctionOrValue _ name ->
+            addReservedIdentifier range name context
+
+        RecordAccessFunction name ->
+            addReservedIdentifier range (String.dropLeft 1 name) context
+
+        _ ->
+            context
 
 
 isUnconsPattern : Node Pattern -> Bool
@@ -902,6 +1916,7 @@ canRewriteArrayCasePattern patternNode =
 
         UnConsPattern _ _ ->
             canRewriteUnconsChain patternNode
+                || canRewriteCtorHeadUncons patternNode
 
         AsPattern inner _ ->
             -- Multi-cons under `as` is not rewritten (would drop the binding and
@@ -912,11 +1927,91 @@ canRewriteArrayCasePattern patternNode =
             False
 
 
-{-| Multi-cons (UnCons chain depth > 1) peels inside one branch; shorter lists
-must not need a different sibling branch than the catch-all. Fixed-length list
-patterns (`[x]`, `[x, y]`) are not multi-cons and may coexist with depth-1
-uncons freely. Only when some branch is truly multi-cons (depth >= 2) do we
-require no shorter positive-depth companions.
+{-| Outer `Ctor args :: rest` where some arg of Ctor is itself an uncons.
+The outer list is rewritten to bind the head value; the body peels embedded
+list args with Array.popFirst (same as collectCtorEmbeddedUnconsCase).
+-}
+canRewriteCtorHeadUncons : Node Pattern -> Bool
+canRewriteCtorHeadUncons patternNode =
+    case Node.value (unwrapParenthesized patternNode) of
+        UnConsPattern left right ->
+            if not (isRestArrayPattern right) then
+                False
+
+            else
+                case Node.value (unwrapParenthesized left) of
+                    NamedPattern qualifiedName args ->
+                        let
+                            isReservedMapCtor name =
+                                name == "Just" || name == "Nothing" || name == "Ok" || name == "Err"
+
+                            argOk arg =
+                                case Node.value (unwrapParenthesized arg) of
+                                    UnConsPattern _ _ ->
+                                        case parseConsChain (unwrapParenthesized arg) of
+                                            Just chain ->
+                                                List.length chain.heads >= 1
+
+                                            Nothing ->
+                                                False
+
+                                    ListPattern comps ->
+                                        not (List.any patternContainsUncons comps)
+
+                                    AllPattern ->
+                                        True
+
+                                    VarPattern _ ->
+                                        True
+
+                                    NamedPattern _ nestedArgs ->
+                                        List.all argOk nestedArgs
+
+                                    TuplePattern comps ->
+                                        List.all argOk comps
+
+                                    _ ->
+                                        not (patternContainsUncons arg)
+
+                            hasEmbeddedUncons =
+                                List.any
+                                    (\arg ->
+                                        case Node.value (unwrapParenthesized arg) of
+                                            UnConsPattern _ _ ->
+                                                True
+
+                                            _ ->
+                                                False
+                                    )
+                                    args
+                        in
+                        not (isReservedMapCtor qualifiedName.name)
+                            && hasEmbeddedUncons
+                            && List.all argOk args
+
+                    _ ->
+                        False
+
+        _ ->
+            False
+
+
+{-| Multi-cons (UnCons chain depth > 1) peels inside one branch.
+
+Shorter *exact* companions (`h :: []`, `[x]`, `[x, y]`) are fine: Gren case
+order keeps them as more-specific `rest = []` / fixed-list arms above the
+open multi-cons arm, so nested short-match peels are dead code when order is
+preserved (as in elm-ui's `h :: []` then `h :: o :: r`).
+
+Shorter *open-rest* companions (`h :: t`) used to be refused wholesale. The
+outer `Just { first = h1, rest = r0 }` of a multi-cons arm steals every
+non-empty length, so intermediate lengths must be handled by nested `Nothing`
+arms. That is safe when each intermediate length has a pasteable sibling body
+(see `multiConsNestFallbackOk` + `firstArmMatchingExactLength`): e.g.
+`a :: b :: _` then `a :: _` then `_` peels length 2 / 1 / 0 correctly.
+
+Still refuse shorter open rests whose tail is a *named* binding (`a :: xs`):
+nested `Nothing` would need `let xs = [] in …` and we do not reconstruct that.
 -}
 multiConsFallthroughOk : List (Node Pattern) -> Bool
 multiConsFallthroughOk patterns =
@@ -933,12 +2028,56 @@ multiConsFallthroughOk patterns =
         True
 
     else
-        let
-            depths : List Int
-            depths =
-                List.filterMap casePatternListDepth patterns
-        in
-        not (List.any (\depth -> depth > 0 && depth < maxMulti) depths)
+        not (List.any (isShorterOpenRestWithNamedTail maxMulti) patterns)
+
+
+{-| Open-rest uncons shorter than `maxMulti` whose tail is a named binding.
+Those need a reconstructed rest list in nested `Nothing` arms; refuse.
+Wild rest (`_`) is allowed — length-specific paste handles it.
+-}
+isShorterOpenRestWithNamedTail : Int -> Node Pattern -> Bool
+isShorterOpenRestWithNamedTail maxMulti patternNode =
+    case parseConsChain (unwrapParenthesized patternNode) of
+        Just chain ->
+            let
+                depth : Int
+                depth =
+                    List.length chain.heads
+            in
+            depth
+                > 0
+                && depth
+                < maxMulti
+                && not (isEmptyListRest chain.rest)
+                && isNamedRestPattern chain.rest
+
+        Nothing ->
+            case Node.value (unwrapParenthesized patternNode) of
+                AsPattern inner _ ->
+                    case asUnconsParts inner of
+                        Just parts ->
+                            -- `as` uncons always binds the full list; cannot
+                            -- rebuild that binding in a nested Nothing arm.
+                            maxMulti > 1
+
+                        Nothing ->
+                            False
+
+                _ ->
+                    False
+
+
+isNamedRestPattern : Node Pattern -> Bool
+isNamedRestPattern patternNode =
+    case Node.value (unwrapParenthesized patternNode) of
+        VarPattern _ ->
+            True
+
+        AsPattern _ _ ->
+            True
+
+        _ ->
+            False
 
 
 {-| Exact-empty multi-cons (`a :: b :: []`) peels with a nested
@@ -1043,17 +2182,30 @@ needsMultiConsNesting patterns =
 {-| Nested multi-cons peels paste a short-match fallback into synthetic
 `Nothing` arms without re-running the expression visitor.
 
-Fallthrough follows Elm case order: the first catch-all wins. A bare `_` is
-pasteable only when no named catch-all (`other`, `_ as name`) appears before
-it. Named catch-alls cannot be rebound in synthetic arms, so those shapes
-refuse rather than emit `Debug.todo` (or a later `_` body) and drop real
-fallthrough. No catch-all at all means non-exhaustive in Elm, so `Debug.todo`
-is acceptable.
+Nothing after matching `k` heads means the scrutinee has *exact* length `k`.
+Each such length must have a pasteable sibling arm (`firstArmMatchingExactLength`),
+not only a trailing catch-all — that is what makes `a :: b :: _` / `a :: _` /
+`_` work. Named catch-alls still refuse (cannot rebind). Missing arms become
+`Debug.todo` (non-exhaustive Elm).
 -}
 multiConsNestFallbackOk : List (Node Pattern) -> List ( Node Pattern, Node Expression ) -> Bool
 multiConsNestFallbackOk patterns cases =
     if needsMultiConsNesting patterns then
-        syntheticFallbackOk (firstCatchAllFallback cases)
+        let
+            maxMulti : Int
+            maxMulti =
+                patterns
+                    |> List.filterMap unconsChainDepth
+                    |> List.maximum
+                    |> Maybe.withDefault 0
+
+            intermediateLengths : List Int
+            intermediateLengths =
+                List.range 1 (maxMulti - 1)
+        in
+        List.all
+            (\len -> syntheticFallbackOk (firstArmMatchingExactLength len cases))
+            intermediateLengths
 
     else
         True
@@ -1062,8 +2214,13 @@ multiConsNestFallbackOk patterns cases =
 {-| Embedded ctor uncons always inserts a `Nothing` arm (empty list after
 widening `Ctor listName`). Prefer the first arm that would match `Ctor []` in
 Elm order: a same-ctor `[]` branch, else a leading `_`. A later `Ctor []`
-after `_` must not win. Refuse when the chosen body is not copy-safe, or when
-a named catch-all would have matched first.
+after `_` must not win.
+
+When a real `Ctor []` (or similar) arm already exists *above* the widened
+uncons arm, empty lists never reach the peel — `Nothing` is unreachable and
+may be `Debug.todo` even if that arm's body is not copy-safe (tuples, multi-arg
+ctors). Refuse only when a named catch-all would have matched empty first
+(`CannotSynthesizeFallback`).
 
 Exact tails (`Ctor (x :: [])`) also need a length-mismatch arm from the first
 catch-all (`_`). If a named catch-all precedes `_`, refuse.
@@ -1084,9 +2241,18 @@ embeddedUnconsFallbackOk cases =
                 |> List.concatMap ctorUnconsSlots
                 |> List.map Tuple.first
 
+        -- Empty-list arm present (or todo) is enough; paste is best-effort.
         fallbackOk : String -> Bool
         fallbackOk ctorName =
-            syntheticFallbackOk (firstEmptyListFallback ctorName cases)
+            case firstEmptyListFallback ctorName cases of
+                CannotSynthesizeFallback ->
+                    False
+
+                UseFallbackBody _ ->
+                    True
+
+                UseFallbackTodo ->
+                    True
 
         lengthMismatchOk : Bool
         lengthMismatchOk =
@@ -1122,12 +2288,98 @@ syntheticFallbackOk choice =
             False
 
 
+{-| First arm (Elm order) that matches a list of exact length `n`.
+
+Used for nested multi-cons `Nothing` peels: after binding `k` heads, `Nothing`
+means length was exactly `k`. Open rests with wild tails match every length
+>= head-count; named catch-alls match but cannot be pasted.
+-}
+firstArmMatchingExactLength : Int -> List ( Node Pattern, Node Expression ) -> SyntheticFallback
+firstArmMatchingExactLength n cases =
+    case cases of
+        [] ->
+            UseFallbackTodo
+
+        ( patternNode, body ) :: rest ->
+            if not (patternMatchesExactLength n patternNode) then
+                firstArmMatchingExactLength n rest
+
+            else if isUnusableCatchAllPattern patternNode then
+                CannotSynthesizeFallback
+
+            else if openRestHasNamedTail patternNode then
+                -- Would need `let rest = []` (or a drop) in the synthetic arm.
+                CannotSynthesizeFallback
+
+            else
+                UseFallbackBody body
+
+
+patternMatchesExactLength : Int -> Node Pattern -> Bool
+patternMatchesExactLength n patternNode =
+    case Node.value (unwrapParenthesized patternNode) of
+        ListPattern members ->
+            (not (List.any patternContainsUncons members))
+                && List.length members
+                == n
+
+        UnConsPattern _ _ ->
+            case parseConsChain (unwrapParenthesized patternNode) of
+                Just chain ->
+                    let
+                        depth =
+                            List.length chain.heads
+                    in
+                    if isEmptyListRest chain.rest then
+                        depth == n
+
+                    else
+                        -- Open rest matches every length >= depth.
+                        depth <= n
+
+                Nothing ->
+                    False
+
+        AllPattern ->
+            True
+
+        VarPattern _ ->
+            True
+
+        AsPattern inner _ ->
+            case Node.value (unwrapParenthesized inner) of
+                AllPattern ->
+                    True
+
+                _ ->
+                    patternMatchesExactLength n (unwrapParenthesized inner)
+
+        NamedPattern _ [ inner ] ->
+            patternMatchesExactLength n inner
+
+        ParenthesizedPattern inner ->
+            patternMatchesExactLength n inner
+
+        _ ->
+            False
+
+
+openRestHasNamedTail : Node Pattern -> Bool
+openRestHasNamedTail patternNode =
+    case parseConsChain (unwrapParenthesized patternNode) of
+        Just chain ->
+            not (isEmptyListRest chain.rest) && isNamedRestPattern chain.rest
+
+        Nothing ->
+            False
+
+
 {-| First pasteable catch-all in case order for multi-cons short-list peels.
 
 Bare `_`, fully-wild tuples `(_, _)`, and map-wrapper wildcards (`Just _`,
 `Ok _`) are pasteable. Open patterns that would match the same fallthrough but
 introduce bindings (`other`, `(xs, _)`, `Just other`) refuse. Specific arms
-(`Nothing`, `[]`, `( [], True)`) are skipped so a later true catch-all can win.
+(`Nothing`, `[]`, `([], True)`) are skipped so a later true catch-all can win.
 -}
 firstCatchAllFallback : List ( Node Pattern, Node Expression ) -> SyntheticFallback
 firstCatchAllFallback cases =
@@ -1524,10 +2776,40 @@ renderSyntheticFallback todoMessage choice context =
 copySafeFallbackText : String -> Node Expression -> ModuleContext -> String
 copySafeFallbackText todoMessage body context =
     if isCopySafeFallbackExpression body then
-        context.extract (Node.range body)
+        grenFallbackExpression context body
 
     else
         "Debug.todo \"" ++ todoMessage ++ "\""
+
+
+{-| Render a fallback expression as Gren text: tuples become records, and the
+result is flattened to one line so nested peel inserts stay well-indented.
+-}
+grenFallbackExpression : ModuleContext -> Node Expression -> String
+grenFallbackExpression context (Node range expression) =
+    case expression of
+        TupledExpression members ->
+            let
+                fields =
+                    members
+                        |> List.indexedMap
+                            (\index member ->
+                                fieldLabel index ++ " = " ++ grenFallbackExpression context member
+                            )
+                        |> String.join ", "
+            in
+            "{ " ++ fields ++ " }"
+
+        ParenthesizedExpression inner ->
+            "(" ++ grenFallbackExpression context inner ++ ")"
+
+        UnitExpr ->
+            "{}"
+
+        _ ->
+            context.extract range
+                |> String.words
+                |> String.join " "
 
 
 isEmptyListArg : Node Pattern -> Bool
@@ -1558,73 +2840,85 @@ Multi-line expressions are refused: the fallback is pasted after a fixed indent
 and later lines keep their original columns, which breaks Gren layout.
 -}
 isCopySafeFallbackExpression : Node Expression -> Bool
-isCopySafeFallbackExpression (Node range expression) =
-    if range.start.row /= range.end.row then
-        False
+isCopySafeFallbackExpression (Node _ expression) =
+    -- Multi-line is allowed: `copySafeFallbackText` collapses whitespace so
+    -- nested Nothing arms stay valid Gren. Tuples are emitted as Gren records.
+    case expression of
+        Integer _ ->
+            True
 
-    else
-        case expression of
-            Integer _ ->
-                True
+        Hex _ ->
+            True
 
-            Hex _ ->
-                True
+        Floatable _ ->
+            True
 
-            Floatable _ ->
-                True
+        Literal _ ->
+            True
 
-            Literal _ ->
-                True
+        CharLiteral _ ->
+            True
 
-            CharLiteral _ ->
-                True
+        FunctionOrValue _ _ ->
+            True
 
-            FunctionOrValue _ _ ->
-                True
+        UnitExpr ->
+            True
 
-            PrefixOperator operator ->
-                operator /= "::"
+        PrefixOperator operator ->
+            operator /= "::"
 
-            OperatorApplication operator _ left right ->
-                operator
-                    /= "::"
-                    && isCopySafeFallbackExpression left
-                    && isCopySafeFallbackExpression right
+        OperatorApplication operator _ left right ->
+            operator
+                /= "::"
+                && isCopySafeFallbackExpression left
+                && isCopySafeFallbackExpression right
 
-            Negation inner ->
-                isCopySafeFallbackExpression inner
+        Negation inner ->
+            isCopySafeFallbackExpression inner
 
-            ParenthesizedExpression inner ->
-                isCopySafeFallbackExpression inner
+        ParenthesizedExpression inner ->
+            isCopySafeFallbackExpression inner
 
-            Application values ->
-                -- Multi-arg constructors need record-payload rewrites. Unary
-                -- constructors (Just x, Ok x, custom unary) keep the same form in
-                -- Gren, so they are safe to paste when the argument is.
-                case values of
-                    (Node _ (FunctionOrValue _ name)) :: rest ->
-                        List.all isCopySafeFallbackExpression rest
-                            && (isLowercaseIdentifier name || List.length rest == 1)
+        TupledExpression members ->
+            -- Pasted as `{ first = …, second = … }` (see copySafeFallbackText).
+            List.length members
+                <= 3
+                && List.all isCopySafeFallbackExpression members
 
-                    _ ->
-                        False
+        Application values ->
+            -- Multi-arg constructors need record-payload rewrites. Unary
+            -- constructors (Just x, Ok x, custom unary) keep the same form in
+            -- Gren, so they are safe to paste when the argument is.
+            case values of
+                (Node _ (FunctionOrValue _ name)) :: rest ->
+                    List.all isCopySafeFallbackExpression rest
+                        && (isLowercaseIdentifier name || List.length rest == 1)
 
-            IfBlock condition ifTrue ifFalse ->
-                isCopySafeFallbackExpression condition
-                    && isCopySafeFallbackExpression ifTrue
-                    && isCopySafeFallbackExpression ifFalse
+                _ ->
+                    False
 
-            ListExpr elements ->
-                List.all isCopySafeFallbackExpression elements
+        IfBlock condition ifTrue ifFalse ->
+            isCopySafeFallbackExpression condition
+                && isCopySafeFallbackExpression ifTrue
+                && isCopySafeFallbackExpression ifFalse
 
-            RecordAccess record _ ->
-                isCopySafeFallbackExpression record
+        ListExpr elements ->
+            List.all isCopySafeFallbackExpression elements
 
-            RecordAccessFunction _ ->
-                True
+        RecordExpr setters ->
+            List.all
+                (\(Node _ ( _, value )) -> isCopySafeFallbackExpression value)
+                setters
 
-            _ ->
-                False
+        RecordAccess record _ ->
+            isCopySafeFallbackExpression record
+
+        RecordAccessFunction _ ->
+            True
+
+        _ ->
+            False
 {-| Inner list shapes under single-arg wrappers (`Just`, `Ok`) plus top-level
 `_`, for multi-cons fallthrough checks on Maybe/Result cases.
 -}
@@ -1718,32 +3012,326 @@ patternContainsUncons (Node _ pattern) =
             False
 
 
-collectArrayCase : String -> ( Node Pattern, Node Expression ) -> ModuleContext -> ModuleContext
-collectArrayCase shortMatchFallback ( patternNode, body ) context =
-    case Node.value patternNode of
-        AsPattern inner asName ->
-            case asUnconsParts inner of
-                Just _ ->
-                    collectAsUnconsPattern patternNode inner asName body context
+collectArrayCase : List ( Node Pattern, Node Expression ) -> String -> ( Node Pattern, Node Expression ) -> ModuleContext -> ModuleContext
+collectArrayCase cases shortMatchFallback ( patternNode, body ) context =
+    if isSubsumedShorterOpenRestArm cases patternNode then
+        -- Multi-cons nesting already handles this exact length via nested
+        -- Nothing peels. Drop the redundant arm so Gren does not see two
+        -- Just { first, rest } patterns for the same shape.
+        removeCaseArm patternNode body context
 
-                Nothing ->
-                    collectArrayCasePatternWithBody shortMatchFallback patternNode body context
+    else
+        case Node.value patternNode of
+            AsPattern inner asName ->
+                case asUnconsParts inner of
+                    Just _ ->
+                        collectAsUnconsPattern patternNode inner asName body context
 
-        _ ->
-            collectArrayCasePatternWithBody shortMatchFallback patternNode body context
+                    Nothing ->
+                        collectArrayCasePatternWithBody cases shortMatchFallback patternNode body context
+
+            _ ->
+                collectArrayCasePatternWithBody cases shortMatchFallback patternNode body context
+
+
+{-| Open-rest arm whose lengths are already covered by a deeper multi-cons arm
+rewritten with length-specific nested Nothing peels.
+-}
+isSubsumedShorterOpenRestArm : List ( Node Pattern, Node Expression ) -> Node Pattern -> Bool
+isSubsumedShorterOpenRestArm cases patternNode =
+    case parseConsChain (unwrapParenthesized patternNode) of
+        Just chain ->
+            let
+                depth =
+                    List.length chain.heads
+
+                maxMulti =
+                    cases
+                        |> List.map Tuple.first
+                        |> List.filterMap unconsChainDepth
+                        |> List.maximum
+                        |> Maybe.withDefault 0
+            in
+            depth
+                > 0
+                && depth
+                < maxMulti
+                && not (isEmptyListRest chain.rest)
+                && not (isNamedRestPattern chain.rest)
+
+        Nothing ->
+            False
+
+
+{-| Delete a whole `pattern -> body` arm (including the arrow).
+-}
+removeCaseArm : Node Pattern -> Node Expression -> ModuleContext -> ModuleContext
+removeCaseArm patternNode body context =
+    let
+        patternRange =
+            Node.range patternNode
+
+        bodyRange =
+            Node.range body
+
+        armRange =
+            { start = patternRange.start
+            , end = bodyRange.end
+            }
+    in
+    addEdit Types.ListConsPattern armRange "" context
 
 
 {-| Rewrite a list/uncons pattern already in an `Array.popFirst` scrutinee
 context. Multi-cons chains inject nested `when Array.popFirst` into the branch
 body (same technique as as-uncons).
 -}
-collectArrayCasePatternWithBody : String -> Node Pattern -> Node Expression -> ModuleContext -> ModuleContext
-collectArrayCasePatternWithBody shortMatchFallback patternNode body context =
+collectArrayCasePatternWithBody : List ( Node Pattern, Node Expression ) -> String -> Node Pattern -> Node Expression -> ModuleContext -> ModuleContext
+collectArrayCasePatternWithBody cases shortMatchFallback patternNode body context =
     case parseConsChain patternNode of
         Just chain ->
-            collectConsChainInPopFirst shortMatchFallback patternNode chain body context
+            collectConsChainInPopFirst cases shortMatchFallback patternNode chain body context
 
         Nothing ->
+            if canRewriteCtorHeadUncons patternNode then
+                collectCtorHeadUnconsInPopFirst shortMatchFallback patternNode body context
+
+            else
+                collectArrayCasePattern patternNode context
+
+
+{-| Outer list arm whose head is a constructor carrying nested list uncons, e.g.
+`(MediaRule mq (sb :: [])) :: []`. Bind the head value, then peel nested lists
+in the body the same way as collectCtorEmbeddedUnconsCase.
+-}
+collectCtorHeadUnconsInPopFirst : String -> Node Pattern -> Node Expression -> ModuleContext -> ModuleContext
+collectCtorHeadUnconsInPopFirst shortMatchFallback patternNode body context =
+    case Node.value (unwrapParenthesized patternNode) of
+        UnConsPattern left right ->
+            case Node.value (unwrapParenthesized left) of
+                NamedPattern qualifiedName args ->
+                    let
+                        unconsRange : Range
+                        unconsRange =
+                            Node.range (unwrapParenthesized patternNode)
+
+                        headName : String
+                        headName =
+                            syntheticRestName unconsRange ++ "_head"
+
+                        restText : String
+                        restText =
+                            restPatternText context right
+
+                        -- Outer peel: bind head value, then match ctor + peel nested lists.
+                        withOuterFixed : ModuleContext
+                        withOuterFixed =
+                            context
+                                |> addEdit Types.ListConsPattern
+                                    unconsRange
+                                    ("Just { first = " ++ headName ++ ", rest = " ++ restText ++ " }")
+
+                        bodyCol : Int
+                        bodyCol =
+                            (Node.range body).start.column
+
+                        pad : Int -> String
+                        pad n =
+                            String.repeat (max 0 n) " "
+
+                        ctorName : String
+                        ctorName =
+                            case qualifiedName.moduleName of
+                                [] ->
+                                    qualifiedName.name
+
+                                modules ->
+                                    String.join "." modules ++ "." ++ qualifiedName.name
+
+                        -- Build ctor match + embedded peels as body prefix.
+                        -- Multi-arg → Gren record; uncons args → synthetic list names.
+                        preparedArgs :
+                            List
+                                { text : String
+                                , uncons : Maybe ConsChain
+                                , listName : String
+                                , argRange : Range
+                                }
+                        preparedArgs =
+                            args
+                                |> List.indexedMap
+                                    (\index arg ->
+                                        let
+                                            argRange =
+                                                Node.range arg
+
+                                            listName =
+                                                syntheticRestName argRange ++ "_list"
+                                        in
+                                        case parseConsChain (unwrapParenthesized arg) of
+                                            Just chain ->
+                                                { text = listName
+                                                , uncons = Just chain
+                                                , listName = listName
+                                                , argRange = argRange
+                                                }
+
+                                            Nothing ->
+                                                { text = grenPatternText context arg
+                                                , uncons = Nothing
+                                                , listName = listName
+                                                , argRange = argRange
+                                                }
+                                    )
+
+                        ctorMatch : String
+                        ctorMatch =
+                            case preparedArgs of
+                                [] ->
+                                    ctorName
+
+                                [ only ] ->
+                                    ctorName ++ " " ++ only.text
+
+                                many ->
+                                    ctorName
+                                        ++ " { "
+                                        ++ (many
+                                                |> List.indexedMap
+                                                    (\index item ->
+                                                        fieldLabel index ++ " = " ++ item.text
+                                                    )
+                                                |> String.join ", "
+                                           )
+                                        ++ " }"
+
+                        emptyListFallback : String
+                        emptyListFallback =
+                            shortMatchFallback
+
+                        lengthMismatchFallback : String
+                        lengthMismatchFallback =
+                            shortMatchFallback
+
+                        peels : { prefix : String, suffix : String }
+                        peels =
+                            preparedArgs
+                                |> List.foldl
+                                    (\item acc ->
+                                        case item.uncons of
+                                            Nothing ->
+                                                acc
+
+                                            Just chain ->
+                                                case chain.heads of
+                                                    [] ->
+                                                        acc
+
+                                                    firstHead :: moreHeads ->
+                                                        let
+                                                            exactEmptyRest =
+                                                                isEmptyListRest chain.rest
+
+                                                            firstRest =
+                                                                if List.isEmpty moreHeads then
+                                                                    if exactEmptyRest then
+                                                                        item.listName ++ "_e"
+
+                                                                    else
+                                                                        restPatternText context chain.rest
+
+                                                                else
+                                                                    item.listName ++ "_n0"
+
+                                                            needsEmptyGuard =
+                                                                List.isEmpty moreHeads && exactEmptyRest
+
+                                                            open =
+                                                                "when Array.popFirst "
+                                                                    ++ item.listName
+                                                                    ++ " is\n"
+                                                                    ++ pad (bodyCol - 1 + 4)
+                                                                    ++ "Just { first = "
+                                                                    ++ grenPatternText context firstHead
+                                                                    ++ ", rest = "
+                                                                    ++ firstRest
+                                                                    ++ " } ->\n"
+                                                                    ++ pad (bodyCol - 1 + 8)
+                                                                    ++ (if needsEmptyGuard then
+                                                                            "when "
+                                                                                ++ firstRest
+                                                                                ++ " is\n"
+                                                                                ++ pad (bodyCol - 1 + 12)
+                                                                                ++ "[] ->\n"
+                                                                                ++ pad (bodyCol - 1 + 16)
+
+                                                                        else
+                                                                            ""
+                                                                       )
+
+                                                            close =
+                                                                (if needsEmptyGuard then
+                                                                    "\n"
+                                                                        ++ pad (bodyCol - 1 + 12)
+                                                                        ++ "_ ->\n"
+                                                                        ++ pad (bodyCol - 1 + 16)
+                                                                        ++ lengthMismatchFallback
+
+                                                                 else
+                                                                    ""
+                                                                )
+                                                                    ++ "\n"
+                                                                    ++ pad (bodyCol - 1 + 4)
+                                                                    ++ "Nothing ->\n"
+                                                                    ++ pad (bodyCol - 1 + 8)
+                                                                    ++ emptyListFallback
+
+                                                            deeper =
+                                                                if List.isEmpty moreHeads then
+                                                                    { prefix = "", suffix = "" }
+
+                                                                else
+                                                                    nestedPopWrap [] lengthMismatchFallback moreHeads chain.rest firstRest body context
+                                                        in
+                                                        { prefix = acc.prefix ++ open ++ deeper.prefix
+                                                        , suffix = deeper.suffix ++ close ++ acc.suffix
+                                                        }
+                                    )
+                                    { prefix = "", suffix = "" }
+
+                        openCtor : String
+                        openCtor =
+                            "when "
+                                ++ headName
+                                ++ " is\n"
+                                ++ pad (bodyCol - 1 + 4)
+                                ++ ctorMatch
+                                ++ " ->\n"
+                                ++ pad (bodyCol - 1 + 8)
+
+                        closeCtor : String
+                        closeCtor =
+                            "\n"
+                                ++ pad (bodyCol - 1 + 4)
+                                ++ "_ ->\n"
+                                ++ pad (bodyCol - 1 + 8)
+                                ++ shortMatchFallback
+                    in
+                    withOuterFixed
+                        |> addInsertion Types.ListConsExpression
+                            (Node.range body).start
+                            (openCtor ++ peels.prefix)
+                        |> addInsertion Types.ListConsExpression
+                            (Node.range body).end
+                            (peels.suffix ++ closeCtor)
+                        -- Scan nested patterns for reserved names only.
+                        |> (\ctx -> List.foldl collectPattern ctx args)
+                        |> collectPattern right
+
+                _ ->
+                    collectArrayCasePattern patternNode context
+
+        _ ->
             collectArrayCasePattern patternNode context
 
 
@@ -1781,8 +3369,8 @@ collectArrayCasePattern ((Node range pattern) as patternNode) context =
 The pattern becomes `Just { first = h1, rest = rest0 }` and each additional
 head is peeled with a nested `when Array.popFirst` wrapping the branch body.
 -}
-collectConsChainInPopFirst : String -> Node Pattern -> ConsChain -> Node Expression -> ModuleContext -> ModuleContext
-collectConsChainInPopFirst shortMatchFallback patternNode chain body context =
+collectConsChainInPopFirst : List ( Node Pattern, Node Expression ) -> String -> Node Pattern -> ConsChain -> Node Expression -> ModuleContext -> ModuleContext
+collectConsChainInPopFirst cases shortMatchFallback patternNode chain body context =
     case chain.heads of
         [] ->
             collectPattern patternNode context
@@ -1825,7 +3413,7 @@ collectConsChainInPopFirst shortMatchFallback patternNode chain body context =
                 nested : { prefix : String, suffix : String }
                 nested =
                     if needsNesting then
-                        nestedPopWrap shortMatchFallback moreHeads chain.rest restName body context
+                        nestedPopWrap cases shortMatchFallback moreHeads chain.rest restName body context
 
                     else
                         { prefix = "", suffix = "" }
@@ -1882,8 +3470,8 @@ Exact-length tails (`h1 :: h2 :: []`) cannot use `rest = []` inside a nested
 `Just` arm: Gren requires that `when` to cover every `Just` shape. The last
 peel therefore binds a synthetic rest and guards with `when rest is [] -> ...`.
 -}
-nestedPopWrap : String -> List (Node Pattern) -> Node Pattern -> String -> Node Expression -> ModuleContext -> { prefix : String, suffix : String }
-nestedPopWrap shortMatchFallback heads finalRest firstRestName body context =
+nestedPopWrap : List ( Node Pattern, Node Expression ) -> String -> List (Node Pattern) -> Node Pattern -> String -> Node Expression -> ModuleContext -> { prefix : String, suffix : String }
+nestedPopWrap cases shortMatchFallback heads finalRest firstRestName body context =
     let
         bodyCol : Int
         bodyCol =
@@ -1944,11 +3532,29 @@ nestedPopWrap shortMatchFallback heads finalRest firstRestName body context =
                         needsEmptyGuard =
                             isLast && exactEmptyRest
 
+                        -- Outer Just already bound one head; each nested peel
+                        -- level binds one more. Nothing at this level means the
+                        -- scrutinee length was exactly (level + 1).
+                        exactLengthForNothing : Int
+                        exactLengthForNothing =
+                            level + 1
+
+                        lengthFallback : String
+                        lengthFallback =
+                            if List.isEmpty cases then
+                                shortMatchFallback
+
+                            else
+                                renderSyntheticFallback
+                                    "elm-to-gren: multi-cons did not match"
+                                    (firstArmMatchingExactLength exactLengthForNothing cases)
+                                    context
+
                         open : String
                         open =
                             "when Array.popFirst "
                                 ++ restName
-                                ++ " of\n"
+                                ++ " is\n"
                                 ++ indent branchIndent
                                 ++ "Just { first = "
                                 ++ headText
@@ -1984,7 +3590,7 @@ nestedPopWrap shortMatchFallback heads finalRest firstRestName body context =
                                 ++ indent branchIndent
                                 ++ "Nothing ->\n"
                                 ++ indent bodyIndent
-                                ++ shortMatchFallback
+                                ++ lengthFallback
                     in
                     { prefix = open ++ deeper.prefix
                     , suffix = deeper.suffix ++ close
@@ -2375,7 +3981,7 @@ collectTupleListCase shortMatchFallback caseBlock context =
                                 addTupleEdits Types.TuplePattern "=" (Node.range patternNode) comps found
                         in
                         List.foldl
-                            (\comp ctx -> collectArrayCasePatternWithBody shortMatchFallback comp body ctx)
+                            (\comp ctx -> collectArrayCasePatternWithBody [] shortMatchFallback comp body ctx)
                             withTuple
                             comps
 
@@ -2446,8 +4052,8 @@ isMaybeUnconsCase patterns =
     List.any hasInnerUncons patterns && List.all patternOk patterns
 
 
-collectMaybeUnconsCase : String -> ( Node Pattern, Node Expression ) -> ModuleContext -> ModuleContext
-collectMaybeUnconsCase shortMatchFallback ( patternNode, body ) context =
+collectMaybeUnconsCase : List ( Node Pattern, Node Expression ) -> String -> ( Node Pattern, Node Expression ) -> ModuleContext -> ModuleContext
+collectMaybeUnconsCase cases shortMatchFallback ( patternNode, body ) context =
     case Node.value patternNode of
         NamedPattern _ [ inner ] ->
             case Node.value inner of
@@ -2457,10 +4063,10 @@ collectMaybeUnconsCase shortMatchFallback ( patternNode, body ) context =
                     context
                         |> addInsertion Types.ListConsPattern (Node.range inner).start "("
                         |> addInsertion Types.ListConsPattern (Node.range inner).end ")"
-                        |> collectArrayCasePatternWithBody shortMatchFallback inner body
+                        |> collectArrayCasePatternWithBody cases shortMatchFallback inner body
 
                 _ ->
-                    collectArrayCasePatternWithBody shortMatchFallback inner body context
+                    collectArrayCasePatternWithBody cases shortMatchFallback inner body context
 
         _ ->
             context
@@ -2518,8 +4124,8 @@ isResultUnconsCase patterns =
     List.any hasInnerUncons patterns && List.all patternOk patterns
 
 
-collectResultUnconsCase : String -> ( Node Pattern, Node Expression ) -> ModuleContext -> ModuleContext
-collectResultUnconsCase shortMatchFallback ( patternNode, body ) context =
+collectResultUnconsCase : List ( Node Pattern, Node Expression ) -> String -> ( Node Pattern, Node Expression ) -> ModuleContext -> ModuleContext
+collectResultUnconsCase cases shortMatchFallback ( patternNode, body ) context =
     case Node.value patternNode of
         NamedPattern qualifiedName [ inner ] ->
             if qualifiedName.name == "Ok" then
@@ -2528,10 +4134,10 @@ collectResultUnconsCase shortMatchFallback ( patternNode, body ) context =
                         context
                             |> addInsertion Types.ListConsPattern (Node.range inner).start "("
                             |> addInsertion Types.ListConsPattern (Node.range inner).end ")"
-                            |> collectArrayCasePatternWithBody shortMatchFallback inner body
+                            |> collectArrayCasePatternWithBody cases shortMatchFallback inner body
 
                     _ ->
-                        collectArrayCasePatternWithBody shortMatchFallback inner body context
+                        collectArrayCasePatternWithBody cases shortMatchFallback inner body context
 
             else
                 collectPattern patternNode context
@@ -2587,14 +4193,11 @@ isCtorEmbeddedUnconsCase patterns =
                     -- Nullary sibling; this path does not rewrite it.
                     not (isReservedMapCtor qualifiedName.name)
 
-                NamedPattern qualifiedName [ arg ] ->
+                NamedPattern qualifiedName args ->
+                    -- Multi-arg constructors become Gren records; collectCtorEmbeddedUnconsCase
+                    -- rewrites each arg that is an uncons chain and leaves simple args alone.
                     not (isReservedMapCtor qualifiedName.name)
-                        && argOk arg
-
-                NamedPattern _ _ ->
-                    -- Multi-arg constructors need record-payload pattern edits
-                    -- that collectCtorEmbeddedUnconsCase does not apply.
-                    False
+                        && List.all argOk args
 
                 _ ->
                     False
@@ -2602,13 +4205,17 @@ isCtorEmbeddedUnconsCase patterns =
         hasEmbeddedUncons : Node Pattern -> Bool
         hasEmbeddedUncons (Node _ pattern) =
             case pattern of
-                NamedPattern _ [ arg ] ->
-                    case Node.value (unwrapParenthesized arg) of
-                        UnConsPattern _ _ ->
-                            True
+                NamedPattern _ args ->
+                    List.any
+                        (\arg ->
+                            case Node.value (unwrapParenthesized arg) of
+                                UnConsPattern _ _ ->
+                                    True
 
-                        _ ->
-                            False
+                                _ ->
+                                    False
+                        )
+                        args
 
                 _ ->
                     False
@@ -2708,132 +4315,192 @@ collectCtorEmbeddedUnconsCase cases ( patternNode, body ) context =
                 pad : Int -> String
                 pad n =
                     String.repeat (max 0 n) " "
-                foldArg : Node Pattern -> { ctx : ModuleContext, prefix : String, suffix : String } -> { ctx : ModuleContext, prefix : String, suffix : String }
-                foldArg arg acc =
-                    case parseConsChain (unwrapParenthesized arg) of
-                        Nothing ->
-                            { acc | ctx = collectPattern arg acc.ctx }
+                preparedArgs :
+                    List
+                        { text : String
+                        , uncons : Maybe ConsChain
+                        , listName : String
+                        , arg : Node Pattern
+                        }
+                preparedArgs =
+                    args
+                        |> List.map
+                            (\arg ->
+                                let
+                                    argRange =
+                                        Node.range arg
 
-                        Just chain ->
-                            case chain.heads of
-                                [] ->
-                                    { acc | ctx = collectPattern arg acc.ctx }
+                                    listName =
+                                        syntheticRestName argRange ++ "_list"
+                                in
+                                case parseConsChain (unwrapParenthesized arg) of
+                                    Just chain ->
+                                        { text = listName
+                                        , uncons = Just chain
+                                        , listName = listName
+                                        , arg = arg
+                                        }
 
-                                firstHead :: moreHeads ->
-                                    let
-                                        argRange : Range
-                                        argRange =
-                                            Node.range arg
+                                    Nothing ->
+                                        { text = grenPatternText context arg
+                                        , uncons = Nothing
+                                        , listName = listName
+                                        , arg = arg
+                                        }
+                            )
 
-                                        listName : String
-                                        listName =
-                                            syntheticRestName argRange ++ "_list"
+                ctorName : String
+                ctorName =
+                    case qualifiedName.moduleName of
+                        [] ->
+                            qualifiedName.name
 
-                                        exactEmptyRest : Bool
-                                        exactEmptyRest =
-                                            isEmptyListRest chain.rest
+                        modules ->
+                            String.join "." modules ++ "." ++ qualifiedName.name
 
-                                        -- Nested when arms are isolated from sibling case branches,
-                                        -- so `rest = []` is non-exhaustive for longer lists. Bind a
-                                        -- synthetic rest and guard with `when rest is []` instead.
-                                        firstRest : String
-                                        firstRest =
-                                            if List.isEmpty moreHeads then
-                                                if exactEmptyRest then
-                                                    syntheticRestName argRange ++ "_e"
+                -- Multi-arg constructors must be Gren records; single-arg stays
+                -- positional (`Box listName`).
+                ctorPattern : String
+                ctorPattern =
+                    case preparedArgs of
+                        [] ->
+                            ctorName
 
-                                                else
-                                                    restPatternText context chain.rest
+                        [ only ] ->
+                            ctorName ++ " " ++ only.text
 
-                                            else
-                                                syntheticRestName argRange
-
-                                        needsEmptyGuard : Bool
-                                        needsEmptyGuard =
-                                            List.isEmpty moreHeads && exactEmptyRest
-
-                                        -- `when` at bodyCol; branches at +4; bodies at +8.
-                                        openFirst : String
-                                        openFirst =
-                                            "when Array.popFirst "
-                                                ++ listName
-                                                ++ " of\n"
-                                                ++ pad (bodyCol - 1 + 4)
-                                                ++ "Just { first = "
-                                                ++ grenPatternText context firstHead
-                                                ++ ", rest = "
-                                                ++ firstRest
-                                                ++ " } ->\n"
-                                                ++ pad (bodyCol - 1 + 8)
-                                                ++ (if needsEmptyGuard then
-                                                        "when "
-                                                            ++ firstRest
-                                                            ++ " is\n"
-                                                            ++ pad (bodyCol - 1 + 12)
-                                                            ++ "[] ->\n"
-                                                            ++ pad (bodyCol - 1 + 16)
-
-                                                    else
-                                                        ""
-                                                   )
-
-                                        closeFirst : String
-                                        closeFirst =
-                                            (if needsEmptyGuard then
-                                                "\n"
-                                                    ++ pad (bodyCol - 1 + 12)
-                                                    ++ "_ ->\n"
-                                                    ++ pad (bodyCol - 1 + 16)
-                                                    ++ lengthMismatchFallback
-
-                                             else
-                                                ""
+                        many ->
+                            ctorName
+                                ++ " { "
+                                ++ (many
+                                        |> List.indexedMap
+                                            (\index item ->
+                                                fieldLabel index ++ " = " ++ item.text
                                             )
-                                                ++ "\n"
-                                                ++ pad (bodyCol - 1 + 4)
-                                                ++ "Nothing ->\n"
-                                                ++ pad (bodyCol - 1 + 8)
-                                                ++ emptyListFallback
+                                        |> String.join ", "
+                                   )
+                                ++ " }"
 
-                                        deeper : { prefix : String, suffix : String }
-                                        deeper =
-                                            if List.isEmpty moreHeads then
-                                                { prefix = "", suffix = "" }
+                withCtorPattern : ModuleContext
+                withCtorPattern =
+                    context
+                        |> addEdit Types.ListConsPattern (Node.range patternNode) ctorPattern
+                        |> (\ctx ->
+                                List.foldl
+                                    (\item c ->
+                                        case item.uncons of
+                                            Just chain ->
+                                                -- Do not collect the UnCons node itself (that
+                                                -- emits a refusal diagnostic); only scan leaves.
+                                                c
+                                                    |> (\c2 -> List.foldl collectPattern c2 chain.heads)
+                                                    |> collectPattern chain.rest
 
-                                            else
-                                                -- Nested peels are past the empty-list case; length errors
-                                                -- must use `_` / todo, never a sibling `Ctor []` body.
-                                                nestedPopWrap lengthMismatchFallback moreHeads chain.rest firstRest body context
-                                        withArgPatterns : ModuleContext
-                                        withArgPatterns =
-                                            acc.ctx
-                                                |> addEdit Types.ListConsPattern argRange listName
-                                                -- Heads/rest are deleted with argRange; only scan for
-                                                -- reserved-name diagnostics (structural edits would
-                                                -- overlap and be dropped).
-                                                |> collectPattern firstHead
-                                                |> (\ctx -> List.foldl collectPattern ctx moreHeads)
-                                                |> collectPattern chain.rest
-                                    in
-                                    { ctx = withArgPatterns
-                                    , prefix = acc.prefix ++ openFirst ++ deeper.prefix
-                                    , suffix = deeper.suffix ++ closeFirst ++ acc.suffix
-                                    }
-                folded =
-                    List.foldl foldArg { ctx = context, prefix = "", suffix = "" } args
+                                            Nothing ->
+                                                collectPattern item.arg c
+                                    )
+                                    ctx
+                                    preparedArgs
+                           )
+
+                peels : { prefix : String, suffix : String }
+                peels =
+                    preparedArgs
+                        |> List.foldl
+                            (\item acc ->
+                                case item.uncons of
+                                    Nothing ->
+                                        acc
+
+                                    Just chain ->
+                                        case chain.heads of
+                                            [] ->
+                                                acc
+
+                                            firstHead :: moreHeads ->
+                                                let
+                                                    exactEmptyRest =
+                                                        isEmptyListRest chain.rest
+
+                                                    firstRest =
+                                                        if List.isEmpty moreHeads then
+                                                            if exactEmptyRest then
+                                                                item.listName ++ "_e"
+
+                                                            else
+                                                                restPatternText context chain.rest
+
+                                                        else
+                                                            item.listName ++ "_n0"
+
+                                                    needsEmptyGuard =
+                                                        List.isEmpty moreHeads && exactEmptyRest
+
+                                                    open =
+                                                        "when Array.popFirst "
+                                                            ++ item.listName
+                                                            ++ " is\n"
+                                                            ++ pad (bodyCol - 1 + 4)
+                                                            ++ "Just { first = "
+                                                            ++ grenPatternText context firstHead
+                                                            ++ ", rest = "
+                                                            ++ firstRest
+                                                            ++ " } ->\n"
+                                                            ++ pad (bodyCol - 1 + 8)
+                                                            ++ (if needsEmptyGuard then
+                                                                    "when "
+                                                                        ++ firstRest
+                                                                        ++ " is\n"
+                                                                        ++ pad (bodyCol - 1 + 12)
+                                                                        ++ "[] ->\n"
+                                                                        ++ pad (bodyCol - 1 + 16)
+
+                                                                else
+                                                                    ""
+                                                               )
+
+                                                    close =
+                                                        (if needsEmptyGuard then
+                                                            "\n"
+                                                                ++ pad (bodyCol - 1 + 12)
+                                                                ++ "_ ->\n"
+                                                                ++ pad (bodyCol - 1 + 16)
+                                                                ++ lengthMismatchFallback
+
+                                                         else
+                                                            ""
+                                                        )
+                                                            ++ "\n"
+                                                            ++ pad (bodyCol - 1 + 4)
+                                                            ++ "Nothing ->\n"
+                                                            ++ pad (bodyCol - 1 + 8)
+                                                            ++ emptyListFallback
+
+                                                    deeper =
+                                                        if List.isEmpty moreHeads then
+                                                            { prefix = "", suffix = "" }
+
+                                                        else
+                                                            nestedPopWrap [] lengthMismatchFallback moreHeads chain.rest firstRest body context
+                                                in
+                                                { prefix = acc.prefix ++ open ++ deeper.prefix
+                                                , suffix = deeper.suffix ++ close ++ acc.suffix
+                                                }
+                            )
+                            { prefix = "", suffix = "" }
             in
-            folded.ctx
-                |> (if String.isEmpty folded.prefix then
+            withCtorPattern
+                |> (if String.isEmpty peels.prefix then
                         identity
 
                     else
-                        addInsertion Types.ListConsExpression (Node.range body).start folded.prefix
+                        addInsertion Types.ListConsExpression (Node.range body).start peels.prefix
                    )
-                |> (if String.isEmpty folded.suffix then
+                |> (if String.isEmpty peels.suffix then
                         identity
 
                     else
-                        addInsertion Types.ListConsExpression (Node.range body).end folded.suffix
+                        addInsertion Types.ListConsExpression (Node.range body).end peels.suffix
                    )
 
         _ ->
@@ -3167,13 +4834,16 @@ to the module under review, which the catalog never contains.
 -}
 addResolvedReference : Node a -> String -> Bool -> ModuleContext -> ModuleContext
 addResolvedReference node name isType context =
+    addResolvedReferenceAt (Node.range node) node name isType context
+
+
+{-| Like `addResolvedReference`, but the rewrite range may be a sub-span of the
+lookup node (e.g. constructor name without pattern payload).
+-}
+addResolvedReferenceAt : Range -> Node a -> String -> Bool -> ModuleContext -> ModuleContext
+addResolvedReferenceAt nodeRange node name isType context =
     case ModuleNameLookupTable.fullModuleNameFor context.lookupTable node of
         Just definingModule ->
-            let
-                nodeRange : Range
-                nodeRange =
-                    Node.range node
-            in
             { context
                 | references =
                     { range = nodeRange
@@ -3219,15 +4889,21 @@ addAmbiguousReferenceDiagnostic range name modules context =
 
 constructorFunction : (Range -> String) -> Range -> Int -> String
 constructorFunction extract range arity =
+    namedConstructorFunction extract
+        range
+        (List.range 0 (arity - 1) |> List.map fieldLabel)
+
+
+namedConstructorFunction : (Range -> String) -> Range -> List String -> String
+namedConstructorFunction extract range fieldNames =
     let
         arguments : List String
         arguments =
-            List.range 1 arity |> List.map (\index -> "arg" ++ String.fromInt index ++ "_elmToGren")
+            List.indexedMap (\index _ -> "arg" ++ String.fromInt (index + 1) ++ "_elmToGren") fieldNames
 
         fields : String
         fields =
-            arguments
-                |> List.indexedMap (\index argument -> fieldLabel index ++ " = " ++ argument)
+            List.map2 (\field argument -> field ++ " = " ++ argument) fieldNames arguments
                 |> String.join ", "
     in
     "(\\" ++ String.join " " arguments ++ " -> " ++ extract range ++ " { " ++ fields ++ " })"
@@ -3317,13 +4993,30 @@ collectPattern ((Node range pattern) as patternNode) context =
                 withChildren : ModuleContext
                 withChildren =
                     collectPattern right (collectPattern left context)
+
+                snippet : String
+                snippet =
+                    context.extract range
+                        |> String.replace "\n" " "
+                        |> (\s ->
+                                if String.length s > 80 then
+                                    String.left 77 s ++ "..."
+
+                                else
+                                    s
+                           )
             in
             addDiagnostic
                 { code = "UNMAPPED_SYMBOL"
                 , severity = Types.Error
-                , message = "A List (::) pattern needs control-flow restructuring for Gren arrays."
+                , message =
+                    "List pattern `"
+                        ++ snippet
+                        ++ "` cannot stay as (::). Gren arrays match with Array.popFirst → Just { first, rest } / Nothing."
                 , range = Just range
-                , help = Just "Match on Array.popFirst and destructure its { first, rest } record."
+                , help =
+                    Just
+                        "Put this pattern in a `case` on the list (with [] / x :: xs / x :: y :: rest arms) so the rewrite can insert Array.popFirst. Function arguments and let-destructuring of (::) are not rewritten yet."
                 }
                 withChildren
 
@@ -3335,47 +5028,91 @@ collectPattern ((Node range pattern) as patternNode) context =
 
         NamedPattern qualifiedName members ->
             let
+                -- Map catalog may rewrite constructor names (Http.BadStatus →
+                -- Compat). Range must cover only the name, not the payload.
+                constructorRange : Range
+                constructorRange =
+                    case members of
+                        [] ->
+                            range
+
+                        first :: _ ->
+                            { start = range.start
+                            , end = (Node.range first).start
+                            }
+
+                withMappedName : ModuleContext
+                withMappedName =
+                    addResolvedReferenceAt constructorRange patternNode qualifiedName.name False context
+
                 withChildren : ModuleContext
                 withChildren =
-                    List.foldl collectPattern context members
+                    List.foldl collectPattern withMappedName members
             in
-            case resolveReference patternNode qualifiedName.moduleName qualifiedName.name context of
-                Resolved (ConstructorReference constructor) ->
-                    if constructor.arity > 1 && constructor.arity == List.length members then
-                        addPayloadEdits Types.CustomConstructor "=" members withChildren
-
-                    else if constructor.arity /= List.length members then
-                        addConstructorArityDiagnostic range qualifiedName.name constructor.arity (List.length members) withChildren
-
-                    else
-                        withChildren
-
-                Resolved (RecordAliasReference _) ->
-                    addDiagnostic
-                        { code = "UNMAPPED_SYMBOL"
-                        , severity = Types.Error
-                        , message = "Record alias constructors cannot be used as patterns in Gren."
-                        , range = Just range
-                        , help = Just "Destructure the record by its fields instead."
-                        }
-                        withChildren
-
-                AmbiguousReference modules ->
-                    addAmbiguousReferenceDiagnostic range qualifiedName.name modules withChildren
-
-                UnresolvedReference ->
-                    if List.length members > 1 then
-                        addDiagnostic
-                            { code = "UNMAPPED_SYMBOL"
-                            , severity = Types.Error
-                            , message = "The multi-argument constructor pattern `" ++ qualifiedName.name ++ "` could not be resolved safely."
-                            , range = Just range
-                            , help = Just "Provide a mapping for the dependency constructor or include its Elm source in the package graph."
-                            }
-                            withChildren
+            case namedPlatformPayloadFields qualifiedName.moduleName qualifiedName.name of
+                Just fieldNames ->
+                    -- Gren renames multi-arg constructor payloads to records with
+                    -- domain field names (Http Response, Json.Decode.Error, …).
+                    -- Prefer those labels over positional first/second even when
+                    -- elm-review resolved the constructor from the Elm graph.
+                    if List.length members == List.length fieldNames then
+                        addNamedPayloadEdits fieldNames members withChildren
 
                     else
-                        withChildren
+                        addConstructorArityDiagnostic range qualifiedName.name (List.length fieldNames) (List.length members) withChildren
+
+                Nothing ->
+                    case resolveReference patternNode qualifiedName.moduleName qualifiedName.name context of
+                        Resolved (ConstructorReference constructor) ->
+                            if constructor.arity > 1 && constructor.arity == List.length members then
+                                addPayloadEdits Types.CustomConstructor "=" members withChildren
+
+                            else if constructor.arity /= List.length members then
+                                addConstructorArityDiagnostic range qualifiedName.name constructor.arity (List.length members) withChildren
+
+                            else
+                                withChildren
+
+                        Resolved (RecordAliasReference _) ->
+                            addDiagnostic
+                                { code = "UNMAPPED_SYMBOL"
+                                , severity = Types.Error
+                                , message = "Record alias constructors cannot be used as patterns in Gren."
+                                , range = Just range
+                                , help = Just "Destructure the record by its fields instead."
+                                }
+                                withChildren
+
+                        AmbiguousReference modules ->
+                            addAmbiguousReferenceDiagnostic range qualifiedName.name modules withChildren
+
+                        UnresolvedReference ->
+                            if List.length members > 1 then
+                                -- Bare Json.Decode.Error constructors often resolve as
+                                -- Unresolved when only `import Json.Decode exposing (..)`
+                                -- is used. Match the known 2-arg Gren record shapes.
+                                case ( qualifiedName.name, List.length members ) of
+                                    ( "Field", 2 ) ->
+                                        addNamedPayloadEdits [ "name", "error" ] members withChildren
+
+                                    ( "Index", 2 ) ->
+                                        addNamedPayloadEdits [ "index", "error" ] members withChildren
+
+                                    ( "Failure", 2 ) ->
+                                        addNamedPayloadEdits [ "message", "value" ] members withChildren
+
+                                    _ ->
+                                        addDiagnostic
+                                            { code = "UNMAPPED_SYMBOL"
+                                            , severity = Types.Error
+                                            , message = "The multi-argument constructor pattern `" ++ qualifiedName.name ++ "` could not be resolved safely."
+                                            , range = Just range
+                                            , help = Just "Provide a mapping for the dependency constructor or include its Elm source in the package graph."
+                                            }
+                                            withChildren
+
+                            else
+                                withChildren
 
         AsPattern inner aliasName ->
             context
@@ -3466,26 +5203,86 @@ addTupleEdits kind separator range members context =
 
 addPayloadEdits : EditKind -> String -> List (Node value) -> ModuleContext -> ModuleContext
 addPayloadEdits kind separator members context =
-    case members of
-        [] ->
-            context
+    addNamedPayloadEditsWithSeparator kind
+        separator
+        (List.indexedMap (\index _ -> fieldLabel index) members)
+        members
+        context
 
-        first :: remaining ->
+
+{-| Gren renames certain multi-arg constructors to a single record payload with
+domain field labels. Match by constructor name (module-agnostic) so both
+resolved and unresolved references rewrite correctly.
+-}
+namedPlatformPayloadFields : List String -> String -> Maybe (List String)
+namedPlatformPayloadFields moduleParts name =
+    let
+        moduleName =
+            String.join "." moduleParts
+    in
+    case name of
+        -- Distinctive Http.Response constructors (Gren uses named records).
+        "BadStatus_" ->
+            Just [ "metadata", "body" ]
+
+        "GoodStatus_" ->
+            Just [ "metadata", "body" ]
+
+        "BadPayload" ->
+            -- Older Http.Error: BadPayload String body → positional pair
+            Just [ "first", "second" ]
+
+        "Field" ->
+            if moduleName == "Json.Decode" || moduleName == "Decode" then
+                Just [ "name", "error" ]
+
+            else
+                Nothing
+
+        "Index" ->
+            if moduleName == "Json.Decode" || moduleName == "Decode" then
+                Just [ "index", "error" ]
+
+            else
+                Nothing
+
+        "Failure" ->
+            if moduleName == "Json.Decode" || moduleName == "Decode" then
+                Just [ "message", "value" ]
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
+
+
+{-| Like `addPayloadEdits`, but uses explicit field names (for platform
+constructors whose Gren form is a single record payload with known labels).
+-}
+addNamedPayloadEdits : List String -> List (Node value) -> ModuleContext -> ModuleContext
+addNamedPayloadEdits labels members context =
+    addNamedPayloadEditsWithSeparator Types.CustomConstructor "=" labels members context
+
+
+addNamedPayloadEditsWithSeparator : EditKind -> String -> List String -> List (Node value) -> ModuleContext -> ModuleContext
+addNamedPayloadEditsWithSeparator kind separator labels members context =
+    case ( members, labels ) of
+        ( firstMember :: remainingMembers, firstLabel :: remainingLabels ) ->
             let
                 withFields : ModuleContext
                 withFields =
-                    remaining
-                        |> List.indexedMap (\index member -> ( index + 1, member ))
+                    List.map2 Tuple.pair remainingLabels remainingMembers
                         |> List.foldl
-                            (\( index, member ) found ->
+                            (\( label, member ) found ->
                                 addInsertion kind
                                     (Node.range member).start
-                                    (", " ++ fieldLabel index ++ " " ++ separator ++ " ")
+                                    (", " ++ label ++ " " ++ separator ++ " ")
                                     found
                             )
                             (addInsertion kind
-                                (Node.range first).start
-                                ("{ " ++ fieldLabel 0 ++ " " ++ separator ++ " ")
+                                (Node.range firstMember).start
+                                ("{ " ++ firstLabel ++ " " ++ separator ++ " ")
                                 context
                             )
             in
@@ -3495,6 +5292,9 @@ addPayloadEdits kind separator members context =
 
                 Nothing ->
                     withFields
+
+        _ ->
+            context
 
 
 addConstructorArityDiagnostic : Range -> String -> Int -> Int -> ModuleContext -> ModuleContext

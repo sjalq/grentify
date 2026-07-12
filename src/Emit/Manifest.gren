@@ -2,6 +2,7 @@ module Emit.Manifest exposing
     ( Dependency(..)
     , ExposedModules(..)
     , Spec
+    , SpecKind(..)
     , encode
     )
 
@@ -27,8 +28,14 @@ type Dependency
     | LocalPath String
 
 
+type SpecKind
+    = PackageKind
+    | ApplicationKind
+
+
 type alias Spec =
-    { platform : Platform
+    { kind : SpecKind
+    , platform : Platform
     , name : String
     , summary : String
     , license : String
@@ -36,6 +43,7 @@ type alias Spec =
     , exposedModules : ExposedModules
     , grenVersion : String
     , dependencies : Dict String Dependency
+    , sourceDirectories : Array String
     }
 
 
@@ -47,29 +55,43 @@ encode spec =
 
 validate : Spec -> Result Error {}
 validate spec =
-    if PackageName.fromString spec.name == Nothing then
-        invalid ("Invalid Gren package name " ++ spec.name ++ ".")
+    when spec.kind is
+        ApplicationKind ->
+            if SemanticVersionRange.fromString spec.grenVersion == Nothing
+                && SemanticVersion.fromString spec.grenVersion == Nothing
+            then
+                invalid ("Invalid Gren compiler version " ++ spec.grenVersion ++ ".")
 
-    else if String.count spec.summary > 80 then
-        invalid "Gren package summaries must not exceed 80 characters."
+            else if not (validDependencies spec.dependencies) then
+                invalid "One or more Gren dependencies or requirements are invalid."
 
-    else if SemanticVersion.fromString spec.version == Nothing then
-        invalid ("Invalid Gren package version " ++ spec.version ++ ".")
+            else
+                Ok {}
 
-    else if SemanticVersionRange.fromString spec.grenVersion == Nothing then
-        invalid ("Invalid Gren compiler range " ++ spec.grenVersion ++ ".")
+        PackageKind ->
+            if PackageName.fromString spec.name == Nothing then
+                invalid ("Invalid Gren package name " ++ spec.name ++ ".")
 
-    else if not (validLicense spec.license) then
-        invalid ("Unsupported SPDX license " ++ spec.license ++ ".")
+            else if String.count spec.summary > 80 then
+                invalid "Gren package summaries must not exceed 80 characters."
 
-    else if not (validExposedModules spec.exposedModules) then
-        invalid "One or more exposed Gren module names are invalid."
+            else if SemanticVersion.fromString spec.version == Nothing then
+                invalid ("Invalid Gren package version " ++ spec.version ++ ".")
 
-    else if not (validDependencies spec.dependencies) then
-        invalid "One or more Gren dependencies or requirements are invalid."
+            else if SemanticVersionRange.fromString spec.grenVersion == Nothing then
+                invalid ("Invalid Gren compiler range " ++ spec.grenVersion ++ ".")
 
-    else
-        Ok {}
+            else if not (validLicense spec.license) then
+                invalid ("Unsupported SPDX license " ++ spec.license ++ ".")
+
+            else if not (validExposedModules spec.exposedModules) then
+                invalid "One or more exposed Gren module names are invalid."
+
+            else if not (validDependencies spec.dependencies) then
+                invalid "One or more Gren dependencies or requirements are invalid."
+
+            else
+                Ok {}
 
 
 invalid : String -> Result Error a
@@ -122,17 +144,36 @@ validDependencies dependencies =
 
 toJson : Spec -> Encode.Value
 toJson spec =
-    Encode.object
-        [ { key = "type", value = Encode.string "package" }
-        , { key = "platform", value = Platform.toJson spec.platform }
-        , { key = "name", value = Encode.string spec.name }
-        , { key = "summary", value = Encode.string spec.summary }
-        , { key = "license", value = Encode.string spec.license }
-        , { key = "version", value = Encode.string spec.version }
-        , { key = "exposed-modules", value = exposedToJson spec.exposedModules }
-        , { key = "gren-version", value = Encode.string spec.grenVersion }
-        , { key = "dependencies", value = Encode.dict identity dependencyToJson spec.dependencies }
-        ]
+    when spec.kind is
+        ApplicationKind ->
+            Encode.object
+                [ { key = "type", value = Encode.string "application" }
+                , { key = "platform", value = Platform.toJson spec.platform }
+                , { key = "source-directories", value = Encode.array Encode.string spec.sourceDirectories }
+                , { key = "gren-version", value = Encode.string spec.grenVersion }
+                , { key = "dependencies"
+                  , value =
+                        Encode.object
+                            [ { key = "direct"
+                              , value = Encode.dict identity applicationDependencyToJson spec.dependencies
+                              }
+                            , { key = "indirect", value = Encode.object [] }
+                            ]
+                  }
+                ]
+
+        PackageKind ->
+            Encode.object
+                [ { key = "type", value = Encode.string "package" }
+                , { key = "platform", value = Platform.toJson spec.platform }
+                , { key = "name", value = Encode.string spec.name }
+                , { key = "summary", value = Encode.string spec.summary }
+                , { key = "license", value = Encode.string spec.license }
+                , { key = "version", value = Encode.string spec.version }
+                , { key = "exposed-modules", value = exposedToJson spec.exposedModules }
+                , { key = "gren-version", value = Encode.string spec.grenVersion }
+                , { key = "dependencies", value = Encode.dict identity dependencyToJson spec.dependencies }
+                ]
 
 
 exposedToJson : ExposedModules -> Encode.Value
@@ -153,3 +194,26 @@ dependencyToJson dependency =
 
         LocalPath path ->
             Encode.string ("local:" ++ path)
+
+
+{-| Applications require exact version pins, not ranges.
+-}
+applicationDependencyToJson : Dependency -> Encode.Value
+applicationDependencyToJson dependency =
+    when dependency is
+        VersionRange range ->
+            Encode.string (rangeLowerBound range)
+
+        LocalPath path ->
+            Encode.string ("local:" ++ path)
+
+
+rangeLowerBound : String -> String
+rangeLowerBound range =
+    -- "6.0.2 <= v < 7.0.0" → "6.0.2"; already-exact pins pass through.
+    when String.firstIndexOf " <= v < " range is
+        Just index ->
+            String.slice 0 index range
+
+        Nothing ->
+            range

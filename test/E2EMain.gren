@@ -199,6 +199,7 @@ runScenario runtime spec =
             , json = False
             , namespaceModules = False
             , vendor = False
+            , shim = False
             }
     in
     Orchestrator.run runtime.context runtime.permissions options

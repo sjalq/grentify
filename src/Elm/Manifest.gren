@@ -9,13 +9,12 @@ module Elm.Manifest exposing
     , errorToString
     )
 
-{-| Decoder for Elm _package_ manifests.
+{-| Decoder for Elm package and application manifests.
 
-Applications intentionally are not accepted: they have exact dependency
-versions and source-directory semantics which cannot be emitted as a Gren
-package. Dependencies are keyed by their canonical package-name string and
-exposed modules are flattened into one deterministic array, so callers do not
-need to handle both Elm's flat and sectioned encodings.
+Applications are accepted and normalized into the same Manifest shape the
+rest of the pipeline expects: exact dependency pins become closed ranges,
+source-directories are recorded, and a synthetic package identity is used
+when none is present so emit/verify can branch on `isApplication`.
 -}
 
 import Array exposing (Array)
@@ -37,6 +36,8 @@ type alias Manifest =
     , elmVersion : Range
     , dependencies : Dict String Dependency
     , testDependencies : Dict String Dependency
+    , isApplication : Bool
+    , sourceDirectories : Array String
     }
 
 
@@ -47,8 +48,7 @@ type alias Dependency =
 
 
 type Error
-    = ApplicationManifest
-    | DecodeFailure String
+    = DecodeFailure String
 
 
 decoder : Decoder Manifest
@@ -60,25 +60,17 @@ decoder =
                     packageDecoder
 
                 else if manifestType == "application" then
-                    Decode.fail "Elm applications are not supported; expected an Elm package manifest."
+                    applicationDecoder
 
                 else
-                    Decode.fail ("Unsupported Elm manifest type '" ++ manifestType ++ "'; expected 'package'.")
+                    Decode.fail ("Unsupported Elm manifest type '" ++ manifestType ++ "'; expected 'package' or 'application'.")
             )
 
 
 decodeString : String -> Result Error Manifest
 decodeString source =
-    when Decode.decodeString (Decode.field "type" Decode.string) source is
-        Ok "application" ->
-            Err ApplicationManifest
-
-        Ok _ ->
-            Decode.decodeString decoder source
-                |> Result.mapError (Decode.errorToString >> DecodeFailure)
-
-        Err decodeError ->
-            Err (DecodeFailure (Decode.errorToString decodeError))
+    Decode.decodeString decoder source
+        |> Result.mapError (Decode.errorToString >> DecodeFailure)
 
 
 packageDecoder : Decoder Manifest
@@ -93,6 +85,8 @@ packageDecoder =
             , elmVersion = elmVersion
             , dependencies = dependencies
             , testDependencies = testDependencies
+            , isApplication = False
+            , sourceDirectories = [ "src" ]
             }
         )
         (Decode.field "name" packageNameDecoder)
@@ -102,7 +96,197 @@ packageDecoder =
         (Decode.field "exposed-modules" exposedModulesDecoder)
         (Decode.field "elm-version" (rangeDecoder "elm-version"))
         (Decode.field "dependencies" (dependenciesDecoder "dependencies"))
-        (Decode.field "test-dependencies" (dependenciesDecoder "test-dependencies"))
+        (Decode.oneOf
+            [ Decode.field "test-dependencies" (dependenciesDecoder "test-dependencies")
+            , Decode.succeed Dict.empty
+            ]
+        )
+
+
+{-| Applications use exact dependency pins under `dependencies.direct` /
+`dependencies.indirect` and optional `test-dependencies`.
+-}
+applicationDecoder : Decoder Manifest
+applicationDecoder =
+    Decode.map4
+        (\sourceDirectories elmVersion dependencies testDependencies ->
+            applicationManifest sourceDirectories elmVersion dependencies testDependencies
+        )
+        (Decode.oneOf
+            [ Decode.field "source-directories" (Decode.array Decode.string)
+            , Decode.succeed [ "src" ]
+            ]
+        )
+        (Decode.field "elm-version" (exactOrRangeDecoder "elm-version"))
+        (Decode.field "dependencies" applicationDependenciesDecoder)
+        (Decode.oneOf
+            [ Decode.field "test-dependencies" applicationDependenciesDecoder
+            , Decode.succeed Dict.empty
+            ]
+        )
+        |> Decode.andThen
+            (\result ->
+                when result is
+                    Ok manifest ->
+                        Decode.succeed manifest
+
+                    Err message ->
+                        Decode.fail message
+            )
+
+
+applicationManifest
+    : Array String
+    -> Range
+    -> Dict String Dependency
+    -> Dict String Dependency
+    -> Result String Manifest
+applicationManifest sourceDirectories elmVersion dependencies testDependencies =
+    Result.map2
+        (\name version ->
+            { name = name
+            , summary = "Ported Elm application"
+            , license = "MIT"
+            , version = version
+            , exposedModules = [ "Main" ]
+            , elmVersion = elmVersion
+            , dependencies = dependencies
+            , testDependencies = testDependencies
+            , isApplication = True
+            , sourceDirectories =
+                if Array.isEmpty sourceDirectories then
+                    [ "src" ]
+
+                else
+                    sourceDirectories
+            }
+        )
+        (PackageName.parse "app/local" |> Result.mapError PackageName.errorToString)
+        (Semver.parseVersion "1.0.0" |> Result.mapError Semver.errorToString)
+
+
+optionalDependenciesDecoder : String -> Decoder (Dict String Dependency)
+optionalDependenciesDecoder fieldName =
+    Decode.oneOf
+        [ dependenciesDecoder fieldName
+        , Decode.succeed Dict.empty
+        ]
+
+
+applicationDependenciesDecoder : Decoder (Dict String Dependency)
+applicationDependenciesDecoder =
+    Decode.map2
+        (\direct indirect ->
+            Dict.foldl Dict.set direct indirect
+        )
+        (Decode.oneOf
+            [ Decode.field "direct" (exactDependenciesDecoder "dependencies.direct")
+            , exactDependenciesDecoder "dependencies"
+            ]
+        )
+        (Decode.oneOf
+            [ Decode.field "indirect" (exactDependenciesDecoder "dependencies.indirect")
+            , Decode.succeed Dict.empty
+            ]
+        )
+
+
+exactDependenciesDecoder : String -> Decoder (Dict String Dependency)
+exactDependenciesDecoder fieldName =
+    Decode.keyValuePairs Decode.string
+        |> Decode.andThen (decodeExactDependencies fieldName)
+
+
+decodeExactDependencies : String -> Array { key : String, value : String } -> Decoder (Dict String Dependency)
+decodeExactDependencies fieldName pairs =
+    pairs
+        |> Array.sortBy .key
+        |> Array.foldl
+            (\pair accumulated ->
+                accumulated
+                    |> Result.andThen
+                        (\dependencies ->
+                            when PackageName.parse pair.key is
+                                Err packageError ->
+                                    Err
+                                        ("Elm application field '"
+                                            ++ fieldName
+                                            ++ "' contains an invalid package name. "
+                                            ++ PackageName.errorToString packageError
+                                        )
+
+                                Ok packageName ->
+                                    when exactConstraint pair.value is
+                                        Err message ->
+                                            Err
+                                                ("Elm application dependency '"
+                                                    ++ pair.key
+                                                    ++ "' has an invalid version. "
+                                                    ++ message
+                                                )
+
+                                        Ok constraint ->
+                                            Ok
+                                                (Dict.set pair.key
+                                                    { name = packageName
+                                                    , constraint = constraint
+                                                    }
+                                                    dependencies
+                                                )
+                        )
+            )
+            (Ok Dict.empty)
+        |> resultToDecoder
+
+
+{-| Exact pins (`1.0.5`) become a closed range so the shared solver can use them.
+-}
+exactConstraint : String -> Result String Range
+exactConstraint source =
+    when Semver.parseRange source is
+        Ok range ->
+            Ok range
+
+        Err _ ->
+            when Semver.parseVersion source is
+                Ok version ->
+                    let
+                        rendered =
+                            Semver.versionToString version
+                    in
+                    Semver.parseRange (rendered ++ " <= v < " ++ nextPatchBound version)
+                        |> Result.mapError Semver.errorToString
+
+                Err versionError ->
+                    Err (Semver.errorToString versionError)
+
+
+nextPatchBound : Version -> String
+nextPatchBound version =
+    String.fromInt version.major
+        ++ "."
+        ++ String.fromInt version.minor
+        ++ "."
+        ++ String.fromInt (version.patch + 1)
+
+
+exactOrRangeDecoder : String -> Decoder Range
+exactOrRangeDecoder fieldName =
+    Decode.string
+        |> Decode.andThen
+            (\source ->
+                when exactConstraint source is
+                    Ok range ->
+                        Decode.succeed range
+
+                    Err message ->
+                        Decode.fail
+                            ("Elm manifest field '"
+                                ++ fieldName
+                                ++ "' is invalid. "
+                                ++ message
+                            )
+            )
 
 
 packageNameDecoder : Decoder Name
@@ -348,8 +532,5 @@ dependencyNames manifest =
 errorToString : Error -> String
 errorToString error =
     when error is
-        ApplicationManifest ->
-            "The supplied elm.json describes an application. Only Elm packages can be ported to Gren package format."
-
         DecodeFailure message ->
-            "Invalid Elm package manifest: " ++ message
+            "Invalid Elm package or application manifest: " ++ message

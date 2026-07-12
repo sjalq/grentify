@@ -21,6 +21,7 @@ one pass, and finalizes the small lexical syntax differences.
 
 import Array exposing (Array)
 import Ast.Decode as AstDecode
+import Ast.MatchCompile as AstMatchCompile
 import Ast.NameSub as AstNameSub
 import Ast.Print as AstPrint
 import Char
@@ -392,10 +393,9 @@ transformModule registry input extraction =
     toGrenSourcePath input.path
         |> Result.andThen
             (\outputPath ->
-                -- Phase 1 dual path: prefer resolved AST → name-sub → print when
-                -- the extractor supplied an AST and it decodes cleanly. Fall back
-                -- to the range-edit pipeline otherwise (hand-crafted tests, older
-                -- extracts, or shapes the Phase 1 printer does not yet cover).
+                -- Dual path: resolved AST → name-sub → match-compile → print.
+                -- Fall back to range edits when list patterns remain unported
+                -- (non-pure cons heads, function-arg cons, etc.).
                 when tryAstTransform registry input extraction outputPath is
                     Just transformed ->
                         transformed
@@ -425,13 +425,20 @@ tryAstTransform registry input extraction outputPath =
 
                 Ok file ->
                     let
-                        printed =
+                        lowered =
                             file
                                 |> AstNameSub.apply registry
-                                |> AstPrint.print
+                                |> AstMatchCompile.compile
+
+                        printed =
+                            AstPrint.print lowered
                     in
-                    -- Refuse AST path when Phase 1 printer left unported markers.
-                    if String.contains "unported-cons-pattern" printed then
+                    -- Refuse when match-compile left list-cons patterns, or the
+                    -- printer still emitted its unported marker.
+                    if
+                        AstMatchCompile.hasUnportedListPatterns lowered
+                            || String.contains "unported-cons-pattern" printed
+                    then
                         Nothing
 
                     else

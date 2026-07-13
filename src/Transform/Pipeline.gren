@@ -360,6 +360,9 @@ transform registry extraction sources =
                 let
                     packageRecordAliases =
                         collectPackageRecordAliases extraction.modules
+
+                    packageCtorArities =
+                        collectPackageCtorArities extraction.modules
                 in
                 sources
                     |> Array.sortBy (\source -> (normalizePath source.path).path)
@@ -369,7 +372,8 @@ transform registry extraction sources =
                                 |> Result.andThen
                                     (\modules ->
                                         findMatchingExtraction source.path extraction.modules
-                                            |> Result.andThen (transformModule registry packageRecordAliases source)
+                                            |> Result.andThen
+                                                (transformModule registry packageRecordAliases packageCtorArities source)
                                             |> Result.map (\module_ -> Array.pushLast module_ modules)
                                     )
                         )
@@ -421,8 +425,36 @@ collectPackageRecordAliases modules =
         modules
 
 
-transformModule : Registry -> Dict String (Array String) -> SourceFile -> Protocol.ModuleExtraction -> Result Error TransformedModule
-transformModule registry packageRecordAliases input extraction =
+{-| `"Module.Ctor"` → arity (≥ 2), from every AST in the package.
+-}
+collectPackageCtorArities : Array Protocol.ModuleExtraction -> Dict String Int
+collectPackageCtorArities modules =
+    Array.foldl
+        (\moduleExtraction acc ->
+            when moduleExtraction.ast is
+                Nothing ->
+                    acc
+
+                Just astValue ->
+                    when AstDecode.decode astValue is
+                        Err _ ->
+                            acc
+
+                        Ok file ->
+                            Dict.foldl Dict.set acc (AstCtorLaw.collectFromFile file)
+        )
+        Dict.empty
+        modules
+
+
+transformModule :
+    Registry
+    -> Dict String (Array String)
+    -> Dict String Int
+    -> SourceFile
+    -> Protocol.ModuleExtraction
+    -> Result Error TransformedModule
+transformModule registry packageRecordAliases packageCtorArities input extraction =
     toGrenSourcePath input.path
         |> Result.andThen
             (\outputPath ->
@@ -435,19 +467,26 @@ transformModule registry packageRecordAliases input extraction =
                             |> Result.map (withTransformPath input extraction "fallback:no-ast")
 
                     Just astValue ->
-                        transformModuleViaAst registry packageRecordAliases input extraction outputPath astValue
+                        transformModuleViaAst registry
+                            packageRecordAliases
+                            packageCtorArities
+                            input
+                            extraction
+                            outputPath
+                            astValue
             )
 
 
 transformModuleViaAst :
     Registry
     -> Dict String (Array String)
+    -> Dict String Int
     -> SourceFile
     -> Protocol.ModuleExtraction
     -> String
     -> Decode.Value
     -> Result Error TransformedModule
-transformModuleViaAst registry packageRecordAliases input extraction outputPath astValue =
+transformModuleViaAst registry packageRecordAliases packageCtorArities input extraction outputPath astValue =
     when AstDecode.decode astValue is
         Err decodeError ->
             Err <|
@@ -464,7 +503,7 @@ transformModuleViaAst registry packageRecordAliases input extraction outputPath 
                     file
                         |> AstNameSub.apply registry
                         |> AstRecordAlias.apply packageRecordAliases
-                        |> AstCtorLaw.apply
+                        |> AstCtorLaw.apply packageCtorArities
                         |> AstMatchCompile.compile
                         |> AstReserved.apply
 

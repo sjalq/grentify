@@ -219,6 +219,17 @@ subPattern registry pattern =
         PatRecord fields ->
             PatRecord fields
 
+        PatRecordBind fields ->
+            PatRecordBind
+                (Array.map
+                    (\field ->
+                        { name = field.name
+                        , pattern = subPattern registry field.pattern
+                        }
+                    )
+                    fields
+                )
+
         PatCons { head = head, tail = tail } ->
             PatCons
                 { head = subPattern registry head

@@ -132,6 +132,7 @@ type Pattern
     | PatFloat Float
     | PatTuple (Array Pattern)
     | PatRecord (Array String)
+    | PatRecordBind (Array { name : String, pattern : Pattern })
     | PatCons { head : Pattern, tail : Pattern }
     | PatList (Array Pattern)
     | PatVar String

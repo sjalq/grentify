@@ -405,6 +405,21 @@ printPattern prec pattern =
         PatRecord fields ->
             "{ " ++ String.join ", " fields ++ " }"
 
+        PatRecordBind fields ->
+            if Array.isEmpty fields then
+                "{}"
+
+            else
+                "{ "
+                    ++ String.join ", "
+                        (Array.map
+                            (\field ->
+                                field.name ++ " = " ++ printPattern 0 field.pattern
+                            )
+                            fields
+                        )
+                    ++ " }"
+
         PatCons { head = head, tail = tail } ->
             printConsPattern head tail
 

@@ -245,6 +245,17 @@ rewritePattern pattern =
         PatRecord fields ->
             PatRecord (Array.map rewriteName fields)
 
+        PatRecordBind fields ->
+            PatRecordBind
+                (Array.map
+                    (\field ->
+                        { name = field.name
+                        , pattern = rewritePattern field.pattern
+                        }
+                    )
+                    fields
+                )
+
         PatCons { head = head, tail = tail } ->
             PatCons
                 { head = rewritePattern head

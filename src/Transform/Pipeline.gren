@@ -363,6 +363,9 @@ transform registry extraction sources =
 
                     packageCtorArities =
                         collectPackageCtorArities extraction.modules
+
+                    packageSoleCtors =
+                        collectPackageSoleCtors extraction.modules
                 in
                 sources
                     |> Array.sortBy (\source -> (normalizePath source.path).path)
@@ -373,7 +376,12 @@ transform registry extraction sources =
                                     (\modules ->
                                         findMatchingExtraction source.path extraction.modules
                                             |> Result.andThen
-                                                (transformModule registry packageRecordAliases packageCtorArities source)
+                                                (transformModule registry
+                                                    packageRecordAliases
+                                                    packageCtorArities
+                                                    packageSoleCtors
+                                                    source
+                                                )
                                             |> Result.map (\module_ -> Array.pushLast module_ modules)
                                     )
                         )
@@ -447,14 +455,37 @@ collectPackageCtorArities modules =
         modules
 
 
+{-| Sole custom-type constructors (`Module.Ctor` + short name) for irrefutable peels.
+-}
+collectPackageSoleCtors : Array Protocol.ModuleExtraction -> Dict String {}
+collectPackageSoleCtors modules =
+    Array.foldl
+        (\moduleExtraction acc ->
+            when moduleExtraction.ast is
+                Nothing ->
+                    acc
+
+                Just astValue ->
+                    when AstDecode.decode astValue is
+                        Err _ ->
+                            acc
+
+                        Ok file ->
+                            Dict.foldl Dict.set acc (AstMatchCompile.collectSoleCtorsFromFile file)
+        )
+        Dict.empty
+        modules
+
+
 transformModule :
     Registry
     -> Dict String (Array String)
     -> Dict String Int
+    -> Dict String {}
     -> SourceFile
     -> Protocol.ModuleExtraction
     -> Result Error TransformedModule
-transformModule registry packageRecordAliases packageCtorArities input extraction =
+transformModule registry packageRecordAliases packageCtorArities packageSoleCtors input extraction =
     toGrenSourcePath input.path
         |> Result.andThen
             (\outputPath ->
@@ -470,6 +501,7 @@ transformModule registry packageRecordAliases packageCtorArities input extractio
                         transformModuleViaAst registry
                             packageRecordAliases
                             packageCtorArities
+                            packageSoleCtors
                             input
                             extraction
                             outputPath
@@ -481,12 +513,13 @@ transformModuleViaAst :
     Registry
     -> Dict String (Array String)
     -> Dict String Int
+    -> Dict String {}
     -> SourceFile
     -> Protocol.ModuleExtraction
     -> String
     -> Decode.Value
     -> Result Error TransformedModule
-transformModuleViaAst registry packageRecordAliases packageCtorArities input extraction outputPath astValue =
+transformModuleViaAst registry packageRecordAliases packageCtorArities packageSoleCtors input extraction outputPath astValue =
     when AstDecode.decode astValue is
         Err decodeError ->
             Err <|
@@ -504,7 +537,7 @@ transformModuleViaAst registry packageRecordAliases packageCtorArities input ext
                         |> AstNameSub.apply registry
                         |> AstRecordAlias.apply packageRecordAliases
                         |> AstCtorLaw.apply packageCtorArities
-                        |> AstMatchCompile.compile
+                        |> AstMatchCompile.compile packageSoleCtors
                         |> AstReserved.apply
 
                 printed =

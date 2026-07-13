@@ -394,34 +394,35 @@ transformModule registry input extraction =
         |> Result.andThen
             (\outputPath ->
                 -- Dual path: resolved AST → name-sub → match-compile → print.
-                -- Fall back to range edits when list patterns remain unported
-                -- (non-pure cons heads, function-arg cons, etc.).
+                -- Fall back to range edits when list patterns remain unported.
+                -- TRANSFORM_PATH info diagnostics tag which path was used.
                 when tryAstTransform registry input extraction outputPath is
-                    Just transformed ->
-                        transformed
+                    Ok transformed ->
+                        Result.map (withTransformPath input extraction "ast") transformed
 
-                    Nothing ->
+                    Err fallbackReason ->
                         transformModuleViaEdits registry input extraction outputPath
+                            |> Result.map (withTransformPath input extraction fallbackReason)
             )
 
 
-{-| Attempt AST print path. Returns Nothing to signal edit-path fallback.
+{-| Ok = use AST result. Err = fallback reason for edit path.
 -}
 tryAstTransform :
     Registry
     -> SourceFile
     -> Protocol.ModuleExtraction
     -> String
-    -> Maybe (Result Error TransformedModule)
+    -> Result String (Result Error TransformedModule)
 tryAstTransform registry input extraction outputPath =
     when extraction.ast is
         Nothing ->
-            Nothing
+            Err "fallback:no-ast"
 
         Just astValue ->
             when AstDecode.decode astValue is
                 Err _ ->
-                    Nothing
+                    Err "fallback:decode"
 
                 Ok file ->
                     let
@@ -433,18 +434,37 @@ tryAstTransform registry input extraction outputPath =
                         printed =
                             AstPrint.print lowered
                     in
-                    -- Refuse when match-compile left list-cons patterns, or the
-                    -- printer still emitted its unported marker.
-                    if
-                        AstMatchCompile.hasUnportedListPatterns lowered
-                            || String.contains "unported-cons-pattern" printed
-                    then
-                        Nothing
+                    if AstMatchCompile.hasUnportedListPatterns lowered then
+                        Err "fallback:unported-list"
+
+                    else if String.contains "unported-cons-pattern" printed then
+                        Err "fallback:unported-print"
 
                     else
-                        Just
+                        Ok
                             (finalizeTransformedModule registry input extraction outputPath printed [] [] [])
 
+
+withTransformPath :
+    SourceFile
+    -> Protocol.ModuleExtraction
+    -> String
+    -> TransformedModule
+    -> TransformedModule
+withTransformPath input extraction pathKind module_ =
+    { module_
+        | diagnostics =
+            Array.pushFirst
+                { path = Just input.path
+                , moduleName = Just extraction.moduleName
+                , code = "TRANSFORM_PATH"
+                , severity = "info"
+                , message = pathKind
+                , range = Nothing
+                , help = Nothing
+                }
+                module_.diagnostics
+    }
 
 transformModuleViaEdits :
     Registry

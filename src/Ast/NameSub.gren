@@ -3,8 +3,9 @@ module Ast.NameSub exposing (apply)
 {-| Catalog-driven name substitution on a resolved AST.
 
 Walks every named reference (value, type, constructor) and rewrites module
-targets and symbol names using the mapping registry. Structural shapes are
-unchanged here; `Ast.Print` lowers case/when, tuples, unit, and list cons.
+targets and symbol names using the mapping registry. Also applies Gren's
+implicit module aliases (`Platform.Cmd` → `Cmd`, `Platform.Sub` → `Sub`),
+matching the edit-path seed in `Transform.Pipeline.collectMappingEdits`.
 -}
 
 import Array exposing (Array)
@@ -696,24 +697,44 @@ subRef registry ref isType =
                 ref
 
         Just sourceModule ->
-            when Registry.moduleMappingFor sourceModule registry is
-                Nothing ->
-                    ref
+            let
+                mapped =
+                    when Registry.moduleMappingFor sourceModule registry is
+                        Nothing ->
+                            ref
 
-                Just mapping ->
-                    let
-                        mappedName =
-                            mappedSymbol mapping ref.name isType
-                    in
-                    if String.contains "." mappedName then
-                        let
-                            split =
-                                splitQualified mappedName
-                        in
-                        { moduleName = split.moduleName, name = split.name }
+                        Just mapping ->
+                            let
+                                mappedName =
+                                    mappedSymbol mapping ref.name isType
+                            in
+                            if String.contains "." mappedName then
+                                let
+                                    split =
+                                        splitQualified mappedName
+                                in
+                                { moduleName = split.moduleName, name = split.name }
 
-                    else
-                        { moduleName = Just mapping.target, name = mappedName }
+                            else
+                                { moduleName = Just mapping.target, name = mappedName }
+            in
+            applyImplicitModuleAlias mapped
+
+
+{-| Elm/Gren pretends `import Platform.Cmd as Cmd` / `Platform.Sub as Sub`.
+Resolved AST refs use the canonical module name; print must use the alias.
+-}
+applyImplicitModuleAlias : NamedRef -> NamedRef
+applyImplicitModuleAlias ref =
+    when ref.moduleName is
+        Just "Platform.Cmd" ->
+            { ref | moduleName = Just "Cmd" }
+
+        Just "Platform.Sub" ->
+            { ref | moduleName = Just "Sub" }
+
+        _ ->
+            ref
 
 
 mappedSymbol : ModuleMapping -> String -> Bool -> String

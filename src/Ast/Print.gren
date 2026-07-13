@@ -914,6 +914,8 @@ isDefaultTypeModule moduleName =
         , "Result"
         , "Order"
         , "Basics"
+        , "Cmd"
+        , "Sub"
         ]
 
 
@@ -925,6 +927,8 @@ isDefaultCtor moduleName name =
             , "Result"
             , "Order"
             , "Basics"
+            , "Cmd"
+            , "Sub"
             ]
 
 

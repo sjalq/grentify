@@ -1,0 +1,277 @@
+module Ast.CtorLaw exposing (apply)
+
+{-| Gren ctor law: multi-arg ADT constructors take one record payload.
+
+Type defs and fully-applied constructs are handled in `Ast.Print`. This pass
+η-expands **bare / partially applied** multi-arg constructors so they remain
+usable as functions:
+
+    MonthAndDay
+      → (\\a b -> MonthAndDay a b)   -- Print lowers the body to a record
+
+    MonthAndDay x
+      → (\\b -> MonthAndDay x b)
+
+Arities come from custom-type declarations in the same module (generic, local).
+-}
+
+import Array exposing (Array)
+import Ast.Types exposing
+    ( CaseArm
+    , Declaration(..)
+    , Expr(..)
+    , File
+    , LetDecl(..)
+    , NamedRef
+    , Pattern(..)
+    )
+import Dict exposing (Dict)
+import Maybe exposing (Maybe(..))
+
+
+apply : File -> File
+apply file =
+    let
+        arities =
+            collectArities file.declarations
+    in
+    if Array.isEmpty (Dict.keys arities) then
+        file
+
+    else
+        { file
+            | declarations =
+                Array.indexedMap (\i d -> rewriteDeclaration arities (i * 97) d) file.declarations
+        }
+
+
+{-| Only multi-arg (arity ≥ 2) constructors need η-expansion.
+-}
+collectArities : Array Declaration -> Dict String Int
+collectArities declarations =
+    Array.foldl
+        (\declaration acc ->
+            when declaration is
+                DeclCustomType custom ->
+                    Array.foldl
+                        (\ctor inner ->
+                            let
+                                n =
+                                    Array.length ctor.arguments
+                            in
+                            if n >= 2 then
+                                Dict.set ctor.name n inner
+
+                            else
+                                inner
+                        )
+                        acc
+                        custom.constructors
+
+                _ ->
+                    acc
+        )
+        Dict.empty
+        declarations
+
+
+rewriteDeclaration : Dict String Int -> Int -> Declaration -> Declaration
+rewriteDeclaration arities seed declaration =
+    when declaration is
+        DeclFunction fn ->
+            DeclFunction
+                { fn
+                    | expression = rewriteExpr arities (seed + 1) fn.expression
+                }
+
+        DeclDestructure { pattern = pattern, expression = expression } ->
+            DeclDestructure
+                { pattern = pattern
+                , expression = rewriteExpr arities (seed + 1) expression
+                }
+
+        _ ->
+            declaration
+
+
+rewriteExpr : Dict String Int -> Int -> Expr -> Expr
+rewriteExpr arities seed expr =
+    when expr is
+        ExprApplication parts ->
+            rewriteApplication arities seed parts
+
+        ExprBinop { operator = op, left = left, right = right } ->
+            ExprBinop
+                { operator = op
+                , left = rewriteExpr arities (seed + 1) left
+                , right = rewriteExpr arities (seed + 2) right
+                }
+
+        ExprVar ref ->
+            when ctorArity arities ref is
+                Just arity ->
+                    etaExpand ref arity [] seed
+
+                Nothing ->
+                    expr
+
+        ExprIf { condition = c, then_ = t, else_ = e } ->
+            ExprIf
+                { condition = rewriteExpr arities (seed + 1) c
+                , then_ = rewriteExpr arities (seed + 2) t
+                , else_ = rewriteExpr arities (seed + 3) e
+                }
+
+        ExprNegation inner ->
+            ExprNegation (rewriteExpr arities (seed + 1) inner)
+
+        ExprTuple items ->
+            ExprTuple (Array.indexedMap (\i p -> rewriteExpr arities (seed + 1 + i) p) items)
+
+        ExprLet { declarations = declarations, expression = body } ->
+            ExprLet
+                { declarations =
+                    Array.indexedMap (\i d -> rewriteLetDecl arities (seed + 1 + i) d) declarations
+                , expression = rewriteExpr arities (seed + 50) body
+                }
+
+        ExprCase { expression = scrutinee, cases = arms } ->
+            ExprCase
+                { expression = rewriteExpr arities (seed + 1) scrutinee
+                , cases =
+                    Array.indexedMap
+                        (\i arm ->
+                            { pattern = arm.pattern
+                            , body = rewriteExpr arities (seed + 10 + i * 13) arm.body
+                            }
+                        )
+                        arms
+                }
+
+        ExprLambda { arguments = arguments, expression = body } ->
+            ExprLambda
+                { arguments = arguments
+                , expression = rewriteExpr arities (seed + 1) body
+                }
+
+        ExprRecord fields ->
+            ExprRecord
+                (Array.indexedMap
+                    (\i f ->
+                        { name = f.name
+                        , value = rewriteExpr arities (seed + 1 + i) f.value
+                        }
+                    )
+                    fields
+                )
+
+        ExprList items ->
+            ExprList (Array.indexedMap (\i p -> rewriteExpr arities (seed + 1 + i) p) items)
+
+        ExprAccess { record = record, field = field } ->
+            ExprAccess { record = rewriteExpr arities (seed + 1) record, field = field }
+
+        ExprUpdate { name = name, fields = fields } ->
+            ExprUpdate
+                { name = name
+                , fields =
+                    Array.indexedMap
+                        (\i f ->
+                            { name = f.name
+                            , value = rewriteExpr arities (seed + 1 + i) f.value
+                            }
+                        )
+                        fields
+                }
+
+        _ ->
+            expr
+
+
+rewriteApplication : Dict String Int -> Int -> Array Expr -> Expr
+rewriteApplication arities seed parts =
+    when Array.popFirst parts is
+        Nothing ->
+            ExprApplication []
+
+        Just { first = head, rest = args } ->
+            let
+                rewrittenArgs =
+                    Array.indexedMap (\i a -> rewriteExpr arities (seed + 1 + i) a) args
+            in
+            when head is
+                ExprVar ref ->
+                    when ctorArity arities ref is
+                        Just arity ->
+                            let
+                                supplied =
+                                    Array.length rewrittenArgs
+                            in
+                            if supplied >= arity then
+                                -- Fully applied (or over-applied): Print records the ctor spine.
+                                ExprApplication (Array.pushFirst head rewrittenArgs)
+
+                            else
+                                etaExpand ref arity rewrittenArgs seed
+
+                        Nothing ->
+                            ExprApplication
+                                (Array.pushFirst (rewriteExpr arities seed head) rewrittenArgs)
+
+                _ ->
+                    ExprApplication
+                        (Array.pushFirst (rewriteExpr arities seed head) rewrittenArgs)
+
+
+rewriteLetDecl : Dict String Int -> Int -> LetDecl -> LetDecl
+rewriteLetDecl arities seed declaration =
+    when declaration is
+        LetFunction fn ->
+            LetFunction { fn | expression = rewriteExpr arities (seed + 1) fn.expression }
+
+        LetDestructure { pattern = pattern, expression = expression } ->
+            LetDestructure
+                { pattern = pattern
+                , expression = rewriteExpr arities (seed + 1) expression
+                }
+
+
+ctorArity : Dict String Int -> NamedRef -> Maybe Int
+ctorArity arities ref =
+    when ref.moduleName is
+        Just _ ->
+            Nothing
+
+        Nothing ->
+            Dict.get ref.name arities
+
+
+{-| Build `\\rest... -> Ctor supplied... rest...` for a multi-arg constructor.
+`Print` turns the fully-applied ctor body into a record payload.
+-}
+etaExpand : NamedRef -> Int -> Array Expr -> Int -> Expr
+etaExpand ref arity supplied seed =
+    let
+        missing =
+            arity - Array.length supplied
+
+        argNames =
+            Array.initialize missing
+                0
+                (\i -> "ca_" ++ String.fromInt seed ++ "_" ++ String.fromInt i)
+
+        restVars =
+            Array.map (\n -> ExprVar { moduleName = Nothing, name = n }) argNames
+
+        body =
+            ExprApplication
+                (Array.pushFirst (ExprVar ref) (Array.append supplied restVars))
+    in
+    if missing <= 0 then
+        body
+
+    else
+        ExprLambda
+            { arguments = Array.map PatVar argNames
+            , expression = body
+            }

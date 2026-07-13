@@ -33,11 +33,300 @@ import Maybe exposing (Maybe(..))
 
 apply : Registry -> File -> File
 apply registry file =
-    { file
-        | imports = Array.map (subImport registry) file.imports
-        , declarations = Array.map (subDeclaration registry) file.declarations
-        , moduleDefinition = subModuleDef registry file.moduleDefinition
-    }
+    let
+        withMapped =
+            { file
+                | imports = Array.map (subImport registry) file.imports
+                , declarations = Array.map (subDeclaration registry) file.declarations
+                , moduleDefinition = subModuleDef registry file.moduleDefinition
+            }
+    in
+    -- Law: qualified refs must use the local import alias when present.
+    -- `import Json.Decode as Decode` forbids `Json.Decode.field` in Gren/Elm.
+    qualifyByImports withMapped
+
+
+{-| Map each imported module name to the qualifier used in source (`alias` or bare module).
+-}
+importQualifiers : Array Import -> Dict String String
+importQualifiers imports =
+    Array.foldl
+        (\import_ acc ->
+            let
+                qualifier =
+                    when import_.alias is
+                        Just aliasName ->
+                            aliasName
+
+                        Nothing ->
+                            import_.moduleName
+            in
+            Dict.set import_.moduleName qualifier acc
+        )
+        Dict.empty
+        imports
+
+
+qualifyByImports : File -> File
+qualifyByImports file =
+    let
+        quals =
+            importQualifiers file.imports
+    in
+    if Array.isEmpty (Dict.keys quals) then
+        file
+
+    else
+        { file
+            | declarations = Array.map (qualifyDeclaration quals) file.declarations
+        }
+
+
+qualifyDeclaration : Dict String String -> Declaration -> Declaration
+qualifyDeclaration quals declaration =
+    when declaration is
+        DeclFunction fn ->
+            DeclFunction
+                { fn
+                    | signature = Maybe.map (qualifySignature quals) fn.signature
+                    , arguments = Array.map (qualifyPattern quals) fn.arguments
+                    , expression = qualifyExpr quals fn.expression
+                }
+
+        DeclAlias aliasDecl ->
+            DeclAlias
+                { aliasDecl
+                    | typeAnnotation = qualifyType quals aliasDecl.typeAnnotation
+                }
+
+        DeclCustomType custom ->
+            DeclCustomType
+                { custom
+                    | constructors =
+                        Array.map
+                            (\ctor ->
+                                { ctor
+                                    | arguments = Array.map (qualifyType quals) ctor.arguments
+                                }
+                            )
+                            custom.constructors
+                }
+
+        DeclPort signature ->
+            DeclPort (qualifySignature quals signature)
+
+        DeclDestructure { pattern = pattern, expression = expression } ->
+            DeclDestructure
+                { pattern = qualifyPattern quals pattern
+                , expression = qualifyExpr quals expression
+                }
+
+        DeclInfix ->
+            DeclInfix
+
+
+qualifySignature : Dict String String -> Signature -> Signature
+qualifySignature quals signature =
+    { signature | typeAnnotation = qualifyType quals signature.typeAnnotation }
+
+
+qualifyType : Dict String String -> TypeAnn -> TypeAnn
+qualifyType quals typeAnn =
+    when typeAnn is
+        TypeTyped { ref = ref, arguments = args } ->
+            TypeTyped
+                { ref = qualifyRef quals ref
+                , arguments = Array.map (qualifyType quals) args
+                }
+
+        TypeTuple items ->
+            TypeTuple (Array.map (qualifyType quals) items)
+
+        TypeRecord fields ->
+            TypeRecord
+                (Array.map
+                    (\field ->
+                        { field | typeAnnotation = qualifyType quals field.typeAnnotation }
+                    )
+                    fields
+                )
+
+        TypeGenericRecord { extension = ext, fields = fields } ->
+            TypeGenericRecord
+                { extension = ext
+                , fields =
+                    Array.map
+                        (\field ->
+                            { field | typeAnnotation = qualifyType quals field.typeAnnotation }
+                        )
+                        fields
+                }
+
+        TypeFunction { left = left, right = right } ->
+            TypeFunction
+                { left = qualifyType quals left
+                , right = qualifyType quals right
+                }
+
+        _ ->
+            typeAnn
+
+
+qualifyPattern : Dict String String -> Pattern -> Pattern
+qualifyPattern quals pattern =
+    when pattern is
+        PatNamed { ref = ref, arguments = args } ->
+            PatNamed
+                { ref = qualifyRef quals ref
+                , arguments = Array.map (qualifyPattern quals) args
+                }
+
+        PatTuple items ->
+            PatTuple (Array.map (qualifyPattern quals) items)
+
+        PatList items ->
+            PatList (Array.map (qualifyPattern quals) items)
+
+        PatCons { head = head, tail = tail } ->
+            PatCons
+                { head = qualifyPattern quals head
+                , tail = qualifyPattern quals tail
+                }
+
+        PatRecordBind fields ->
+            PatRecordBind
+                (Array.map
+                    (\field ->
+                        { field | pattern = qualifyPattern quals field.pattern }
+                    )
+                    fields
+                )
+
+        PatAs { pattern = inner, name = name } ->
+            PatAs { pattern = qualifyPattern quals inner, name = name }
+
+        _ ->
+            pattern
+
+
+qualifyExpr : Dict String String -> Expr -> Expr
+qualifyExpr quals expr =
+    when expr is
+        ExprApplication parts ->
+            ExprApplication (Array.map (qualifyExpr quals) parts)
+
+        ExprBinop { operator = op, left = left, right = right } ->
+            ExprBinop
+                { operator = op
+                , left = qualifyExpr quals left
+                , right = qualifyExpr quals right
+                }
+
+        ExprVar ref ->
+            ExprVar (qualifyRef quals ref)
+
+        ExprIf { condition = c, then_ = t, else_ = e } ->
+            ExprIf
+                { condition = qualifyExpr quals c
+                , then_ = qualifyExpr quals t
+                , else_ = qualifyExpr quals e
+                }
+
+        ExprNegation inner ->
+            ExprNegation (qualifyExpr quals inner)
+
+        ExprTuple items ->
+            ExprTuple (Array.map (qualifyExpr quals) items)
+
+        ExprLet { declarations = declarations, expression = body } ->
+            ExprLet
+                { declarations = Array.map (qualifyLetDecl quals) declarations
+                , expression = qualifyExpr quals body
+                }
+
+        ExprCase { expression = scrutinee, cases = arms } ->
+            ExprCase
+                { expression = qualifyExpr quals scrutinee
+                , cases =
+                    Array.map
+                        (\arm ->
+                            { pattern = qualifyPattern quals arm.pattern
+                            , body = qualifyExpr quals arm.body
+                            }
+                        )
+                        arms
+                }
+
+        ExprLambda { arguments = arguments, expression = body } ->
+            ExprLambda
+                { arguments = Array.map (qualifyPattern quals) arguments
+                , expression = qualifyExpr quals body
+                }
+
+        ExprRecord fields ->
+            ExprRecord
+                (Array.map
+                    (\field ->
+                        { field | value = qualifyExpr quals field.value }
+                    )
+                    fields
+                )
+
+        ExprList items ->
+            ExprList (Array.map (qualifyExpr quals) items)
+
+        ExprAccess { record = record, field = field } ->
+            ExprAccess { record = qualifyExpr quals record, field = field }
+
+        ExprUpdate { name = name, fields = fields } ->
+            ExprUpdate
+                { name = name
+                , fields =
+                    Array.map
+                        (\field ->
+                            { field | value = qualifyExpr quals field.value }
+                        )
+                        fields
+                }
+
+        _ ->
+            expr
+
+
+qualifyLetDecl : Dict String String -> LetDecl -> LetDecl
+qualifyLetDecl quals declaration =
+    when declaration is
+        LetFunction fn ->
+            LetFunction
+                { fn
+                    | arguments = Array.map (qualifyPattern quals) fn.arguments
+                    , expression = qualifyExpr quals fn.expression
+                }
+
+        LetDestructure { pattern = pattern, expression = expression } ->
+            LetDestructure
+                { pattern = qualifyPattern quals pattern
+                , expression = qualifyExpr quals expression
+                }
+
+
+qualifyRef : Dict String String -> NamedRef -> NamedRef
+qualifyRef quals ref =
+    when ref.moduleName is
+        Nothing ->
+            ref
+
+        Just moduleName ->
+            when Dict.get moduleName quals is
+                Just qualifier ->
+                    if qualifier == moduleName then
+                        ref
+
+                    else
+                        { moduleName = Just qualifier, name = ref.name }
+
+                Nothing ->
+                    ref
 
 
 subModuleDef : Registry -> ModuleDef -> ModuleDef

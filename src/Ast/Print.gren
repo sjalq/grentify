@@ -248,7 +248,7 @@ printDeclaration declaration =
             ""
 
         DeclDestructure { pattern = pattern, expression = expression } ->
-            printPattern 0 pattern ++ " =\n    " ++ printExpr 0 expression
+            printPattern 1 pattern ++ " =\n    " ++ printExpr 0 expression
 
 
 printConstructor : { name : String, arguments : Array TypeAnn } -> String
@@ -752,7 +752,9 @@ printLetDecl declaration =
             fn.name ++ args ++ " =\n        " ++ indentBlock 2 (printExpr 0 fn.expression)
 
         LetDestructure { pattern = pattern, expression = expression } ->
-            printPattern 0 pattern
+            -- Constructor / record / tuple patterns must be parenthesized on the
+            -- left of `=`; bare `RD first =` is parsed as a function definition.
+            printPattern 1 pattern
                 ++ " =\n        "
                 ++ indentBlock 2 (printExpr 0 expression)
 

@@ -21,6 +21,7 @@ one pass, and finalizes the small lexical syntax differences.
 
 import Array exposing (Array)
 import Ast.Decode as AstDecode
+import Ast.CtorLaw as AstCtorLaw
 import Ast.MatchCompile as AstMatchCompile
 import Ast.NameSub as AstNameSub
 import Ast.Print as AstPrint
@@ -431,6 +432,7 @@ transformModuleViaAst registry input extraction outputPath astValue =
                 lowered =
                     file
                         |> AstNameSub.apply registry
+                        |> AstCtorLaw.apply
                         |> AstMatchCompile.compile
                         |> AstReserved.apply
 

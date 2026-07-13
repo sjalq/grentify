@@ -1022,24 +1022,44 @@ matchConsArms seed scope headExpr tailExpr wholeList consArms catchAll fail =
 
                 -- Fallthrough sits under this arm's binders for irrefutable heads;
                 -- occupy them so the next arm α-renames collisions.
-                nextFail =
+                -- Bind fallthrough as a zero-cost-until-called function so peels
+                -- share one fail body (avoids exponential Print blow-up).
+                failFn =
+                    bindName ("fl_" ++ String.fromInt seed) restBound.scope
+
+                nextFailBody =
                     matchConsArms (seed + 17)
-                        restBound.scope
+                        failFn.scope
                         headExpr
                         tailExpr
                         wholeList
                         more
                         catchAll
                         fail
+
+                nextFailCall =
+                    ExprApplication [ var failFn.name, ExprUnit ]
+
+                armExpr =
+                    matchHeads (seed + 1)
+                        failFn.scope
+                        headExpr
+                        tailExpr
+                        headsBound.patterns
+                        restBound.pattern
+                        bodyRenamed
+                        nextFailCall
             in
-            matchHeads (seed + 1)
-                restBound.scope
-                headExpr
-                tailExpr
-                headsBound.patterns
-                restBound.pattern
-                bodyRenamed
-                nextFail
+            ExprLet
+                { declarations =
+                    [ LetFunction
+                        { name = failFn.name
+                        , arguments = [ PatAll ]
+                        , expression = nextFailBody
+                        }
+                    ]
+                , expression = armExpr
+                }
 
 
 {-| Match remaining heads against current head value and tail list.

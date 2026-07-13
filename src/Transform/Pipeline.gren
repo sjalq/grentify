@@ -24,8 +24,10 @@ import Ast.Decode as AstDecode
 import Ast.MatchCompile as AstMatchCompile
 import Ast.NameSub as AstNameSub
 import Ast.Print as AstPrint
+import Ast.Reserved as AstReserved
 import Char
 import Dict exposing (Dict)
+import Json.Decode as Decode
 import Mapping.Adapter as Adapter
 import Mapping.Registry as Registry
 import Mapping.Types exposing (GeneratedModule, ModuleMapping, Registry, adapterIdName)
@@ -393,57 +395,69 @@ transformModule registry input extraction =
     toGrenSourcePath input.path
         |> Result.andThen
             (\outputPath ->
-                -- Dual path: resolved AST → name-sub → match-compile → print.
-                -- Fall back to range edits when list patterns remain unported.
-                -- TRANSFORM_PATH info diagnostics tag which path was used.
-                when tryAstTransform registry input extraction outputPath is
-                    Ok transformed ->
-                        Result.map (withTransformPath input extraction "ast") transformed
-
-                    Err fallbackReason ->
+                -- Single pipeline when AST is present: name-sub → match-compile →
+                -- print. Unported list shapes are hard errors (no edit fallback).
+                -- Edit path remains only for hand-crafted extractions without AST.
+                when extraction.ast is
+                    Nothing ->
                         transformModuleViaEdits registry input extraction outputPath
-                            |> Result.map (withTransformPath input extraction fallbackReason)
+                            |> Result.map (withTransformPath input extraction "fallback:no-ast")
+
+                    Just astValue ->
+                        transformModuleViaAst registry input extraction outputPath astValue
             )
 
 
-{-| Ok = use AST result. Err = fallback reason for edit path.
--}
-tryAstTransform :
+transformModuleViaAst :
     Registry
     -> SourceFile
     -> Protocol.ModuleExtraction
     -> String
-    -> Result String (Result Error TransformedModule)
-tryAstTransform registry input extraction outputPath =
-    when extraction.ast is
-        Nothing ->
-            Err "fallback:no-ast"
+    -> Decode.Value
+    -> Result Error TransformedModule
+transformModuleViaAst registry input extraction outputPath astValue =
+    when AstDecode.decode astValue is
+        Err decodeError ->
+            Err <|
+                PortError.create "AST_DECODE_FAILED"
+                    ("Could not decode resolved AST for "
+                        ++ extraction.moduleName
+                        ++ ": "
+                        ++ decodeError
+                    )
 
-        Just astValue ->
-            when AstDecode.decode astValue is
-                Err _ ->
-                    Err "fallback:decode"
+        Ok file ->
+            let
+                lowered =
+                    file
+                        |> AstNameSub.apply registry
+                        |> AstMatchCompile.compile
+                        |> AstReserved.apply
 
-                Ok file ->
-                    let
-                        lowered =
-                            file
-                                |> AstNameSub.apply registry
-                                |> AstMatchCompile.compile
+                printed =
+                    AstPrint.print lowered
+            in
+            if AstMatchCompile.hasUnportedListPatterns lowered then
+                Err <|
+                    PortError.create "AST_UNPORTED_LIST"
+                        ("Host match compiler left unported list/cons patterns in "
+                            ++ extraction.moduleName
+                            ++ " ("
+                            ++ input.path
+                            ++ "). Extend Ast.MatchCompile rather than range-edit fallback."
+                        )
 
-                        printed =
-                            AstPrint.print lowered
-                    in
-                    if AstMatchCompile.hasUnportedListPatterns lowered then
-                        Err "fallback:unported-list"
+            else if String.contains "unported-cons-pattern" printed then
+                Err <|
+                    PortError.create "AST_UNPORTED_LIST"
+                        ("Printer left unported list-cons markers in "
+                            ++ extraction.moduleName
+                            ++ "."
+                        )
 
-                    else if String.contains "unported-cons-pattern" printed then
-                        Err "fallback:unported-print"
-
-                    else
-                        Ok
-                            (finalizeTransformedModule registry input extraction outputPath printed [] [] [])
-
+            else
+                finalizeTransformedModule registry input extraction outputPath printed [] [] []
+                    |> Result.map (withTransformPath input extraction "ast")
 
 withTransformPath :
     SourceFile

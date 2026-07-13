@@ -1,0 +1,413 @@
+module Ast.Reserved exposing (apply, rewriteName)
+
+{-| Rename identifiers that are keywords in Gren but ordinary names in Elm.
+
+`when` / `is` (case/of keywords) and `as` (pattern keyword) become `when_` /
+`is_` / `as_`. Applied on the resolved AST so Print never emits invalid Gren.
+-}
+
+import Array exposing (Array)
+import Ast.Types exposing
+    ( CaseArm
+    , Declaration(..)
+    , Exposing(..)
+    , Expr(..)
+    , ExposedItem(..)
+    , File
+    , Import
+    , LetDecl(..)
+    , ModuleDef
+    , NamedRef
+    , Pattern(..)
+    , RecordFieldType
+    , Signature
+    , TypeAnn(..)
+    )
+
+
+apply : File -> File
+apply file =
+    { file
+        | moduleDefinition = rewriteModuleDef file.moduleDefinition
+        , imports = Array.map rewriteImport file.imports
+        , declarations = Array.map rewriteDeclaration file.declarations
+    }
+
+
+rewriteName : String -> String
+rewriteName name =
+    if isReserved name then
+        name ++ "_"
+
+    else
+        name
+
+
+isReserved : String -> Bool
+isReserved name =
+    name
+        == "when"
+        || name
+        == "is"
+        || name
+        == "as"
+        || name
+        == "type"
+        || name
+        == "alias"
+        || name
+        == "module"
+        || name
+        == "import"
+        || name
+        == "exposing"
+        || name
+        == "port"
+        || name
+        == "if"
+        || name
+        == "then"
+        || name
+        == "else"
+        || name
+        == "let"
+        || name
+        == "in"
+        || name
+        == "case"
+        || name
+        == "of"
+
+
+rewriteModuleDef : ModuleDef -> ModuleDef
+rewriteModuleDef moduleDef =
+    { moduleDef
+        | exposing_ = rewriteExposing moduleDef.exposing_
+    }
+
+
+rewriteImport : Import -> Import
+rewriteImport import_ =
+    { import_
+        | alias = Maybe.map rewriteName import_.alias
+        , exposing_ = Maybe.map rewriteExposing import_.exposing_
+    }
+
+
+rewriteExposing : Exposing -> Exposing
+rewriteExposing exposing_ =
+    when exposing_ is
+        ExposeAll ->
+            ExposeAll
+
+        ExposeExplicit items ->
+            ExposeExplicit (Array.map rewriteExposedItem items)
+
+
+rewriteExposedItem : ExposedItem -> ExposedItem
+rewriteExposedItem item =
+    when item is
+        ExposeInfix name ->
+            ExposeInfix name
+
+        ExposeFunction name ->
+            ExposeFunction (rewriteName name)
+
+        ExposeTypeOrAlias name ->
+            ExposeTypeOrAlias (rewriteName name)
+
+        ExposeType { name = name, open = open } ->
+            ExposeType { name = rewriteName name, open = open }
+
+
+rewriteDeclaration : Declaration -> Declaration
+rewriteDeclaration declaration =
+    when declaration is
+        DeclFunction fn ->
+            DeclFunction
+                { fn
+                    | name = rewriteName fn.name
+                    , signature = Maybe.map rewriteSignature fn.signature
+                    , arguments = Array.map rewritePattern fn.arguments
+                    , expression = rewriteExpr fn.expression
+                }
+
+        DeclAlias aliasDecl ->
+            DeclAlias
+                { aliasDecl
+                    | name = rewriteName aliasDecl.name
+                    , generics = Array.map rewriteName aliasDecl.generics
+                    , typeAnnotation = rewriteType aliasDecl.typeAnnotation
+                }
+
+        DeclCustomType custom ->
+            DeclCustomType
+                { custom
+                    | name = rewriteName custom.name
+                    , generics = Array.map rewriteName custom.generics
+                    , constructors =
+                        Array.map
+                            (\ctor ->
+                                { name = rewriteName ctor.name
+                                , arguments = Array.map rewriteType ctor.arguments
+                                }
+                            )
+                            custom.constructors
+                }
+
+        DeclPort signature ->
+            DeclPort (rewriteSignature signature)
+
+        DeclInfix ->
+            DeclInfix
+
+        DeclDestructure { pattern = pattern, expression = expression } ->
+            DeclDestructure
+                { pattern = rewritePattern pattern
+                , expression = rewriteExpr expression
+                }
+
+
+rewriteSignature : Signature -> Signature
+rewriteSignature signature =
+    { name = rewriteName signature.name
+    , typeAnnotation = rewriteType signature.typeAnnotation
+    }
+
+
+rewriteType : TypeAnn -> TypeAnn
+rewriteType typeAnn =
+    when typeAnn is
+        TypeGeneric name ->
+            TypeGeneric (rewriteName name)
+
+        TypeTyped { ref = ref, arguments = args } ->
+            TypeTyped
+                { ref = rewriteRef ref
+                , arguments = Array.map rewriteType args
+                }
+
+        TypeUnit ->
+            TypeUnit
+
+        TypeTuple items ->
+            TypeTuple (Array.map rewriteType items)
+
+        TypeRecord fields ->
+            TypeRecord (Array.map rewriteRecordFieldType fields)
+
+        TypeGenericRecord { extension = ext, fields = fields } ->
+            TypeGenericRecord
+                { extension = rewriteName ext
+                , fields = Array.map rewriteRecordFieldType fields
+                }
+
+        TypeFunction { left = left, right = right } ->
+            TypeFunction
+                { left = rewriteType left
+                , right = rewriteType right
+                }
+
+
+rewriteRecordFieldType : RecordFieldType -> RecordFieldType
+rewriteRecordFieldType field =
+    -- Field names are not keywords in the same way; leave them.
+    { field | typeAnnotation = rewriteType field.typeAnnotation }
+
+
+rewritePattern : Pattern -> Pattern
+rewritePattern pattern =
+    when pattern is
+        PatAll ->
+            PatAll
+
+        PatUnit ->
+            PatUnit
+
+        PatChar value ->
+            PatChar value
+
+        PatString value ->
+            PatString value
+
+        PatInt value ->
+            PatInt value
+
+        PatHex value ->
+            PatHex value
+
+        PatFloat value ->
+            PatFloat value
+
+        PatTuple items ->
+            PatTuple (Array.map rewritePattern items)
+
+        PatRecord fields ->
+            PatRecord (Array.map rewriteName fields)
+
+        PatCons { head = head, tail = tail } ->
+            PatCons
+                { head = rewritePattern head
+                , tail = rewritePattern tail
+                }
+
+        PatList items ->
+            PatList (Array.map rewritePattern items)
+
+        PatVar name ->
+            PatVar (rewriteName name)
+
+        PatNamed { ref = ref, arguments = args } ->
+            PatNamed
+                { ref = rewriteRef ref
+                , arguments = Array.map rewritePattern args
+                }
+
+        PatAs { pattern = inner, name = name } ->
+            PatAs
+                { pattern = rewritePattern inner
+                , name = rewriteName name
+                }
+
+
+rewriteExpr : Expr -> Expr
+rewriteExpr expr =
+    when expr is
+        ExprApplication parts ->
+            ExprApplication (Array.map rewriteExpr parts)
+
+        ExprBinop { operator = op, left = left, right = right } ->
+            ExprBinop
+                { operator = op
+                , left = rewriteExpr left
+                , right = rewriteExpr right
+                }
+
+        ExprVar ref ->
+            ExprVar (rewriteRef ref)
+
+        ExprIf { condition = c, then_ = t, else_ = e } ->
+            ExprIf
+                { condition = rewriteExpr c
+                , then_ = rewriteExpr t
+                , else_ = rewriteExpr e
+                }
+
+        ExprPrefix op ->
+            ExprPrefix op
+
+        ExprOperator op ->
+            ExprOperator op
+
+        ExprInt value ->
+            ExprInt value
+
+        ExprHex value ->
+            ExprHex value
+
+        ExprFloat value ->
+            ExprFloat value
+
+        ExprNegation inner ->
+            ExprNegation (rewriteExpr inner)
+
+        ExprString value ->
+            ExprString value
+
+        ExprChar value ->
+            ExprChar value
+
+        ExprTuple items ->
+            ExprTuple (Array.map rewriteExpr items)
+
+        ExprLet { declarations = declarations, expression = body } ->
+            ExprLet
+                { declarations = Array.map rewriteLetDecl declarations
+                , expression = rewriteExpr body
+                }
+
+        ExprCase { expression = scrutinee, cases = arms } ->
+            ExprCase
+                { expression = rewriteExpr scrutinee
+                , cases =
+                    Array.map
+                        (\arm ->
+                            { pattern = rewritePattern arm.pattern
+                            , body = rewriteExpr arm.body
+                            }
+                        )
+                        arms
+                }
+
+        ExprLambda { arguments = arguments, expression = body } ->
+            ExprLambda
+                { arguments = Array.map rewritePattern arguments
+                , expression = rewriteExpr body
+                }
+
+        ExprRecord fields ->
+            ExprRecord
+                (Array.map
+                    (\field ->
+                        { name = field.name
+                        , value = rewriteExpr field.value
+                        }
+                    )
+                    fields
+                )
+
+        ExprList items ->
+            ExprList (Array.map rewriteExpr items)
+
+        ExprAccess { record = record, field = field } ->
+            ExprAccess
+                { record = rewriteExpr record
+                , field = field
+                }
+
+        ExprAccessFunction field ->
+            ExprAccessFunction field
+
+        ExprUpdate { name = name, fields = fields } ->
+            ExprUpdate
+                { name = rewriteName name
+                , fields =
+                    Array.map
+                        (\field ->
+                            { name = field.name
+                            , value = rewriteExpr field.value
+                            }
+                        )
+                        fields
+                }
+
+        ExprGlsl code ->
+            ExprGlsl code
+
+        ExprUnit ->
+            ExprUnit
+
+
+rewriteLetDecl : LetDecl -> LetDecl
+rewriteLetDecl declaration =
+    when declaration is
+        LetFunction fn ->
+            LetFunction
+                { fn
+                    | name = rewriteName fn.name
+                    , arguments = Array.map rewritePattern fn.arguments
+                    , expression = rewriteExpr fn.expression
+                }
+
+        LetDestructure { pattern = pattern, expression = expression } ->
+            LetDestructure
+                { pattern = rewritePattern pattern
+                , expression = rewriteExpr expression
+                }
+
+
+rewriteRef : NamedRef -> NamedRef
+rewriteRef ref =
+    { moduleName = ref.moduleName
+    , name = rewriteName ref.name
+    }

@@ -49,7 +49,12 @@ type alias ConsChain =
 compile : File -> File
 compile file =
     { file
-        | declarations = Array.map compileDeclaration file.declarations
+        | declarations =
+            Array.indexedMap
+                (\i decl ->
+                    compileDeclaration (i * 10007) decl
+                )
+                file.declarations
     }
 
 
@@ -61,16 +66,16 @@ hasUnportedListPatterns file =
 -- TREE WALK ------------------------------------------------------------------
 
 
-compileDeclaration : Declaration -> Declaration
-compileDeclaration declaration =
+compileDeclaration : Int -> Declaration -> Declaration
+compileDeclaration seed declaration =
     when declaration is
         DeclFunction fn ->
             let
                 compiledBody =
-                    compileExpr fn.expression
+                    compileExpr (seed + 1) fn.expression
 
                 withArgs =
-                    rewriteConsArgs fn.arguments compiledBody
+                    rewriteConsArgs (seed + 2) fn.arguments compiledBody
             in
             DeclFunction
                 { fn
@@ -81,10 +86,10 @@ compileDeclaration declaration =
         DeclDestructure { pattern = pattern, expression = expression } ->
             let
                 compiled =
-                    compileExpr expression
+                    compileExpr (seed + 1) expression
 
                 rewritten =
-                    rewriteConsArgs [ pattern ] compiled
+                    rewriteConsArgs (seed + 2) [ pattern ] compiled
             in
             when Array.first rewritten.arguments is
                 Just newPattern ->
@@ -103,53 +108,54 @@ compileDeclaration declaration =
             declaration
 
 
-compileExpr : Expr -> Expr
-compileExpr expr =
+compileExpr : Int -> Expr -> Expr
+compileExpr seed expr =
     when expr is
         ExprApplication parts ->
-            ExprApplication (Array.map compileExpr parts)
+            ExprApplication (Array.indexedMap (\i p -> compileExpr (seed + i + 1) p) parts)
 
         ExprBinop { operator = op, left = left, right = right } ->
             ExprBinop
                 { operator = op
-                , left = compileExpr left
-                , right = compileExpr right
+                , left = compileExpr (seed + 1) left
+                , right = compileExpr (seed + 2) right
                 }
 
         ExprIf { condition = condition, then_ = then_, else_ = else_ } ->
             ExprIf
-                { condition = compileExpr condition
-                , then_ = compileExpr then_
-                , else_ = compileExpr else_
+                { condition = compileExpr (seed + 1) condition
+                , then_ = compileExpr (seed + 2) then_
+                , else_ = compileExpr (seed + 3) else_
                 }
 
         ExprNegation inner ->
-            ExprNegation (compileExpr inner)
+            ExprNegation (compileExpr (seed + 1) inner)
 
         ExprTuple items ->
-            ExprTuple (Array.map compileExpr items)
+            ExprTuple (Array.indexedMap (\i p -> compileExpr (seed + i + 1) p) items)
 
         ExprLet { declarations = declarations, expression = body } ->
             ExprLet
-                { declarations = Array.map compileLetDecl declarations
-                , expression = compileExpr body
+                { declarations =
+                    Array.indexedMap (\i d -> compileLetDecl (seed + i + 1) d) declarations
+                , expression = compileExpr (seed + 100) body
                 }
 
         ExprCase { expression = scrutinee, cases = arms } ->
             let
                 compiled =
-                    { expression = compileExpr scrutinee
+                    { expression = compileExpr (seed + 1) scrutinee
                     , cases =
-                        Array.map
-                            (\arm ->
+                        Array.indexedMap
+                            (\i arm ->
                                 { pattern = arm.pattern
-                                , body = compileExpr arm.body
+                                , body = compileExpr (seed + 10 + i * 17) arm.body
                                 }
                             )
                             arms
                     }
             in
-            when tryCompileListCase compiled is
+            when tryCompileListCase (seed + 3) compiled is
                 Just rewritten ->
                     rewritten
 
@@ -159,10 +165,10 @@ compileExpr expr =
         ExprLambda { arguments = arguments, expression = body } ->
             let
                 compiledBody =
-                    compileExpr body
+                    compileExpr (seed + 1) body
 
                 withArgs =
-                    rewriteConsArgs arguments compiledBody
+                    rewriteConsArgs (seed + 2) arguments compiledBody
             in
             ExprLambda
                 { arguments = withArgs.arguments
@@ -171,29 +177,29 @@ compileExpr expr =
 
         ExprRecord fields ->
             ExprRecord
-                (Array.map
-                    (\field ->
+                (Array.indexedMap
+                    (\i field ->
                         { name = field.name
-                        , value = compileExpr field.value
+                        , value = compileExpr (seed + i + 1) field.value
                         }
                     )
                     fields
                 )
 
         ExprList items ->
-            ExprList (Array.map compileExpr items)
+            ExprList (Array.indexedMap (\i p -> compileExpr (seed + i + 1) p) items)
 
         ExprAccess { record = record, field = field } ->
-            ExprAccess { record = compileExpr record, field = field }
+            ExprAccess { record = compileExpr (seed + 1) record, field = field }
 
         ExprUpdate { name = name, fields = fields } ->
             ExprUpdate
                 { name = name
                 , fields =
-                    Array.map
-                        (\field ->
+                    Array.indexedMap
+                        (\i field ->
                             { name = field.name
-                            , value = compileExpr field.value
+                            , value = compileExpr (seed + i + 1) field.value
                             }
                         )
                         fields
@@ -203,57 +209,57 @@ compileExpr expr =
             expr
 
 
-compileLetDecl : LetDecl -> LetDecl
-compileLetDecl declaration =
+compileLetDecl : Int -> LetDecl -> LetDecl
+compileLetDecl seed declaration =
     when declaration is
         LetFunction fn ->
-            LetFunction { fn | expression = compileExpr fn.expression }
+            LetFunction { fn | expression = compileExpr (seed + 1) fn.expression }
 
         LetDestructure { pattern = pattern, expression = expression } ->
             LetDestructure
                 { pattern = pattern
-                , expression = compileExpr expression
+                , expression = compileExpr (seed + 1) expression
                 }
 
 
 -- DISPATCH -------------------------------------------------------------------
 
 
-tryCompileListCase : { expression : Expr, cases : Array CaseArm } -> Maybe Expr
-tryCompileListCase caseBlock =
-    when tryPureListCase caseBlock is
+tryCompileListCase : Int -> { expression : Expr, cases : Array CaseArm } -> Maybe Expr
+tryCompileListCase seed caseBlock =
+    when tryPureListCase seed caseBlock is
         Just rewritten ->
             Just rewritten
 
         Nothing ->
-            when tryArrayPopCase caseBlock is
+            when tryArrayPopCase seed caseBlock is
                 Just rewritten ->
                     Just rewritten
 
                 Nothing ->
-                    when tryMaybeUnconsCase caseBlock is
+                    when tryMaybeUnconsCase seed caseBlock is
                         Just rewritten ->
                             Just rewritten
 
                         Nothing ->
-                            when tryResultUnconsCase caseBlock is
+                            when tryResultUnconsCase seed caseBlock is
                                 Just rewritten ->
                                     Just rewritten
 
                                 Nothing ->
-                                    when tryCtorEmbeddedCase caseBlock is
+                                    when tryCtorEmbeddedCase seed caseBlock is
                                         Just rewritten ->
                                             Just rewritten
 
                                         Nothing ->
-                                            tryTupleListCase caseBlock
+                                            tryTupleListCase seed caseBlock
 
 
 -- 1. PURE LIST (length dispatch) ---------------------------------------------
 
 
-tryPureListCase : { expression : Expr, cases : Array CaseArm } -> Maybe Expr
-tryPureListCase caseBlock =
+tryPureListCase : Int -> { expression : Expr, cases : Array CaseArm } -> Maybe Expr
+tryPureListCase seed caseBlock =
     if not (isPureListShapeCase caseBlock.cases) then
         Nothing
 
@@ -266,7 +272,7 @@ tryPureListCase caseBlock =
             Nothing
 
         else
-            Just (renderPureListCase caseBlock.expression parsed)
+            Just (renderPureListCase seed caseBlock.expression parsed)
 
 
 isPureListShapeCase : Array CaseArm -> Bool
@@ -522,11 +528,11 @@ simpleRestName pattern =
             Nothing
 
 
-renderPureListCase : Expr -> Array PureListArm -> Expr
-renderPureListCase scrutinee arms =
+renderPureListCase : Int -> Expr -> Array PureListArm -> Expr
+renderPureListCase seed scrutinee arms =
     let
         scrutName =
-            "list_scrut_elmToGren"
+            "list_scrut_" ++ String.fromInt seed ++ "_elmToGren"
 
         maxExact =
             arms
@@ -645,10 +651,10 @@ bindSimpleHeads arm originalScrut heads depth source =
         Just { first = headName, rest = more } ->
             let
                 popped =
-                    "p" ++ String.fromInt depth ++ "_elmToGren"
+                    originalScrut ++ "_p" ++ String.fromInt depth
 
                 restN =
-                    "r" ++ String.fromInt depth ++ "_elmToGren"
+                    originalScrut ++ "_r" ++ String.fromInt depth
 
                 afterPop =
                     let
@@ -692,13 +698,13 @@ bindSimpleHeads arm originalScrut heads depth source =
 -- redundant in Gren.
 
 
-tryArrayPopCase : { expression : Expr, cases : Array CaseArm } -> Maybe Expr
-tryArrayPopCase caseBlock =
+tryArrayPopCase : Int -> { expression : Expr, cases : Array CaseArm } -> Maybe Expr
+tryArrayPopCase seed caseBlock =
     if not (isDepthOneArrayCase caseBlock.cases) then
         Nothing
 
     else
-        Just (renderMergedDepthOne caseBlock.expression caseBlock.cases)
+        Just (renderMergedDepthOne seed caseBlock.expression caseBlock.cases)
 
 
 isDepthOneArrayCase : Array CaseArm -> Bool
@@ -773,14 +779,14 @@ isConsPattern pattern =
             False
 
 
-renderMergedDepthOne : Expr -> Array CaseArm -> Expr
-renderMergedDepthOne scrutinee arms =
+renderMergedDepthOne : Int -> Expr -> Array CaseArm -> Expr
+renderMergedDepthOne seed scrutinee arms =
     let
         scrutName =
-            "list_scrut_elmToGren"
+            "list_scrut_" ++ String.fromInt seed ++ "_elmToGren"
 
         popped =
-            "list_pop_elmToGren"
+            "list_pop_" ++ String.fromInt seed ++ "_elmToGren"
 
         emptyArms =
             arms
@@ -935,11 +941,11 @@ finishRest restExpr restPat body =
             body
 
 
-renderWrappedPop : Expr -> Array CaseArm -> (Expr -> Expr) -> Expr
-renderWrappedPop scrutinee arms wrapScrut =
+renderWrappedPop : Int -> Expr -> Array CaseArm -> (Expr -> Expr) -> Expr
+renderWrappedPop seed scrutinee arms wrapScrut =
     let
         scrutName =
-            "list_scrut_elmToGren"
+            "list_scrut_" ++ String.fromInt seed ++ "_elmToGren"
     in
     ExprLet
         { declarations =
@@ -969,7 +975,7 @@ popFirstOf scrut =
 Used by Maybe/Result map wrappers. Depth-1 only.
 -}
 rewriteArmUnderPop : Int -> CaseArm -> Maybe CaseArm
-rewriteArmUnderPop _ arm =
+rewriteArmUnderPop seed arm =
     when arm.pattern is
         PatAll ->
             Just arm
@@ -982,20 +988,20 @@ rewriteArmUnderPop _ arm =
                 Just { pattern = nothingPat, body = arm.body }
 
             else
-                depthOneToJustArm arm
+                depthOneToJustArm seed arm
 
         PatCons _ ->
-            depthOneToJustArm arm
+            depthOneToJustArm seed arm
 
         PatAs { pattern = inner } ->
-            rewriteArmUnderPop 0 { pattern = inner, body = arm.body }
+            rewriteArmUnderPop seed { pattern = inner, body = arm.body }
 
         _ ->
             Nothing
 
 
-depthOneToJustArm : CaseArm -> Maybe CaseArm
-depthOneToJustArm arm =
+depthOneToJustArm : Int -> CaseArm -> Maybe CaseArm
+depthOneToJustArm seed arm =
     when listShapeToHeadsRest arm.pattern is
         Nothing ->
             Nothing
@@ -1003,11 +1009,11 @@ depthOneToJustArm arm =
         Just { heads = heads, rest = rest } ->
             let
                 popped =
-                    "list_pop_elmToGren"
+                    "list_pop_" ++ String.fromInt seed ++ "_elmToGren"
             in
             Just
                 { pattern = justPat (PatVar popped)
-                , body = peelPatternHeads 0 popped heads rest arm.body
+                , body = peelPatternHeads seed popped heads rest arm.body
                 }
 
 
@@ -1050,7 +1056,7 @@ peelPatternHeads depth popped heads rest body =
                     else
                         let
                             next =
-                                "p" ++ String.fromInt depth ++ "_elmToGren"
+                                popped ++ "_d" ++ String.fromInt depth
                         in
                         ExprCase
                             { expression =
@@ -1085,22 +1091,26 @@ peelPatternHeads depth popped heads rest body =
 -- 3. MAYBE UNCONS ------------------------------------------------------------
 
 
-tryMaybeUnconsCase : { expression : Expr, cases : Array CaseArm } -> Maybe Expr
-tryMaybeUnconsCase caseBlock =
+tryMaybeUnconsCase : Int -> { expression : Expr, cases : Array CaseArm } -> Maybe Expr
+tryMaybeUnconsCase seed caseBlock =
     if not (isMaybeUnconsCase caseBlock.cases) then
         Nothing
 
     else
         let
             rewritten =
-                Array.mapAndKeepJust rewriteMaybeArm caseBlock.cases
+                Array.indexedMap
+                    (\i arm -> rewriteMaybeArm (seed + i) arm)
+                    caseBlock.cases
+                    |> Array.mapAndKeepJust (\m -> m)
         in
         if Array.length rewritten /= Array.length caseBlock.cases then
             Nothing
 
         else
             Just
-                (renderWrappedPop caseBlock.expression
+                (renderWrappedPop seed
+                    caseBlock.expression
                     rewritten
                     (\scrut ->
                         ExprApplication
@@ -1193,8 +1203,8 @@ listInnerPatternOk pattern =
             not (patternHasCons pattern)
 
 
-rewriteMaybeArm : CaseArm -> Maybe CaseArm
-rewriteMaybeArm arm =
+rewriteMaybeArm : Int -> CaseArm -> Maybe CaseArm
+rewriteMaybeArm seed arm =
     when arm.pattern is
         PatAll ->
             Just arm
@@ -1206,7 +1216,7 @@ rewriteMaybeArm arm =
             else if isMaybeName ref "Just" then
                 when Array.first args is
                     Just inner ->
-                        rewriteArmUnderPop 0 { pattern = inner, body = arm.body }
+                        rewriteArmUnderPop seed { pattern = inner, body = arm.body }
                             |> Maybe.map
                                 (\innerArm ->
                                     { pattern =
@@ -1231,22 +1241,26 @@ rewriteMaybeArm arm =
 -- 4. RESULT UNCONS -----------------------------------------------------------
 
 
-tryResultUnconsCase : { expression : Expr, cases : Array CaseArm } -> Maybe Expr
-tryResultUnconsCase caseBlock =
+tryResultUnconsCase : Int -> { expression : Expr, cases : Array CaseArm } -> Maybe Expr
+tryResultUnconsCase seed caseBlock =
     if not (isResultUnconsCase caseBlock.cases) then
         Nothing
 
     else
         let
             rewritten =
-                Array.mapAndKeepJust rewriteResultArm caseBlock.cases
+                Array.indexedMap
+                    (\i arm -> rewriteResultArm (seed + i) arm)
+                    caseBlock.cases
+                    |> Array.mapAndKeepJust (\m -> m)
         in
         if Array.length rewritten /= Array.length caseBlock.cases then
             Nothing
 
         else
             Just
-                (renderWrappedPop caseBlock.expression
+                (renderWrappedPop seed
+                    caseBlock.expression
                     rewritten
                     (\scrut ->
                         ExprApplication
@@ -1318,8 +1332,8 @@ isResultName ref expected =
         && (ref.moduleName == Nothing || ref.moduleName == Just "Result")
 
 
-rewriteResultArm : CaseArm -> Maybe CaseArm
-rewriteResultArm arm =
+rewriteResultArm : Int -> CaseArm -> Maybe CaseArm
+rewriteResultArm seed arm =
     when arm.pattern is
         PatAll ->
             Just arm
@@ -1331,7 +1345,7 @@ rewriteResultArm arm =
             else if isResultName ref "Ok" then
                 when Array.first args is
                     Just inner ->
-                        rewriteArmUnderPop 0 { pattern = inner, body = arm.body }
+                        rewriteArmUnderPop seed { pattern = inner, body = arm.body }
                             |> Maybe.map
                                 (\innerArm ->
                                     { pattern =
@@ -1359,15 +1373,20 @@ rewriteResultArm arm =
 -- Single-argument constructors only (multi-arg Gren records stay on edit path).
 
 
-tryCtorEmbeddedCase : { expression : Expr, cases : Array CaseArm } -> Maybe Expr
-tryCtorEmbeddedCase caseBlock =
+tryCtorEmbeddedCase : Int -> { expression : Expr, cases : Array CaseArm } -> Maybe Expr
+tryCtorEmbeddedCase seed caseBlock =
     if not (isCtorEmbeddedCase caseBlock.cases) then
         Nothing
 
     else
         let
             rewritten =
-                Array.mapAndKeepJust (rewriteCtorEmbeddedArm caseBlock.cases) caseBlock.cases
+                Array.indexedMap
+                    (\i arm ->
+                        rewriteCtorEmbeddedArm (seed + i * 31) caseBlock.cases arm
+                    )
+                    caseBlock.cases
+                    |> Array.mapAndKeepJust (\m -> m)
         in
         if Array.length rewritten /= Array.length caseBlock.cases then
             Nothing
@@ -1524,8 +1543,8 @@ ctorUnconsShadowsCatchAll arms =
     Array.any (\name -> Array.member name catchAllCtors) unconsCtors
 
 
-rewriteCtorEmbeddedArm : Array CaseArm -> CaseArm -> Maybe CaseArm
-rewriteCtorEmbeddedArm allArms arm =
+rewriteCtorEmbeddedArm : Int -> Array CaseArm -> CaseArm -> Maybe CaseArm
+rewriteCtorEmbeddedArm seed allArms arm =
     when arm.pattern is
         PatAll ->
             Just arm
@@ -1540,7 +1559,11 @@ rewriteCtorEmbeddedArm allArms arm =
                         ctorEmptyFallback ref.name allArms
 
                     prepared =
-                        Array.indexedMap prepareCtorArg args
+                        Array.indexedMap
+                            (\i arg ->
+                                prepareCtorArg (seed + i) arg
+                            )
+                            args
 
                     newArgs =
                         Array.map .pattern prepared
@@ -1603,10 +1626,10 @@ type alias PreparedCtorArg =
 
 
 prepareCtorArg : Int -> Pattern -> PreparedCtorArg
-prepareCtorArg index arg =
+prepareCtorArg seed arg =
     let
         listName =
-            "ctor_list_" ++ String.fromInt index ++ "_elmToGren"
+            "ctor_list_" ++ String.fromInt seed ++ "_elmToGren"
     in
     when listShapeToHeadsRest arg is
         Just { heads = heads, rest = rest } ->
@@ -1683,7 +1706,7 @@ peelListHeads : String -> Array Pattern -> Pattern -> Expr -> Expr -> Expr
 peelListHeads listName heads rest body emptyFallback =
     let
         popped =
-            "ctor_pop_elmToGren"
+            listName ++ "_pop"
     in
     if Array.isEmpty heads then
         finishRest (varLocal listName) rest body
@@ -1705,8 +1728,8 @@ peelListHeads listName heads rest body emptyFallback =
 -- 6. TUPLE-LIST CASES (Phase 4+) ---------------------------------------------
 
 
-tryTupleListCase : { expression : Expr, cases : Array CaseArm } -> Maybe Expr
-tryTupleListCase caseBlock =
+tryTupleListCase : Int -> { expression : Expr, cases : Array CaseArm } -> Maybe Expr
+tryTupleListCase seed caseBlock =
     when caseBlock.expression is
         ExprTuple components ->
             let
@@ -1733,7 +1756,12 @@ tryTupleListCase caseBlock =
                             components
 
                     rewritten =
-                        Array.mapAndKeepJust (rewriteTupleListArm listColumns) caseBlock.cases
+                        Array.indexedMap
+                            (\i arm ->
+                                rewriteTupleListArm (seed + i * 13) listColumns arm
+                            )
+                            caseBlock.cases
+                            |> Array.mapAndKeepJust (\m -> m)
                 in
                 if Array.length rewritten /= Array.length caseBlock.cases then
                     Nothing
@@ -1805,8 +1833,8 @@ tupleColumnIsList index arms =
         arms
 
 
-rewriteTupleListArm : Array Bool -> CaseArm -> Maybe CaseArm
-rewriteTupleListArm listColumns arm =
+rewriteTupleListArm : Int -> Array Bool -> CaseArm -> Maybe CaseArm
+rewriteTupleListArm seed listColumns arm =
     when arm.pattern is
         PatAll ->
             Just arm
@@ -1818,7 +1846,7 @@ rewriteTupleListArm listColumns arm =
                         (\i p ->
                             when Array.get i listColumns is
                                 Just True ->
-                                    rewriteArmUnderPop i { pattern = p, body = ExprUnit }
+                                    rewriteArmUnderPop (seed + i) { pattern = p, body = ExprUnit }
                                         |> Maybe.map .pattern
 
                                 _ ->
@@ -1841,10 +1869,11 @@ rewriteTupleListArm listColumns arm =
 
 
 rewriteConsArgs :
-    Array Pattern
+    Int
+    -> Array Pattern
     -> Expr
     -> { arguments : Array Pattern, expression : Expr }
-rewriteConsArgs arguments body =
+rewriteConsArgs seed arguments body =
     let
         state =
             Array.indexedFoldl
@@ -1854,7 +1883,11 @@ rewriteConsArgs arguments body =
                             Just { heads = heads, rest = rest } ->
                                 let
                                     listName =
-                                        "arg_list_" ++ String.fromInt index ++ "_elmToGren"
+                                        "arg_list_"
+                                            ++ String.fromInt seed
+                                            ++ "_"
+                                            ++ String.fromInt index
+                                            ++ "_elmToGren"
 
                                     peeled =
                                         peelListHeads listName
@@ -1872,7 +1905,11 @@ rewriteConsArgs arguments body =
                                 if isEmptyListPattern arg then
                                     let
                                         listName =
-                                            "arg_list_" ++ String.fromInt index ++ "_elmToGren"
+                                            "arg_list_"
+                                                ++ String.fromInt seed
+                                                ++ "_"
+                                                ++ String.fromInt index
+                                                ++ "_elmToGren"
 
                                         peeled =
                                             ExprCase

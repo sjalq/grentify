@@ -70,7 +70,11 @@ transformsCompilerBackedFixture =
                                 && not (String.contains "import List" generated.source)
                                 && transformed.requiredAdapters == []
                                 && transformed.detectedPlatform == "common"
-                                && Array.isEmpty transformed.diagnostics
+                                && Array.isEmpty
+                                    (Array.keepIf
+                                        (\d -> d.severity == "error")
+                                        transformed.diagnostics
+                                    )
                     in
                     outcome
                         "pipeline transforms the simple fixture"
@@ -571,7 +575,9 @@ diagnosticCodes result =
             []
 
         Ok transformed ->
-            Array.map .code transformed.diagnostics
+            transformed.diagnostics
+                |> Array.keepIf (\d -> d.severity == "error")
+                |> Array.map .code
 
 
 diagnosticMessages : Result PortError.Error Pipeline.TransformResult -> Array String
@@ -581,7 +587,9 @@ diagnosticMessages result =
             []
 
         Ok transformed ->
-            Array.map .message transformed.diagnostics
+            transformed.diagnostics
+                |> Array.keepIf (\d -> d.severity == "error")
+                |> Array.map .message
 
 
 withImportedModules : Array String -> Protocol.Extraction -> Protocol.Extraction

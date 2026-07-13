@@ -181,7 +181,7 @@ printDeclaration declaration =
                         ""
 
                     else
-                        " " ++ String.join " " (Array.map (printPattern 0) fn.arguments)
+                        " " ++ String.join " " (Array.map (printPattern 1) fn.arguments)
 
                 body =
                     printExpr 0 fn.expression
@@ -256,10 +256,26 @@ printConstructor ctor =
     if Array.isEmpty ctor.arguments then
         ctor.name
 
+    else if Array.length ctor.arguments == 1 then
+        when Array.first ctor.arguments is
+            Just arg ->
+                ctor.name ++ " " ++ printType 1 arg
+
+            Nothing ->
+                ctor.name
+
     else
+        -- Gren multi-arg constructors take a single record payload.
         ctor.name
-            ++ " "
-            ++ String.join " " (Array.map (printType 1) ctor.arguments)
+            ++ " { "
+            ++ String.join ", "
+                (Array.indexedMap
+                    (\index arg ->
+                        fieldLabel index ++ " : " ++ printType 0 arg
+                    )
+                    ctor.arguments
+                )
+            ++ " }"
 
 
 printSignature : Signature -> String
@@ -428,7 +444,11 @@ printPattern prec pattern =
                                 )
                             ++ " }"
             in
+            -- Multi-arg ctor patterns always need parens in application position.
             if prec > 0 && not (Array.isEmpty args) then
+                "(" ++ rendered ++ ")"
+
+            else if Array.length args > 1 then
                 "(" ++ rendered ++ ")"
 
             else
@@ -504,13 +524,18 @@ printExpr prec expr =
                 Just { first = first, rest = rest } ->
                     let
                         rendered =
-                            if Array.isEmpty rest then
-                                printExpr 1 first
+                            when multiArgCtorApplication first rest is
+                                Just text ->
+                                    text
 
-                            else
-                                printExpr 1 first
-                                    ++ " "
-                                    ++ String.join " " (Array.map (printExpr 1) rest)
+                                Nothing ->
+                                    if Array.isEmpty rest then
+                                        printExpr 1 first
+
+                                    else
+                                        printExpr 1 first
+                                            ++ " "
+                                            ++ String.join " " (Array.map (printExpr 1) rest)
                     in
                     if prec > 0 then
                         "(" ++ rendered ++ ")"
@@ -707,7 +732,7 @@ printLetDecl declaration =
                         ""
 
                     else
-                        " " ++ String.join " " (Array.map (printPattern 0) fn.arguments)
+                        " " ++ String.join " " (Array.map (printPattern 1) fn.arguments)
             in
             fn.name ++ args ++ " =\n        " ++ indentBlock 2 (printExpr 0 fn.expression)
 
@@ -715,6 +740,37 @@ printLetDecl declaration =
             printPattern 0 pattern
                 ++ " =\n        "
                 ++ indentBlock 2 (printExpr 0 expression)
+
+
+{-| Uppercase head applied to 2+ args → Gren multi-arg ctor record form.
+-}
+multiArgCtorApplication : Expr -> Array Expr -> Maybe String
+multiArgCtorApplication head args =
+    if Array.length args < 2 then
+        Nothing
+
+    else
+        when head is
+            ExprVar ref ->
+                if startsUpper ref.name then
+                    Just
+                        (printNamedRef False ref
+                            ++ " { "
+                            ++ String.join ", "
+                                (Array.indexedMap
+                                    (\index arg ->
+                                        fieldLabel index ++ " = " ++ printExpr 0 arg
+                                    )
+                                    args
+                                )
+                            ++ " }"
+                        )
+
+                else
+                    Nothing
+
+            _ ->
+                Nothing
 
 
 printNamedRef : Bool -> NamedRef -> String

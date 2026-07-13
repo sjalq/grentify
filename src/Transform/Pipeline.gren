@@ -550,7 +550,9 @@ transformModuleViaAst registry packageRecordAliases packageCtorArities packageSo
                             ++ extraction.moduleName
                             ++ " ("
                             ++ input.path
-                            ++ "). Extend Ast.MatchCompile rather than range-edit fallback."
+                            ++ "): "
+                            ++ AstMatchCompile.unportedListSummary lowered
+                            ++ ". Extend Ast.MatchCompile rather than range-edit fallback."
                         )
 
             else if String.contains "unported-cons-pattern" printed then
@@ -1458,28 +1460,9 @@ addUnsupportedDiagnostics input extraction source diagnostics =
         tokens =
             scanCodeTokens source
 
-        isPortModule =
-            containsIdentifierSequence tokens [ "port", "module" ]
-
+        -- Port modules/decls are kept (app interop). Effect + Elm.Kernel refuse.
         isEffectModule =
             containsIdentifierSequence tokens [ "effect", "module" ]
-
-        hasPortDeclaration =
-            Array.indexedFoldl
-                (\index token found ->
-                    found
-                        || (token.kind == IdentifierToken
-                                && token.text == "port"
-                                && when Array.get (index + 1) tokens is
-                                    Just next ->
-                                        next.kind == IdentifierToken && next.text /= "module"
-
-                                    Nothing ->
-                                        False
-                           )
-                )
-                False
-                tokens
 
         kernelImport =
             Array.any isKernelModule extraction.importedModules
@@ -1496,20 +1479,16 @@ addUnsupportedDiagnostics input extraction source diagnostics =
                     False
                     tokens
 
-        -- Port modules and port declarations pass through for application ports.
-        withPortModule =
-            diagnostics
-
         withEffect =
             if isEffectModule then
                 addSyntheticDiagnostic input extraction
                     "UNSUPPORTED_KERNEL"
                     "Elm effect modules depend on privileged runtime and kernel APIs."
                     "Map this module to a Gren runtime package or replace the effect manager with ordinary Gren code."
-                    withPortModule
+                    diagnostics
 
             else
-                withPortModule
+                diagnostics
     in
     if kernelImport then
         addSyntheticDiagnostic input extraction

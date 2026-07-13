@@ -10,12 +10,10 @@ matching the edit-path seed in `Transform.Pipeline.collectMappingEdits`.
 
 import Array exposing (Array)
 import Ast.Types as Types exposing
-    ( CaseArm
-    , Declaration(..)
+    ( Declaration(..)
     , Exposing(..)
     , Expr(..)
     , ExposedItem(..)
-    , Field
     , File
     , Import
     , LetDecl(..)
@@ -26,6 +24,7 @@ import Ast.Types as Types exposing
     , Signature
     , TypeAnn(..)
     )
+import Ast.Walk as Walk
 import Dict exposing (Dict)
 import Mapping.Registry as Registry
 import Mapping.Types exposing (ModuleMapping, Registry)
@@ -182,133 +181,21 @@ qualifyPattern quals pattern =
                 , arguments = Array.map (qualifyPattern quals) args
                 }
 
-        PatTuple items ->
-            PatTuple (Array.map (qualifyPattern quals) items)
-
-        PatList items ->
-            PatList (Array.map (qualifyPattern quals) items)
-
-        PatCons { head = head, tail = tail } ->
-            PatCons
-                { head = qualifyPattern quals head
-                , tail = qualifyPattern quals tail
-                }
-
-        PatRecordBind fields ->
-            PatRecordBind
-                (Array.map
-                    (\field ->
-                        { field | pattern = qualifyPattern quals field.pattern }
-                    )
-                    fields
-                )
-
-        PatAs { pattern = inner, name = name } ->
-            PatAs { pattern = qualifyPattern quals inner, name = name }
-
         _ ->
-            pattern
+            Walk.mapPatternChildren (qualifyPattern quals) pattern
 
 
 qualifyExpr : Dict String String -> Expr -> Expr
 qualifyExpr quals expr =
     when expr is
-        ExprApplication parts ->
-            ExprApplication (Array.map (qualifyExpr quals) parts)
-
-        ExprBinop { operator = op, left = left, right = right } ->
-            ExprBinop
-                { operator = op
-                , left = qualifyExpr quals left
-                , right = qualifyExpr quals right
-                }
-
         ExprVar ref ->
             ExprVar (qualifyRef quals ref)
 
-        ExprIf { condition = c, then_ = t, else_ = e } ->
-            ExprIf
-                { condition = qualifyExpr quals c
-                , then_ = qualifyExpr quals t
-                , else_ = qualifyExpr quals e
-                }
-
-        ExprNegation inner ->
-            ExprNegation (qualifyExpr quals inner)
-
-        ExprTuple items ->
-            ExprTuple (Array.map (qualifyExpr quals) items)
-
-        ExprLet { declarations = declarations, expression = body } ->
-            ExprLet
-                { declarations = Array.map (qualifyLetDecl quals) declarations
-                , expression = qualifyExpr quals body
-                }
-
-        ExprCase { expression = scrutinee, cases = arms } ->
-            ExprCase
-                { expression = qualifyExpr quals scrutinee
-                , cases =
-                    Array.map
-                        (\arm ->
-                            { pattern = qualifyPattern quals arm.pattern
-                            , body = qualifyExpr quals arm.body
-                            }
-                        )
-                        arms
-                }
-
-        ExprLambda { arguments = arguments, expression = body } ->
-            ExprLambda
-                { arguments = Array.map (qualifyPattern quals) arguments
-                , expression = qualifyExpr quals body
-                }
-
-        ExprRecord fields ->
-            ExprRecord
-                (Array.map
-                    (\field ->
-                        { field | value = qualifyExpr quals field.value }
-                    )
-                    fields
-                )
-
-        ExprList items ->
-            ExprList (Array.map (qualifyExpr quals) items)
-
-        ExprAccess { record = record, field = field } ->
-            ExprAccess { record = qualifyExpr quals record, field = field }
-
-        ExprUpdate { name = name, fields = fields } ->
-            ExprUpdate
-                { name = name
-                , fields =
-                    Array.map
-                        (\field ->
-                            { field | value = qualifyExpr quals field.value }
-                        )
-                        fields
-                }
-
         _ ->
-            expr
-
-
-qualifyLetDecl : Dict String String -> LetDecl -> LetDecl
-qualifyLetDecl quals declaration =
-    when declaration is
-        LetFunction fn ->
-            LetFunction
-                { fn
-                    | arguments = Array.map (qualifyPattern quals) fn.arguments
-                    , expression = qualifyExpr quals fn.expression
-                }
-
-        LetDestructure { pattern = pattern, expression = expression } ->
-            LetDestructure
-                { pattern = qualifyPattern quals pattern
-                , expression = qualifyExpr quals expression
-                }
+            Walk.mapExprChildrenWithPatterns
+                (qualifyExpr quals)
+                (qualifyPattern quals)
+                expr
 
 
 qualifyRef : Dict String String -> NamedRef -> NamedRef
@@ -381,15 +268,34 @@ subExposedItem registry sourceModule item =
                 Just (ExposeFunction target)
 
         ExposeTypeOrAlias name ->
-            Just (ExposeTypeOrAlias (subSymbolName registry sourceModule name True))
+            let
+                target =
+                    subSymbolName registry sourceModule name True
+            in
+            -- Multi-segment remaps (e.g. Error → ElmToGren.Compat.Http.Error)
+            -- cannot appear in an exposing clause. Drop them; value/type refs
+            -- are rewritten to the fully-qualified path elsewhere.
+            if String.contains "." target then
+                Nothing
+
+            else
+                Just (ExposeTypeOrAlias target)
 
         ExposeType { name = name, open = open } ->
-            Just
-                (ExposeType
-                    { name = subSymbolName registry sourceModule name True
-                    , open = open
-                    }
-                )
+            let
+                target =
+                    subSymbolName registry sourceModule name True
+            in
+            if String.contains "." target then
+                Nothing
+
+            else
+                Just
+                    (ExposeType
+                        { name = target
+                        , open = open
+                        }
+                    )
 
 
 subDeclaration : Registry -> Declaration -> Declaration
@@ -482,75 +388,19 @@ subRecordFieldType registry field =
 subPattern : Registry -> Pattern -> Pattern
 subPattern registry pattern =
     when pattern is
-        PatAll ->
-            PatAll
-
-        PatUnit ->
-            PatUnit
-
-        PatChar value ->
-            PatChar value
-
-        PatString value ->
-            PatString value
-
-        PatInt value ->
-            PatInt value
-
-        PatHex value ->
-            PatHex value
-
-        PatFloat value ->
-            PatFloat value
-
-        PatTuple items ->
-            PatTuple (Array.map (subPattern registry) items)
-
-        PatRecord fields ->
-            PatRecord fields
-
-        PatRecordBind fields ->
-            PatRecordBind
-                (Array.map
-                    (\field ->
-                        { name = field.name
-                        , pattern = subPattern registry field.pattern
-                        }
-                    )
-                    fields
-                )
-
-        PatCons { head = head, tail = tail } ->
-            PatCons
-                { head = subPattern registry head
-                , tail = subPattern registry tail
-                }
-
-        PatList items ->
-            PatList (Array.map (subPattern registry) items)
-
-        PatVar name ->
-            PatVar name
-
         PatNamed { ref = ref, arguments = args } ->
             PatNamed
                 { ref = subRef registry ref False
                 , arguments = Array.map (subPattern registry) args
                 }
 
-        PatAs { pattern = inner, name = name } ->
-            PatAs { pattern = subPattern registry inner, name = name }
+        _ ->
+            Walk.mapPatternChildren (subPattern registry) pattern
 
 
 subExpr : Registry -> Expr -> Expr
 subExpr registry expr =
     when expr is
-        ExprUnit ->
-            ExprUnit
-
-        ExprApplication parts ->
-            ExprApplication (Array.map (subExpr registry) parts)
-
         ExprBinop { operator = op, left = left, right = right } ->
             if op == "::" then
                 ExprApplication
@@ -569,13 +419,6 @@ subExpr registry expr =
         ExprVar ref ->
             ExprVar (subRef registry ref False)
 
-        ExprIf { condition = condition, then_ = ifTrue, else_ = ifFalse } ->
-            ExprIf
-                { condition = subExpr registry condition
-                , then_ = subExpr registry ifTrue
-                , else_ = subExpr registry ifFalse
-                }
-
         ExprPrefix op ->
             if op == "::" then
                 ExprVar { moduleName = Just "Array", name = "pushFirst" }
@@ -583,97 +426,11 @@ subExpr registry expr =
             else
                 ExprPrefix op
 
-        ExprOperator op ->
-            ExprOperator op
-
-        ExprInt value ->
-            ExprInt value
-
-        ExprHex value ->
-            ExprHex value
-
-        ExprFloat value ->
-            ExprFloat value
-
-        ExprNegation inner ->
-            ExprNegation (subExpr registry inner)
-
-        ExprString value ->
-            ExprString value
-
-        ExprChar value ->
-            ExprChar value
-
-        ExprTuple items ->
-            ExprTuple (Array.map (subExpr registry) items)
-
-        ExprLet { declarations = declarations, expression = body } ->
-            ExprLet
-                { declarations = Array.map (subLetDecl registry) declarations
-                , expression = subExpr registry body
-                }
-
-        ExprCase { expression = scrutinee, cases = arms } ->
-            ExprCase
-                { expression = subExpr registry scrutinee
-                , cases = Array.map (subCaseArm registry) arms
-                }
-
-        ExprLambda { arguments = arguments, expression = body } ->
-            ExprLambda
-                { arguments = Array.map (subPattern registry) arguments
-                , expression = subExpr registry body
-                }
-
-        ExprRecord fields ->
-            ExprRecord (Array.map (subField registry) fields)
-
-        ExprList items ->
-            ExprList (Array.map (subExpr registry) items)
-
-        ExprAccess { record = record, field = field } ->
-            ExprAccess { record = subExpr registry record, field = field }
-
-        ExprAccessFunction field ->
-            ExprAccessFunction field
-
-        ExprUpdate { name = name, fields = fields } ->
-            ExprUpdate
-                { name = name
-                , fields = Array.map (subField registry) fields
-                }
-
-        ExprGlsl code ->
-            ExprGlsl code
-
-
-subLetDecl : Registry -> LetDecl -> LetDecl
-subLetDecl registry declaration =
-    when declaration is
-        LetFunction fn ->
-            LetFunction
-                { fn
-                    | arguments = Array.map (subPattern registry) fn.arguments
-                    , expression = subExpr registry fn.expression
-                }
-
-        LetDestructure { pattern = pattern, expression = expression } ->
-            LetDestructure
-                { pattern = subPattern registry pattern
-                , expression = subExpr registry expression
-                }
-
-
-subCaseArm : Registry -> CaseArm -> CaseArm
-subCaseArm registry arm =
-    { pattern = subPattern registry arm.pattern
-    , body = subExpr registry arm.body
-    }
-
-
-subField : Registry -> Field -> Field
-subField registry field =
-    { field | value = subExpr registry field.value }
+        _ ->
+            Walk.mapExprChildrenWithPatterns
+                (subExpr registry)
+                (subPattern registry)
+                expr
 
 
 subRef : Registry -> NamedRef -> Bool -> NamedRef

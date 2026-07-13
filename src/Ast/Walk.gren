@@ -1,0 +1,276 @@
+module Ast.Walk exposing
+    ( foldExprChildren
+    , mapDeclaration
+    , mapExprChildren
+    , mapExprChildrenWithPatterns
+    , mapLetDecl
+    , mapPatternChildren
+    )
+
+{-| Structural AST walks shared by host law passes.
+
+Law modules supply *node* rewrites; this module owns the recursive skeleton so
+`rewriteExpr` / `subExpr` / `compileExpr` do not each re-list every `Expr` arm.
+
+- `mapExprChildren` — rewrite child expressions only (patterns left as-is)
+- `mapExprChildrenWithPatterns` — also rewrite patterns in lambda / case / let
+- `mapPatternChildren` — structural pattern walk
+- `foldExprChildren` — accumulate over child expressions (collectors / scans)
+-}
+
+import Array exposing (Array)
+import Ast.Types exposing
+    ( CaseArm
+    , Declaration(..)
+    , Expr(..)
+    , LetDecl(..)
+    , Pattern(..)
+    )
+
+
+-- MAP EXPR -------------------------------------------------------------------
+
+
+{-| Rebuild `expr` by mapping every child expression with `f`. Leaves and
+operators are unchanged. Case/lambda *patterns* are not touched.
+-}
+mapExprChildren : (Expr -> Expr) -> Expr -> Expr
+mapExprChildren f expr =
+    mapExprChildrenWithPatterns f identityPattern expr
+
+
+{-| Like `mapExprChildren`, but also maps patterns in lambda args, case arms,
+and let bindings.
+-}
+mapExprChildrenWithPatterns : (Expr -> Expr) -> (Pattern -> Pattern) -> Expr -> Expr
+mapExprChildrenWithPatterns f mapPat expr =
+    when expr is
+        ExprApplication parts ->
+            ExprApplication (Array.map f parts)
+
+        ExprBinop { operator = op, left = left, right = right } ->
+            ExprBinop { operator = op, left = f left, right = f right }
+
+        ExprIf { condition = c, then_ = t, else_ = e } ->
+            ExprIf { condition = f c, then_ = f t, else_ = f e }
+
+        ExprNegation inner ->
+            ExprNegation (f inner)
+
+        ExprTuple items ->
+            ExprTuple (Array.map f items)
+
+        ExprList items ->
+            ExprList (Array.map f items)
+
+        ExprLet { declarations = declarations, expression = body } ->
+            ExprLet
+                { declarations = Array.map (mapLetDecl f mapPat) declarations
+                , expression = f body
+                }
+
+        ExprCase { expression = scrutinee, cases = arms } ->
+            ExprCase
+                { expression = f scrutinee
+                , cases = Array.map (mapCaseArm f mapPat) arms
+                }
+
+        ExprLambda { arguments = arguments, expression = body } ->
+            ExprLambda
+                { arguments = Array.map mapPat arguments
+                , expression = f body
+                }
+
+        ExprRecord fields ->
+            ExprRecord
+                (Array.map
+                    (\field ->
+                        { name = field.name
+                        , value = f field.value
+                        }
+                    )
+                    fields
+                )
+
+        ExprAccess { record = record, field = field } ->
+            ExprAccess { record = f record, field = field }
+
+        ExprUpdate { name = name, fields = fields } ->
+            ExprUpdate
+                { name = name
+                , fields =
+                    Array.map
+                        (\field ->
+                            { name = field.name
+                            , value = f field.value
+                            }
+                        )
+                        fields
+                }
+
+        _ ->
+            expr
+
+
+mapCaseArm : (Expr -> Expr) -> (Pattern -> Pattern) -> CaseArm -> CaseArm
+mapCaseArm f mapPat arm =
+    { pattern = mapPat arm.pattern
+    , body = f arm.body
+    }
+
+
+identityPattern : Pattern -> Pattern
+identityPattern pattern =
+    pattern
+
+
+-- MAP PATTERN ----------------------------------------------------------------
+
+
+{-| Rebuild `pattern` by mapping every child pattern with `f`.
+-}
+mapPatternChildren : (Pattern -> Pattern) -> Pattern -> Pattern
+mapPatternChildren f pattern =
+    when pattern is
+        PatTuple items ->
+            PatTuple (Array.map f items)
+
+        PatList items ->
+            PatList (Array.map f items)
+
+        PatCons { head = head, tail = tail } ->
+            PatCons { head = f head, tail = f tail }
+
+        PatNamed { ref = ref, arguments = args } ->
+            PatNamed { ref = ref, arguments = Array.map f args }
+
+        PatRecordBind fields ->
+            PatRecordBind
+                (Array.map
+                    (\field ->
+                        { name = field.name
+                        , pattern = f field.pattern
+                        }
+                    )
+                    fields
+                )
+
+        PatAs { pattern = inner, name = name } ->
+            PatAs { pattern = f inner, name = name }
+
+        _ ->
+            pattern
+
+
+-- MAP LET / DECL -------------------------------------------------------------
+
+
+mapLetDecl : (Expr -> Expr) -> (Pattern -> Pattern) -> LetDecl -> LetDecl
+mapLetDecl f mapPat declaration =
+    when declaration is
+        LetFunction fn ->
+            LetFunction
+                { fn
+                    | arguments = Array.map mapPat fn.arguments
+                    , expression = f fn.expression
+                }
+
+        LetDestructure { pattern = pattern, expression = expression } ->
+            LetDestructure
+                { pattern = mapPat pattern
+                , expression = f expression
+                }
+
+
+{-| Map expressions (and optionally patterns) on value declarations only.
+Type/port/infix declarations pass through unchanged.
+-}
+mapDeclaration : (Expr -> Expr) -> (Pattern -> Pattern) -> Declaration -> Declaration
+mapDeclaration f mapPat declaration =
+    when declaration is
+        DeclFunction fn ->
+            DeclFunction
+                { fn
+                    | arguments = Array.map mapPat fn.arguments
+                    , expression = f fn.expression
+                }
+
+        DeclDestructure { pattern = pattern, expression = expression } ->
+            DeclDestructure
+                { pattern = mapPat pattern
+                , expression = f expression
+                }
+
+        _ ->
+            declaration
+
+
+-- FOLD EXPR ------------------------------------------------------------------
+
+
+{-| Fold over immediate child expressions (not the node itself). Use with a
+recursive collector:
+
+    fold expr acc =
+        let afterSelf = visit expr acc in
+        foldExprChildren fold afterSelf expr
+-}
+foldExprChildren : (Expr -> acc -> acc) -> acc -> Expr -> acc
+foldExprChildren f acc expr =
+    when expr is
+        ExprApplication parts ->
+            Array.foldl f acc parts
+
+        ExprBinop { left = left, right = right } ->
+            f right (f left acc)
+
+        ExprIf { condition = c, then_ = t, else_ = e } ->
+            f e (f t (f c acc))
+
+        ExprNegation inner ->
+            f inner acc
+
+        ExprTuple items ->
+            Array.foldl f acc items
+
+        ExprList items ->
+            Array.foldl f acc items
+
+        ExprLet { declarations = declarations, expression = body } ->
+            let
+                withDecls =
+                    Array.foldl (foldLetDeclExpr f) acc declarations
+            in
+            f body withDecls
+
+        ExprCase { expression = scrutinee, cases = arms } ->
+            let
+                withScrut =
+                    f scrutinee acc
+            in
+            Array.foldl (\arm inner -> f arm.body inner) withScrut arms
+
+        ExprLambda { expression = body } ->
+            f body acc
+
+        ExprRecord fields ->
+            Array.foldl (\field inner -> f field.value inner) acc fields
+
+        ExprAccess { record = record } ->
+            f record acc
+
+        ExprUpdate { fields = fields } ->
+            Array.foldl (\field inner -> f field.value inner) acc fields
+
+        _ ->
+            acc
+
+
+foldLetDeclExpr : (Expr -> acc -> acc) -> LetDecl -> acc -> acc
+foldLetDeclExpr f declaration acc =
+    when declaration is
+        LetFunction fn ->
+            f fn.expression acc
+
+        LetDestructure { expression = expression } ->
+            f expression acc

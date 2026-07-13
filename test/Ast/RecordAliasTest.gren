@@ -1,0 +1,146 @@
+module Ast.RecordAliasTest exposing (tests)
+
+{-| RecordAlias short-name isolation (elm-deque Deque vs Internal.Deque).
+-}
+
+import Array exposing (Array)
+import Ast.Print as Print
+import Ast.RecordAlias as RecordAlias
+import Ast.Types exposing
+    ( Declaration(..)
+    , Exposing(..)
+    , Expr(..)
+    , File
+    , ModuleKind(..)
+    , Pattern(..)
+    , TypeAnn(..)
+    )
+import Dict exposing (Dict)
+import String
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ localCtorNotShadowedByImportedRecordAlias
+    , importedAliasStillRewritesWhenQualified
+    ]
+
+
+{-| `type Deque a = Deque (Internal.Deque a)` must not treat bare `Deque` as
+the imported record alias `Internal.Deque`.
+-}
+localCtorNotShadowedByImportedRecordAlias : TestResult
+localCtorNotShadowedByImportedRecordAlias =
+    let
+        packageAliases =
+            Dict.empty
+                |> Dict.set "Internal.Deque" [ "sizeF", "front", "sizeR", "rear" ]
+
+        file =
+            { schemaVersion = 1
+            , moduleDefinition =
+                { kind = NormalModule
+                , moduleName = "Deque"
+                , exposing_ = ExposeAll
+                }
+            , comments = []
+            , imports =
+                [ { moduleName = "Internal", alias = Nothing, exposing_ = Just ExposeAll } ]
+            , declarations =
+                [ DeclCustomType
+                    { name = "Deque"
+                    , documentation = Nothing
+                    , generics = [ "a" ]
+                    , constructors =
+                        [ { name = "Deque"
+                          , arguments = [ TypeGeneric "a" ]
+                          }
+                        ]
+                    }
+                , DeclFunction
+                    { name = "empty"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprApplication
+                            [ ExprVar { moduleName = Nothing, name = "Deque" }
+                            , ExprVar { moduleName = Just "Internal", name = "empty" }
+                            ]
+                    }
+                ]
+            }
+
+        printed =
+            Print.print (RecordAlias.apply packageAliases file)
+
+        ok =
+            String.contains "Internal.empty" printed
+                && not (String.contains "ra_" printed)
+                && not (String.contains "sizeF = Internal.empty" printed)
+    in
+    outcome
+        "local Deque ctor is not rewritten as Internal.Deque record alias"
+        ok
+        ("printed:\n" ++ printed)
+
+
+importedAliasStillRewritesWhenQualified : TestResult
+importedAliasStillRewritesWhenQualified =
+    let
+        packageAliases =
+            Dict.empty
+                |> Dict.set "Monocle.Iso.Iso" [ "get", "reverseGet" ]
+
+        file =
+            { schemaVersion = 1
+            , moduleDefinition =
+                { kind = NormalModule
+                , moduleName = "Example"
+                , exposing_ = ExposeAll
+                }
+            , comments = []
+            , imports =
+                [ { moduleName = "Monocle.Iso", alias = Nothing, exposing_ = Just ExposeAll } ]
+            , declarations =
+                [ DeclFunction
+                    { name = "pair"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "f", PatVar "g" ]
+                    , expression =
+                        ExprApplication
+                            [ ExprVar { moduleName = Just "Monocle.Iso", name = "Iso" }
+                            , ExprVar { moduleName = Nothing, name = "f" }
+                            , ExprVar { moduleName = Nothing, name = "g" }
+                            ]
+                    }
+                ]
+            }
+
+        printed =
+            Print.print (RecordAlias.apply packageAliases file)
+
+        ok =
+            String.contains "get = f" printed
+                && String.contains "reverseGet = g" printed
+    in
+    outcome
+        "qualified Monocle.Iso.Iso still becomes a record"
+        ok
+        ("printed:\n" ++ printed)
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed details =
+    { name = name
+    , passed = passed
+    , details = details
+    }

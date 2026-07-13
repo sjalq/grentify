@@ -517,7 +517,7 @@ reportsUnsupportedRuntimeBoundaries =
                 )
     in
     outcome
-        "port, effect, and kernel boundaries produce hard diagnostics"
+        "ports pass through; effect and kernel produce hard diagnostics"
         (Array.isEmpty portCodes
             && Array.member "UNSUPPORTED_KERNEL" kernelCodes
             && Array.any (String.contains "effect modules") effectMessages

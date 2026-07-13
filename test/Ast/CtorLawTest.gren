@@ -1,0 +1,233 @@
+module Ast.CtorLawTest exposing (tests)
+
+{-| CtorLaw unit checks: multi-arg helpers and short-name isolation.
+-}
+
+import Array exposing (Array)
+import Ast.CtorLaw as CtorLaw
+import Ast.Print as Print
+import Ast.Types exposing
+    ( Declaration(..)
+    , Exposing(..)
+    , Expr(..)
+    , File
+    , ModuleKind(..)
+    , Pattern(..)
+    , TypeAnn(..)
+    )
+import Dict exposing (Dict)
+import String
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ localOneArgNotShadowedByImportedMultiArg
+    , localMultiArgStillGetsHelper
+    , importedMultiArgViaQualifiedName
+    , collectSkipsUnaryCtors
+    ]
+
+
+{-| Classic zmachine collision: local `Continue` (1-arg) must not pick up
+`Types.Continue` (2-arg) via a bare short-name arity key.
+-}
+localOneArgNotShadowedByImportedMultiArg : TestResult
+localOneArgNotShadowedByImportedMultiArg =
+    let
+        packageArities =
+            Dict.empty
+                |> Dict.set "Types.Continue" 2
+                |> Dict.set "Execute.Error" 2
+
+        file =
+            emptyFile "Execute"
+                [ { moduleName = "Types", alias = Nothing, exposing_ = Just ExposeAll } ]
+                [ DeclCustomType
+                    { name = "Outcome"
+                    , documentation = Nothing
+                    , generics = []
+                    , constructors =
+                        [ { name = "Continue", arguments = [ TypeGeneric "ZMachine" ] }
+                        , { name = "Error"
+                          , arguments = [ TypeGeneric "ZMachineError", TypeGeneric "ZMachine" ]
+                          }
+                        ]
+                    }
+                , DeclFunction
+                    { name = "step"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "m" ]
+                    , expression =
+                        -- Bare local Continue (moduleName Nothing = current module).
+                        ExprApplication
+                            [ ExprVar { moduleName = Nothing, name = "Continue" }
+                            , ExprVar { moduleName = Nothing, name = "m" }
+                            ]
+                    }
+                ]
+
+        printed =
+            Print.print (CtorLaw.apply packageArities file)
+
+        ok =
+            not (String.contains "ctor_Continue_elmToGren" printed)
+                && String.contains "Continue" printed
+                && not (String.contains "Continue { first" printed)
+    in
+    outcome
+        "local 1-arg Continue is not rewritten via Types.Continue arity"
+        ok
+        ("printed:\n" ++ printed)
+
+
+localMultiArgStillGetsHelper : TestResult
+localMultiArgStillGetsHelper =
+    let
+        packageArities =
+            Dict.empty
+                |> Dict.set "Execute.Error" 2
+
+        file =
+            emptyFile "Execute"
+                []
+                [ DeclCustomType
+                    { name = "Outcome"
+                    , documentation = Nothing
+                    , generics = []
+                    , constructors =
+                        [ { name = "Error"
+                          , arguments = [ TypeGeneric "E", TypeGeneric "M" ]
+                          }
+                        ]
+                    }
+                , DeclFunction
+                    { name = "fail"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "e", PatVar "m" ]
+                    , expression =
+                        ExprApplication
+                            [ ExprVar { moduleName = Nothing, name = "Error" }
+                            , ExprVar { moduleName = Nothing, name = "e" }
+                            , ExprVar { moduleName = Nothing, name = "m" }
+                            ]
+                    }
+                ]
+
+        printed =
+            Print.print (CtorLaw.apply packageArities file)
+
+        ok =
+            String.contains "ctor_Error_elmToGren" printed
+                && String.contains "Error ({ first = a0, second = a1 })" printed
+                && not (String.contains "third" printed)
+    in
+    outcome
+        "local 2-arg Error gets a 2-param curried helper"
+        ok
+        ("printed:\n" ++ printed)
+
+
+importedMultiArgViaQualifiedName : TestResult
+importedMultiArgViaQualifiedName =
+    let
+        packageArities =
+            Dict.empty
+                |> Dict.set "Types.Continue" 2
+
+        file =
+            emptyFile "Run"
+                [ { moduleName = "Types", alias = Nothing, exposing_ = Just ExposeAll } ]
+                [ DeclFunction
+                    { name = "go"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "events", PatVar "m" ]
+                    , expression =
+                        ExprApplication
+                            [ ExprVar { moduleName = Just "Types", name = "Continue" }
+                            , ExprVar { moduleName = Nothing, name = "events" }
+                            , ExprVar { moduleName = Nothing, name = "m" }
+                            ]
+                    }
+                ]
+
+        printed =
+            Print.print (CtorLaw.apply packageArities file)
+
+        ok =
+            String.contains "ctor_Continue_elmToGren" printed
+                && String.contains "Types.Continue ({ first = a0, second = a1 })" printed
+    in
+    outcome
+        "qualified Types.Continue (2-arg) still gets a helper"
+        ok
+        ("printed:\n" ++ printed)
+
+
+collectSkipsUnaryCtors : TestResult
+collectSkipsUnaryCtors =
+    let
+        file =
+            emptyFile "Execute"
+                []
+                [ DeclCustomType
+                    { name = "Outcome"
+                    , documentation = Nothing
+                    , generics = []
+                    , constructors =
+                        [ { name = "Continue", arguments = [ TypeGeneric "M" ] }
+                        , { name = "Error", arguments = [ TypeGeneric "E", TypeGeneric "M" ] }
+                        , { name = "Halted", arguments = [] }
+                        ]
+                    }
+                ]
+
+        arities =
+            CtorLaw.collectFromFile file
+
+        ok =
+            Dict.get "Execute.Continue" arities
+                == Nothing
+                && Dict.get "Execute.Halted" arities
+                == Nothing
+                && Dict.get "Execute.Error" arities
+                == Just 2
+    in
+    outcome
+        "collectFromFile only indexes multi-arg ctors"
+        ok
+        ("map keys: " ++ String.join ", " (Dict.keys arities))
+
+
+-- helpers -------------------------------------------------------------------
+
+
+emptyFile : String -> Array { moduleName : String, alias : Maybe String, exposing_ : Maybe Exposing } -> Array Declaration -> File
+emptyFile moduleName imports declarations =
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule
+        , moduleName = moduleName
+        , exposing_ = ExposeAll
+        }
+    , comments = []
+    , imports = imports
+    , declarations = declarations
+    }
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed details =
+    { name = name
+    , passed = passed
+    , details = details
+    }

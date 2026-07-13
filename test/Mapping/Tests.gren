@@ -381,6 +381,7 @@ browserAdapterIsSemantic =
 
 {-| classList maps pair records to `{ class, enabled }`; event helpers map
 pair decoders to Gren's named preventDefault/stopPropagation fields.
+VirtualDom.Handler May* variants get the same treatment as Html.Events.
 -}
 htmlAdaptersAreSemantic : Bool
 htmlAdaptersAreSemantic =
@@ -390,6 +391,9 @@ htmlAdaptersAreSemantic =
 
         events =
             Adapter.sourceFor HtmlEventsAdapter
+
+        handlers =
+            Adapter.sourceFor VirtualDomHandlerAdapter
     in
     String.contains "{ class = pair.first" attributes
         && String.contains ", enabled = pair.second" attributes
@@ -399,6 +403,11 @@ htmlAdaptersAreSemantic =
         && String.contains "message = pair.first" events
         && String.contains "Html.Events.preventDefaultOn" events
         && String.contains "Html.Events.stopPropagationOn" events
+        && String.contains "exposing (mayPreventDefault, mayStopPropagation)" handlers
+        && String.contains "VirtualDom.MayPreventDefault" handlers
+        && String.contains "VirtualDom.MayStopPropagation" handlers
+        && String.contains "preventDefault = pair.second" handlers
+        && String.contains "stopPropagation = pair.second" handlers
 
 
 {-| Bytes.Encode.string routes through Bytes.fromString; Random.step rewrites

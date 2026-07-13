@@ -16,7 +16,7 @@ tests : Array TestResult
 tests =
     [ detectsKernelImport
     , detectsEffectModule
-    , detectsPortModule
+    , portModulesAreNotHazards
     , detectsGlsl
     , ignoresProtectedText
     , deduplicatesHazards
@@ -26,25 +26,27 @@ tests =
 detectsKernelImport : TestResult
 detectsKernelImport =
     Hazard.detect "module Example exposing (..)\nimport Elm.Kernel.Utils\n"
-        |> expectEqual "Elm.Kernel imports are rejected early" [ ElmKernel ]
+        |> expectEqual "Elm.Kernel imports are hard-refused" [ ElmKernel ]
 
 
 detectsEffectModule : TestResult
 detectsEffectModule =
     Hazard.detect "effect module Platform.Cmd where { command = MyCmd } exposing (none)"
-        |> expectEqual "effect modules are rejected early" [ EffectModule ]
+        |> expectEqual "effect modules are hard-refused" [ EffectModule ]
 
 
-detectsPortModule : TestResult
-detectsPortModule =
+{-| Ports are application interop: not acquisition hazards.
+-}
+portModulesAreNotHazards : TestResult
+portModulesAreNotHazards =
     Hazard.detect "port module Main exposing (main)\nport send : String -> Cmd msg"
-        |> expectEqual "port modules are rejected early" [ PortModule ]
+        |> expectEqual "port modules are not acquisition hazards" []
 
 
 detectsGlsl : TestResult
 detectsGlsl =
     Hazard.detect "shader = [glsl| void main () {} |]"
-        |> expectEqual "GLSL blocks are rejected early" [ Glsl ]
+        |> expectEqual "GLSL blocks are hard-refused" [ Glsl ]
 
 
 ignoresProtectedText : TestResult

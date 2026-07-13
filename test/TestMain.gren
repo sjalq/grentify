@@ -1,6 +1,10 @@
 module TestMain exposing (main)
 
 import Array exposing (Array)
+import Ast.CtorLawTest
+import Ast.PrintTest
+import Ast.ReservedTest
+import Ast.RecordAliasTest
 import Elm.ManifestTest
 import Elm.PackageNameTest
 import Elm.RegistryTest
@@ -72,6 +76,10 @@ allChecks =
     , Transform.PipelineTest.tests
     , Transform.SourceEditTest.tests
     , Resolve.SolverTest.tests
+    , Ast.CtorLawTest.tests
+    , Ast.PrintTest.tests
+    , Ast.ReservedTest.tests
+    , Ast.RecordAliasTest.tests
     , Mapping.Tests.checks
         |> Array.map
             (\check ->

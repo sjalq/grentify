@@ -1,0 +1,271 @@
+module Ast.PrintTest exposing (tests)
+
+{-| Print layout checks: lambda bodies with block expressions.
+-}
+
+import Array exposing (Array)
+import Ast.Print as Print
+import Ast.Types exposing
+    ( Declaration(..)
+    , Exposing(..)
+    , Expr(..)
+    , File
+    , LetDecl(..)
+    , ModuleKind(..)
+    , Pattern(..)
+    )
+import String
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ lambdaLetBreaksAfterArrow
+    , simpleLambdaStaysInline
+    , caseArmStillMultiline
+    , basicsFalseKeepsModuleWhenLocalFalseCtor
+    , recordFieldLetIsParenthesized
+    ]
+
+
+{-| Gren rejects mid-line `{ field = let` (UNFINISHED LET), even parenthesized.
+Break after `=` and indent the block so `let` owns its column.
+-}
+recordFieldLetIsParenthesized : TestResult
+recordFieldLetIsParenthesized =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "widget"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprRecord
+                            [ { name = "class"
+                              , value =
+                                    ExprLet
+                                        { declarations =
+                                            [ LetDestructure
+                                                { pattern = PatVar "c"
+                                                , expression =
+                                                    ExprString "ok"
+                                                }
+                                            ]
+                                        , expression =
+                                            ExprVar { moduleName = Nothing, name = "c" }
+                                        }
+                              }
+                            ]
+                    }
+                ]
+
+        printed =
+            Print.print file
+
+        ok =
+            not (String.contains "class = let" printed)
+                && not (String.contains "class = (let" printed)
+                && String.contains "class =" printed
+                && String.contains "\n" printed
+                && String.contains "let" printed
+                && String.contains "in" printed
+    in
+    outcome
+        "record field let breaks after = and indents"
+        ok
+        ("printed:\n" ++ printed)
+
+
+
+
+{-| Gren rejects `\\x -> let` on one line (UNFINISHED LET).
+-}
+lambdaLetBreaksAfterArrow : TestResult
+lambdaLetBreaksAfterArrow =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "fold"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprApplication
+                            [ ExprVar { moduleName = Just "Array", name = "foldl" }
+                            , ExprLambda
+                                { arguments = [ PatVar "x", PatVar "acc" ]
+                                , expression =
+                                    ExprLet
+                                        { declarations =
+                                            [ LetDestructure
+                                                { pattern = PatVar "y"
+                                                , expression =
+                                                    ExprVar { moduleName = Nothing, name = "x" }
+                                                }
+                                            ]
+                                        , expression =
+                                            ExprVar { moduleName = Nothing, name = "y" }
+                                        }
+                                }
+                            , ExprVar { moduleName = Nothing, name = "init" }
+                            , ExprVar { moduleName = Nothing, name = "items" }
+                            ]
+                    }
+                ]
+
+        printed =
+            Print.print file
+
+        ok =
+            not (String.contains "-> let" printed)
+                && String.contains "->\n" printed
+                && String.contains "let" printed
+    in
+    outcome
+        "lambda with let body breaks after ->"
+        ok
+        ("printed:\n" ++ printed)
+
+
+simpleLambdaStaysInline : TestResult
+simpleLambdaStaysInline =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "inc"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprLambda
+                            { arguments = [ PatVar "n" ]
+                            , expression =
+                                ExprBinop
+                                    { operator = "+"
+                                    , left = ExprVar { moduleName = Nothing, name = "n" }
+                                    , right = ExprInt 1
+                                    }
+                            }
+                    }
+                ]
+
+        printed =
+            Print.print file
+
+        ok =
+            String.contains "\\n -> n + 1" printed
+                || String.contains "\\n -> (n + 1)" printed
+    in
+    outcome
+        "simple lambda stays single-line"
+        ok
+        ("printed:\n" ++ printed)
+
+
+caseArmStillMultiline : TestResult
+caseArmStillMultiline =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "pick"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "v" ]
+                    , expression =
+                        ExprCase
+                            { expression = ExprVar { moduleName = Nothing, name = "v" }
+                            , cases =
+                                [ { pattern = PatVar "x"
+                                  , body = ExprVar { moduleName = Nothing, name = "x" }
+                                  }
+                                ]
+                            }
+                    }
+                ]
+
+        printed =
+            Print.print file
+
+        ok =
+            String.contains "when" printed
+                && String.contains "->\n" printed
+    in
+    outcome
+        "case arms still break after ->"
+        ok
+        ("printed:\n" ++ printed)
+
+
+{-| Local `False` ADT ctor must not steal `Basics.False` (postgrest-queries).
+-}
+basicsFalseKeepsModuleWhenLocalFalseCtor : TestResult
+basicsFalseKeepsModuleWhenLocalFalseCtor =
+    let
+        file =
+            emptyFile
+                [ DeclCustomType
+                    { name = "Value"
+                    , documentation = Nothing
+                    , generics = []
+                    , constructors =
+                        [ { name = "True", arguments = [] }
+                        , { name = "False", arguments = [] }
+                        ]
+                    }
+                , DeclFunction
+                    { name = "flag"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprVar { moduleName = Just "Basics", name = "False" }
+                    }
+                ]
+
+        printed =
+            Print.print file
+
+        ok =
+            String.contains "Basics.False" printed
+                && not (String.contains "flag =\n    False\n" printed)
+    in
+    outcome
+        "Basics.False stays qualified when local False exists"
+        ok
+        ("printed:\n" ++ printed)
+
+
+-- helpers -------------------------------------------------------------------
+
+
+emptyFile : Array Declaration -> File
+emptyFile declarations =
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule
+        , moduleName = "Example"
+        , exposing_ = ExposeAll
+        }
+    , comments = []
+    , imports = []
+    , declarations = declarations
+    }
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed details =
+    { name = name
+    , passed = passed
+    , details = details
+    }

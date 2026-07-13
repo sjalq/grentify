@@ -1,0 +1,117 @@
+module Ast.ReservedTest exposing (tests)
+
+{-| Reserved rename must not collide with existing `when_` binders.
+-}
+
+import Array exposing (Array)
+import Ast.Print as Print
+import Ast.Reserved as Reserved
+import Ast.Types exposing
+    ( Declaration(..)
+    , Exposing(..)
+    , Expr(..)
+    , File
+    , ModuleKind(..)
+    , Pattern(..)
+    )
+import String
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ reservedEscapesAroundExistingUnderscore
+    ]
+
+
+{-| Elm already avoids shadowing: top-level `when`, param `when_`.
+Naive `when` → `when_` collides; free name must be `when__`.
+-}
+reservedEscapesAroundExistingUnderscore : TestResult
+reservedEscapesAroundExistingUnderscore =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "when"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprRecord
+                            [ { name = "editingOrBlurred"
+                              , value =
+                                    ExprApplication
+                                        [ ExprVar { moduleName = Nothing, name = "init" }
+                                        , ExprVar { moduleName = Nothing, name = "EditingOrBlurred" }
+                                        ]
+                              }
+                            ]
+                    }
+                , DeclFunction
+                    { name = "init"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "when_", PatVar "func" ]
+                    , expression =
+                        ExprRecord
+                            [ { name = "func"
+                              , value = ExprVar { moduleName = Nothing, name = "func" }
+                              }
+                            , { name = "when"
+                              , value = ExprVar { moduleName = Nothing, name = "when_" }
+                              }
+                            ]
+                    }
+                ]
+
+        printed =
+            file
+                |> Reserved.apply
+                |> Print.print
+
+        passed =
+            -- value when → when__; param when_ kept; field when → when_ (fixed)
+            String.contains "when__ =" printed
+                && String.contains "init when_ func =" printed
+                && String.contains "when_ = when_" printed
+                && not (String.contains "init when__ " printed)
+                && not (String.contains "when__ = when_" printed)
+    in
+    outcome
+        "reserved escape skips existing when_ binder"
+        passed
+        ("printed:\n" ++ printed)
+
+
+emptyFile : Array Declaration -> File
+emptyFile declarations =
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule
+        , moduleName = "Validation"
+        , exposing_ = ExposeAll
+        }
+    , comments = []
+    , imports = []
+    , declarations = declarations
+    }
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed details =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            details
+    }

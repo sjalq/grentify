@@ -193,6 +193,7 @@ type AdapterId
     | SvgKeyedAdapter
     | TaskAdapter
     | TupleAdapter
+    | VirtualDomHandlerAdapter
     | VirtualDomKeyedAdapter
 
 
@@ -264,6 +265,9 @@ adapterIdName adapterId =
 
         TupleAdapter ->
             "Tuple"
+
+        VirtualDomHandlerAdapter ->
+            "VirtualDom.Handler"
 
         VirtualDomKeyedAdapter ->
             "VirtualDom.Keyed"

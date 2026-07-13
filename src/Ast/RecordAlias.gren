@@ -22,17 +22,17 @@ names so cross-module uses (`Monocle.Iso.Iso`, `Optional.Optional`) resolve.
 -}
 
 import Array exposing (Array)
+import Ast.Ref as Ref
 import Ast.Types exposing
     ( Declaration(..)
     , Expr(..)
     , Field
     , File
-    , Import
-    , LetDecl(..)
     , NamedRef
     , Pattern(..)
     , TypeAnn(..)
     )
+import Ast.Walk as Walk
 import Dict exposing (Dict)
 import Maybe exposing (Maybe(..))
 
@@ -96,8 +96,15 @@ collectLocalAliases declarations =
         declarations
 
 
-{-| Merge package aliases with this file's locals and import qualifiers.
-Keys usable at use sites: bare `Iso`, `Optional.Optional`, `Monocle.Iso.Iso`.
+{-| Merge package aliases with this file's locals and import *aliases*.
+
+Keys:
+- bare `Iso` — only **local** type aliases in this file
+- `Module.Iso` — package-wide defining module (always)
+- `I.Iso` — only when `import … as I`
+
+Never register imported aliases under bare short names: `Internal.Deque`
+(record alias) must not steal local custom-type ctor `Deque` (elm-deque).
 -}
 buildAliasIndex : Dict String (Array String) -> File -> Dict String (Array String)
 buildAliasIndex packageAliases file =
@@ -105,47 +112,10 @@ buildAliasIndex packageAliases file =
         local =
             collectLocalAliases file.declarations
 
-        -- Start with package-wide Module.Name keys.
         withPackage =
             Dict.foldl Dict.set local packageAliases
-
-        -- Re-key under each import's qualifier (alias or module path).
-        withImports =
-            Array.foldl
-                (\import_ acc ->
-                    let
-                        qualifier =
-                            when import_.alias is
-                                Just a ->
-                                    a
-
-                                Nothing ->
-                                    import_.moduleName
-
-                        prefix =
-                            import_.moduleName ++ "."
-                    in
-                    Dict.foldl
-                        (\key fields inner ->
-                            if String.startsWith prefix key then
-                                let
-                                    short =
-                                        String.dropFirst (String.count prefix) key
-                                in
-                                inner
-                                    |> Dict.set (qualifier ++ "." ++ short) fields
-                                    |> Dict.set short fields
-
-                            else
-                                inner
-                        )
-                        acc
-                        packageAliases
-                )
-                withPackage
-                file.imports
     in
-    withImports
+    Ref.addImportAliasKeys file.imports packageAliases withPackage
 
 
 recordFieldNames : TypeAnn -> Maybe (Array String)
@@ -160,22 +130,10 @@ recordFieldNames typeAnn =
 
 rewriteDeclaration : Dict String (Array String) -> Int -> Declaration -> Declaration
 rewriteDeclaration aliases seed declaration =
-    when declaration is
-        DeclFunction fn ->
-            DeclFunction
-                { fn
-                    | arguments = Array.map (rewritePattern aliases) fn.arguments
-                    , expression = rewriteExpr aliases (seed + 1) fn.expression
-                }
-
-        DeclDestructure { pattern = pattern, expression = expression } ->
-            DeclDestructure
-                { pattern = rewritePattern aliases pattern
-                , expression = rewriteExpr aliases (seed + 1) expression
-                }
-
-        _ ->
-            declaration
+    Walk.mapDeclaration
+        (rewriteExpr aliases (seed + 1))
+        (rewritePattern aliases)
+        declaration
 
 
 rewritePattern : Dict String (Array String) -> Pattern -> Pattern
@@ -197,32 +155,8 @@ rewritePattern aliases pattern =
                 Nothing ->
                     PatNamed { ref = ref, arguments = rewrittenArgs }
 
-        PatTuple items ->
-            PatTuple (Array.map (rewritePattern aliases) items)
-
-        PatList items ->
-            PatList (Array.map (rewritePattern aliases) items)
-
-        PatCons { head = head, tail = tail } ->
-            PatCons
-                { head = rewritePattern aliases head
-                , tail = rewritePattern aliases tail
-                }
-
-        PatRecordBind fields ->
-            PatRecordBind
-                (Array.map
-                    (\field ->
-                        { field | pattern = rewritePattern aliases field.pattern }
-                    )
-                    fields
-                )
-
-        PatAs { pattern = inner, name = name } ->
-            PatAs { pattern = rewritePattern aliases inner, name = name }
-
         _ ->
-            pattern
+            Walk.mapPatternChildren (rewritePattern aliases) pattern
 
 
 rewriteExpr : Dict String (Array String) -> Int -> Expr -> Expr
@@ -231,93 +165,21 @@ rewriteExpr aliases seed expr =
         ExprApplication parts ->
             rewriteApplication aliases seed parts
 
-        ExprBinop { operator = op, left = left, right = right } ->
-            ExprBinop
-                { operator = op
-                , left = rewriteExpr aliases (seed + 1) left
-                , right = rewriteExpr aliases (seed + 2) right
-                }
-
         ExprVar ref ->
             when aliasFields aliases ref is
                 Just fields ->
                     -- Bare alias ctor: η-expand to a record-building lambda.
+                    -- Seed tags unique binder names when several etas appear.
                     etaRecord fields [] seed
 
                 Nothing ->
                     expr
 
-        ExprIf { condition = c, then_ = t, else_ = e } ->
-            ExprIf
-                { condition = rewriteExpr aliases (seed + 1) c
-                , then_ = rewriteExpr aliases (seed + 2) t
-                , else_ = rewriteExpr aliases (seed + 3) e
-                }
-
-        ExprNegation inner ->
-            ExprNegation (rewriteExpr aliases (seed + 1) inner)
-
-        ExprTuple items ->
-            ExprTuple (Array.indexedMap (\i p -> rewriteExpr aliases (seed + 1 + i) p) items)
-
-        ExprLet { declarations = declarations, expression = body } ->
-            ExprLet
-                { declarations =
-                    Array.indexedMap (\i d -> rewriteLetDecl aliases (seed + 1 + i) d) declarations
-                , expression = rewriteExpr aliases (seed + 50) body
-                }
-
-        ExprCase { expression = scrutinee, cases = arms } ->
-            ExprCase
-                { expression = rewriteExpr aliases (seed + 1) scrutinee
-                , cases =
-                    Array.indexedMap
-                        (\i arm ->
-                            { pattern = rewritePattern aliases arm.pattern
-                            , body = rewriteExpr aliases (seed + 10 + i * 17) arm.body
-                            }
-                        )
-                        arms
-                }
-
-        ExprLambda { arguments = arguments, expression = body } ->
-            ExprLambda
-                { arguments = Array.map (rewritePattern aliases) arguments
-                , expression = rewriteExpr aliases (seed + 1) body
-                }
-
-        ExprRecord fields ->
-            ExprRecord
-                (Array.indexedMap
-                    (\i f ->
-                        { name = f.name
-                        , value = rewriteExpr aliases (seed + 1 + i) f.value
-                        }
-                    )
-                    fields
-                )
-
-        ExprList items ->
-            ExprList (Array.indexedMap (\i p -> rewriteExpr aliases (seed + 1 + i) p) items)
-
-        ExprAccess { record = record, field = field } ->
-            ExprAccess { record = rewriteExpr aliases (seed + 1) record, field = field }
-
-        ExprUpdate { name = name, fields = fields } ->
-            ExprUpdate
-                { name = name
-                , fields =
-                    Array.indexedMap
-                        (\i f ->
-                            { name = f.name
-                            , value = rewriteExpr aliases (seed + 1 + i) f.value
-                            }
-                        )
-                        fields
-                }
-
         _ ->
-            expr
+            Walk.mapExprChildrenWithPatterns
+                (rewriteExpr aliases (seed + 1))
+                (rewritePattern aliases)
+                expr
 
 
 rewriteApplication : Dict String (Array String) -> Int -> Array Expr -> Expr
@@ -372,36 +234,22 @@ rewriteApplication aliases seed parts =
                         (Array.pushFirst (rewriteExpr aliases seed head) rewrittenArgs)
 
 
-rewriteLetDecl : Dict String (Array String) -> Int -> LetDecl -> LetDecl
-rewriteLetDecl aliases seed declaration =
-    when declaration is
-        LetFunction fn ->
-            LetFunction
-                { fn
-                    | arguments = Array.map (rewritePattern aliases) fn.arguments
-                    , expression = rewriteExpr aliases (seed + 1) fn.expression
-                }
-
-        LetDestructure { pattern = pattern, expression = expression } ->
-            LetDestructure
-                { pattern = rewritePattern aliases pattern
-                , expression = rewriteExpr aliases (seed + 1) expression
-                }
-
-
 aliasFields : Dict String (Array String) -> NamedRef -> Maybe (Array String)
 aliasFields aliases ref =
     when ref.moduleName is
         Nothing ->
+            -- Bare name: local alias only (never an imported short).
             Dict.get ref.name aliases
 
         Just moduleName ->
+            -- Prefer Module.Name; allow Alias.Name from `import as`.
+            -- Do not fall back to bare short (cross-module collision).
             when Dict.get (moduleName ++ "." ++ ref.name) aliases is
                 Just fields ->
                     Just fields
 
                 Nothing ->
-                    Dict.get ref.name aliases
+                    Nothing
 
 
 etaRecord : Array String -> Array Expr -> Int -> Expr

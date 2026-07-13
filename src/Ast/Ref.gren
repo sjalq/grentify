@@ -1,0 +1,73 @@
+module Ast.Ref exposing
+    ( addImportAliasKeys
+    , qualifiedName
+    )
+
+{-| Shared name resolution for host AST laws.
+
+**Law:** keys are `Module.Name` (and `Alias.Name` after `import M as Alias`).
+Bare short names are only for *local* definitions of the current file — never
+for imported symbols. elm-review encodes unqualified locals as
+`moduleName = Nothing`; those resolve to `localModule.Name`.
+
+This is the same collision class as `Execute.Continue` vs `Types.Continue` and
+`Deque` vs `Internal.Deque`.
+-}
+
+import Array exposing (Array)
+import Ast.Types exposing (Import, NamedRef)
+import Dict exposing (Dict)
+import Maybe exposing (Maybe(..))
+import String
+
+
+{-| Canonical package key for a value/type/ctor reference.
+
+`moduleName = Nothing` → current module (local definition encoding).
+-}
+qualifiedName : String -> NamedRef -> String
+qualifiedName localModule ref =
+    when ref.moduleName is
+        Just moduleName ->
+            moduleName ++ "." ++ ref.name
+
+        Nothing ->
+            localModule ++ "." ++ ref.name
+
+
+{-| Extend `base` with `alias.Name` keys for every package key under each
+`import Module as alias`. Does **not** register bare short names.
+
+`source` is the package-wide map (`Module.Name` → value) used to discover keys;
+`base` is the starting index (often `source`, or local shorts ∪ source).
+-}
+addImportAliasKeys : Array Import -> Dict String a -> Dict String a -> Dict String a
+addImportAliasKeys imports source base =
+    Array.foldl
+        (\import_ acc ->
+            when import_.alias is
+                Nothing ->
+                    acc
+
+                Just aliasName ->
+                    let
+                        prefix =
+                            import_.moduleName ++ "."
+                    in
+                    Dict.foldl
+                        (\key value inner ->
+                            if String.startsWith prefix key then
+                                let
+                                    short =
+                                        String.dropFirst (String.count prefix) key
+                                in
+                                Dict.set (aliasName ++ "." ++ short) value inner
+
+                            else
+                                inner
+                        )
+                        acc
+                        source
+        )
+        base
+        imports

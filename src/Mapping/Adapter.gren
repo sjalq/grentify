@@ -54,6 +54,7 @@ all =
     , SvgKeyedAdapter
     , TaskAdapter
     , TupleAdapter
+    , VirtualDomHandlerAdapter
     , VirtualDomKeyedAdapter
     ]
 
@@ -254,6 +255,9 @@ sourceFor adapterId =
 
         TupleAdapter ->
             tupleSource
+
+        VirtualDomHandlerAdapter ->
+            virtualDomHandlerSource
 
         VirtualDomKeyedAdapter ->
             virtualDomKeyedSource
@@ -465,6 +469,47 @@ node : String -> Array (Attribute msg) -> Array { first : String, second : Svg m
 node tag attributes entries =
     Keyed.node tag attributes
         (Array.map (\\entry -> { key = entry.first, node = entry.second }) entries)
+"""
+
+
+{-| Elm `VirtualDom.Handler` variants wrap `(msg, Bool)` decoders. After the
+tuple rewrite those become `{ first, second }`; Gren expects named fields
+`{ message, preventDefault }` / `{ message, stopPropagation }`. Same rationale
+as `Html.Events.preventDefaultOn` / `stopPropagationOn`.
+-}
+virtualDomHandlerSource : String
+virtualDomHandlerSource =
+    """
+module ElmToGren.Compat.VirtualDom.Handler exposing (mayPreventDefault, mayStopPropagation)
+
+import Json.Decode as Decode
+import VirtualDom exposing (Handler(..))
+
+
+mayPreventDefault : Decode.Decoder { first : msg, second : Bool } -> Handler msg
+mayPreventDefault decoder =
+    VirtualDom.MayPreventDefault
+        (Decode.map
+            (\\pair ->
+                { message = pair.first
+                , preventDefault = pair.second
+                }
+            )
+            decoder
+        )
+
+
+mayStopPropagation : Decode.Decoder { first : msg, second : Bool } -> Handler msg
+mayStopPropagation decoder =
+    VirtualDom.MayStopPropagation
+        (Decode.map
+            (\\pair ->
+                { message = pair.first
+                , stopPropagation = pair.second
+                }
+            )
+            decoder
+        )
 """
 
 

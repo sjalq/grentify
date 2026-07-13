@@ -102,11 +102,15 @@ Pure library packages over `elm/core` (plus `elm/json`, `elm/time`,
 supported path — `elm-community/list-extra` and `rtfeldman/elm-hex` are the
 reference targets. Unknown dependencies are transpiled recursively.
 
-Refused with a diagnostic (no portable translation exists):
+**Hard-refused** (no portable Gren package source):
 
-- port modules and port declarations
-- effect modules and `Elm.Kernel` / `Native` code
-- GLSL shader expressions
+- `effect module` (runtime/effect managers)
+- `Elm.Kernel` / `Native` kernel code
+- GLSL shader expressions (`[glsl|…|]`)
+
+**Kept, not refused:** `port module` and `port` declarations. Syntax is
+preserved for application interop; the tool does **not** generate the JS/kernel
+side of ports. Wire them in the Gren app as you would any other port surface.
 
 Identifiers named `when` or `is` (Gren keywords; Elm's `case`/`of`) are
 rewritten to `when_` / `is_` at every binding and use site.
@@ -148,13 +152,14 @@ the supported common platform set (`elm/core`, `elm/json`, `elm/time`,
 `elm/random`, `elm/bytes`, `elm/regex`, `elm/url`, `elm/parser`) and checks that
 each run completes with verification.
 
-`npm run test:ecosystem-browser` ports the **200 most popular** browser-platform
-packages (no pure overlap) whose direct dependencies stay within the browser
-platform set (common set plus `elm/browser`, `elm/html`, `elm/svg`,
-`elm/virtual-dom`, `elm/http`, `elm/file`), with at least one browser-surface
-dependency, and verifies each with `gren docs`. Packages that hit hard refusals
-(kernel/JS), download/integrity failures, timeouts, or structural gaps
-(list-cons, unmapped APIs) are skipped in popularity order until 200 verify.
+`npm run test:ecosystem-browser` ports the **browser-platform** packages listed
+in `test/ecosystem/packages-browser.json` (currently 252; no pure overlap)
+whose direct dependencies stay within the browser platform set (common set plus
+`elm/browser`, `elm/html`, `elm/svg`, `elm/virtual-dom`, `elm/http`, `elm/file`),
+with at least one browser-surface dependency, and verifies each with `gren docs`.
+Packages that hit hard refusals (effect managers, kernel/JS, GLSL),
+download/integrity failures, timeouts, or structural gaps (unmapped APIs) are
+skipped in popularity order when the catalog is expanded.
 
 ## Development
 
@@ -165,12 +170,12 @@ npm run test:ecosystem-browser # 200 most popular browser-platform packages
 ```
 
 - `src/` — the Gren CLI (acquire, resolve, transform, format, emit, verify)
-- `review/` — the elm-review rule that produces edits, references, and imports
+- `review/` — the elm-review rule that produces the resolved AST, references, and imports
 - `mappings/builtin.json` — the Elm→Gren package/API catalog
 - `tools/gren-format/` — vendored gilramir/gren-format binary (`scripts/build-gren-format.sh` rebuilds it)
 - `test/` — unit, format, end-to-end, and ecosystem suites
 - `test/ecosystem/packages.json` — 200 most popular qualifying pure packages
-- `test/ecosystem/packages-browser.json` — 200 most popular qualifying browser packages
+- `test/ecosystem/packages-browser.json` — verified browser-platform packages (252)
 
 ## License
 

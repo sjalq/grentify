@@ -26,6 +26,11 @@ When the review extractor provides this AST, the host pipeline is mandatory:
 Structural Gren laws (list peels, multi-arg ctors as records, record-alias
 ctors, reserved binders, import aliases) live on the host. Range edits are only
 for extractions without AST. Gren custom-type variants take at most one payload.
+
+Shared infrastructure (keep law modules thin):
+
+- `Ast.Walk` — structural map/fold over Expr/Pattern (do not re-copy walks)
+- `Ast.Ref` — qualified name keys + import-as index (no imported bare shorts)
 -}
 
 

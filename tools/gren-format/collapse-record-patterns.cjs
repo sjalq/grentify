@@ -7,6 +7,10 @@
  * Nested simple records (tuple-pattern rewrites) are collapsed inside-out until
  * stable so `{ first = a, second = { first = b, second = c } }` becomes one line.
  *
+ * Also repairs type/alias headers that format wraps with type variables starting
+ * at column 0 (UNFINISHED TYPE ALIAS / CUSTOM TYPE):
+ *   type alias Foo a b c\nd e =\n  →  type alias Foo a b c d e =\n
+ *
  * Usage: node collapse-record-patterns.cjs <package-root>
  */
 const fs = require("node:fs");
@@ -19,6 +23,9 @@ if (!root) {
 }
 
 const IDENT = "[A-Za-z_][A-Za-z0-9_]*";
+const TYPE_HEADER =
+  /^(type alias|type)(\s+[A-Za-z_][A-Za-z0-9_.]*)((?:\s+[a-z_][A-Za-z0-9_]*)*)\s*$/;
+const TYPE_VAR_LINE = /^([a-z_][A-Za-z0-9_]*(?:\s+[a-z_][A-Za-z0-9_]*)*)\s*(=)?\s*$/;
 
 function splitFields(inner) {
   const fields = [];
@@ -175,6 +182,42 @@ function collapse(source) {
   return out;
 }
 
+/**
+ * Join format-broken type / type-alias headers back onto one line.
+ * gren-format sometimes wraps long generic lists with continuations at column 0,
+ * which Gren parses as a new top-level declaration (UNFINISHED TYPE ALIAS).
+ */
+function joinTypeHeaders(source) {
+  const lines = source.split("\n");
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = line.match(TYPE_HEADER);
+    if (!m) {
+      out.push(line);
+      continue;
+    }
+    let joined = line;
+    let j = i + 1;
+    while (j < lines.length) {
+      const next = lines[j];
+      // Stop at blank lines, comments, or indented body.
+      if (next.trim() === "" || next.startsWith(" ") || next.startsWith("\t")) {
+        break;
+      }
+      const vm = next.match(TYPE_VAR_LINE);
+      if (!vm) break;
+      joined = joined.replace(/\s*$/, "") + " " + vm[1] + (vm[2] ? " =" : "");
+      j += 1;
+      if (vm[2]) break; // consumed the `=` line
+    }
+    // If we joined vars but `=` was still on a following indented line, keep it.
+    out.push(joined);
+    i = j - 1;
+  }
+  return out.join("\n");
+}
+
 function walk(dir, files = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (entry.name === "gren_packages" || entry.name === "node_modules" || entry.name === ".git") {
@@ -187,9 +230,85 @@ function walk(dir, files = []) {
   return files;
 }
 
+/**
+ * gren-format may break `Ctor ({ fields })` / `Ctor { fields }` between the
+ * name and the payload. `Node\n{ first` is invalid; `Node { first` is fine.
+ */
+function joinCtorPayloads(source) {
+  return source.replace(
+    /([A-Z][A-Za-z0-9_.]*)\n(\s*)(\(?\{)/g,
+    (match, name, indent, brace) => {
+      // Only join when the brace starts a record payload, not a block body.
+      // Keep a single space; drop the newline.
+      return name + " " + brace;
+    },
+  );
+}
+
+/**
+ * gren-format sometimes glues a short type body to the next declaration's
+ * `{-|` doc comment on the same line. Force docs onto their own paragraph.
+ */
+function separateDocComments(source) {
+  return source.replace(/(\S)([ \t]*)(\{-\|)/g, "$1\n\n$3");
+}
+
+/**
+ * gren-format may treat the next let binding's record pattern as an argument
+ * to the previous expression:
+ *   spawnedBy =\n    f x { first = a, second = b } =\n
+ * →  spawnedBy =\n    f x\n\n    { first = a, second = b } =\n
+ * Applications never end with `} =`; let-destructure patterns do.
+ * The new binding is indented one level less than the value line (sibling of
+ * the previous binding name).
+ */
+function separateGluedLetPatterns(source) {
+  const lines = source.split("\n");
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = line.match(/^([ \t]*)(.*\S) \{([^;\n]+)\} =[ \t]*$/);
+    if (m && m[3].includes("=")) {
+      // Only split when the previous non-empty line ends with `=` — that means
+      // this line is a let *value* that format glued to the next binding's
+      // record pattern. Do NOT split function args:
+      //   andThen args maybePid msg { first = model, second = cmd } =
+      let prev = "";
+      for (let k = out.length - 1; k >= 0; k--) {
+        if (out[k].trim() !== "") {
+          prev = out[k];
+          break;
+        }
+      }
+      if (prev.trim().endsWith("=")) {
+        const indent = m[1];
+        const before = m[2];
+        const fields = m[3];
+        const bindIndent =
+          indent.length >= 4 ? indent.slice(0, indent.length - 4) : indent;
+        out.push(indent + before);
+        out.push("");
+        out.push(bindIndent + "{ " + fields.trim() + " } =");
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+function transform(source) {
+  return separateGluedLetPatterns(
+    separateDocComments(joinCtorPayloads(joinTypeHeaders(collapse(source)))),
+  );
+}
+
+
+
+
 for (const file of walk(root)) {
   const before = fs.readFileSync(file, "utf8");
-  const after = collapse(before);
+  const after = transform(before);
   if (after !== before) {
     fs.writeFileSync(file, after);
   }

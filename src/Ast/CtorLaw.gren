@@ -16,19 +16,24 @@ helper per multi-arg ctor used in the module:
 
 and rewrite bare / applied uses of `T9` to that helper. Package-wide arity
 maps (like `RecordAlias`) cover cross-module ctors (`Toop.T9`, `Edn.EdnKeyword`).
+
+**Lookup:** keys are always `Module.Ctor`. Bare refs (`moduleName = Nothing`)
+mean the *current* module (elm-review encodes locals that way). Never register
+imported ctors under bare short names — `Execute.Continue` (1-arg) and
+`Types.Continue` (2-arg) must not share a `Continue` key.
 -}
 
 import Array exposing (Array)
+import Ast.Ref as Ref
 import Ast.Types exposing
-    ( CaseArm
-    , Declaration(..)
+    ( Declaration(..)
     , Expr(..)
     , File
-    , Import
     , LetDecl(..)
     , NamedRef
     , Pattern(..)
     )
+import Ast.Walk as Walk
 import Dict exposing (Dict)
 import Maybe exposing (Maybe(..))
 
@@ -101,6 +106,7 @@ apply packageArities file =
 
 type alias ArityIndex =
     { byKey : ArityMap
+    , localModule : String
     }
 
 
@@ -117,65 +123,12 @@ type alias HelperBuild =
 buildArityIndex : ArityMap -> File -> ArityIndex
 buildArityIndex packageArities file =
     let
-        -- Local short names + package keys + import-qualified keys.
-        withPackage =
-            packageArities
-
         localModule =
             file.moduleDefinition.moduleName
-
-        withLocalShort =
-            Dict.foldl
-                (\key arity acc ->
-                    let
-                        prefix =
-                            localModule ++ "."
-                    in
-                    if String.startsWith prefix key then
-                        Dict.set (String.dropFirst (String.count prefix) key) arity acc
-
-                    else
-                        acc
-                )
-                withPackage
-                packageArities
-
-        withImports =
-            Array.foldl
-                (\import_ acc ->
-                    let
-                        qualifier =
-                            when import_.alias is
-                                Just a ->
-                                    a
-
-                                Nothing ->
-                                    import_.moduleName
-
-                        prefix =
-                            import_.moduleName ++ "."
-                    in
-                    Dict.foldl
-                        (\key arity inner ->
-                            if String.startsWith prefix key then
-                                let
-                                    short =
-                                        String.dropFirst (String.count prefix) key
-                                in
-                                inner
-                                    |> Dict.set (qualifier ++ "." ++ short) arity
-                                    |> Dict.set short arity
-
-                            else
-                                inner
-                        )
-                        acc
-                        packageArities
-                )
-                withLocalShort
-                file.imports
     in
-    { byKey = withImports }
+    { byKey = Ref.addImportAliasKeys file.imports packageArities packageArities
+    , localModule = localModule
+    }
 
 
 collectOccupiedNames : Array Declaration -> Dict String {}
@@ -227,90 +180,33 @@ collectNeededHelpers index declarations =
 
 collectNeededExpr : ArityIndex -> Expr -> Dict String NamedRef -> Dict String NamedRef
 collectNeededExpr index expr acc =
-    when expr is
-        ExprApplication parts ->
-            when Array.popFirst parts is
-                Just { first = ExprVar ref, rest = args } ->
-                    let
-                        withHead =
-                            when lookupArity index ref is
-                                Just _ ->
-                                    Dict.set (refKey ref) ref acc
+    let
+        withSelf =
+            when expr is
+                ExprVar ref ->
+                    noteNeeded index ref acc
 
-                                Nothing ->
-                                    acc
-                    in
-                    Array.foldl (collectNeededExpr index) withHead args
+                ExprApplication parts ->
+                    when Array.popFirst parts is
+                        Just { first = ExprVar ref } ->
+                            noteNeeded index ref acc
 
-                Just { first = head, rest = args } ->
-                    Array.foldl (collectNeededExpr index) (collectNeededExpr index head acc) args
+                        _ ->
+                            acc
 
-                Nothing ->
+                _ ->
                     acc
+    in
+    Walk.foldExprChildren (collectNeededExpr index) withSelf expr
 
-        ExprVar ref ->
-            when lookupArity index ref is
-                Just _ ->
-                    Dict.set (refKey ref) ref acc
 
-                Nothing ->
-                    acc
+noteNeeded : ArityIndex -> NamedRef -> Dict String NamedRef -> Dict String NamedRef
+noteNeeded index ref acc =
+    when lookupArity index ref is
+        Just _ ->
+            Dict.set (qualifiedKey index ref) ref acc
 
-        ExprBinop { left = left, right = right } ->
-            collectNeededExpr index right (collectNeededExpr index left acc)
-
-        ExprIf { condition = c, then_ = t, else_ = e } ->
-            collectNeededExpr index e (collectNeededExpr index t (collectNeededExpr index c acc))
-
-        ExprNegation inner ->
-            collectNeededExpr index inner acc
-
-        ExprTuple items ->
-            Array.foldl (collectNeededExpr index) acc items
-
-        ExprList items ->
-            Array.foldl (collectNeededExpr index) acc items
-
-        ExprLet { declarations = declarations, expression = body } ->
-            let
-                withDecls =
-                    Array.foldl
-                        (\decl inner ->
-                            when decl is
-                                LetFunction fn ->
-                                    collectNeededExpr index fn.expression inner
-
-                                LetDestructure { expression = expression } ->
-                                    collectNeededExpr index expression inner
-                        )
-                        acc
-                        declarations
-            in
-            collectNeededExpr index body withDecls
-
-        ExprCase { expression = scrutinee, cases = arms } ->
-            let
-                withScrut =
-                    collectNeededExpr index scrutinee acc
-            in
-            Array.foldl
-                (\arm inner -> collectNeededExpr index arm.body inner)
-                withScrut
-                arms
-
-        ExprLambda { expression = body } ->
-            collectNeededExpr index body acc
-
-        ExprRecord fields ->
-            Array.foldl (\f inner -> collectNeededExpr index f.value inner) acc fields
-
-        ExprAccess { record = record } ->
-            collectNeededExpr index record acc
-
-        ExprUpdate { fields = fields } ->
-            Array.foldl (\f inner -> collectNeededExpr index f.value inner) acc fields
-
-        _ ->
+        Nothing ->
             acc
 
 
@@ -401,21 +297,7 @@ helperDeclaration name ref arity =
 
 rewriteDeclaration : ArityIndex -> HelperLookup -> Declaration -> Declaration
 rewriteDeclaration index helpers declaration =
-    when declaration is
-        DeclFunction fn ->
-            DeclFunction
-                { fn
-                    | expression = rewriteExpr index helpers fn.expression
-                }
-
-        DeclDestructure { pattern = pattern, expression = expression } ->
-            DeclDestructure
-                { pattern = pattern
-                , expression = rewriteExpr index helpers expression
-                }
-
-        _ ->
-            declaration
+    Walk.mapDeclaration (rewriteExpr index helpers) (\p -> p) declaration
 
 
 rewriteExpr : ArityIndex -> HelperLookup -> Expr -> Expr
@@ -423,13 +305,6 @@ rewriteExpr index helpers expr =
     when expr is
         ExprApplication parts ->
             rewriteApplication index helpers parts
-
-        ExprBinop { operator = op, left = left, right = right } ->
-            ExprBinop
-                { operator = op
-                , left = rewriteExpr index helpers left
-                , right = rewriteExpr index helpers right
-                }
 
         ExprVar ref ->
             when helperRef index helpers ref is
@@ -439,76 +314,8 @@ rewriteExpr index helpers expr =
                 Nothing ->
                     expr
 
-        ExprIf { condition = c, then_ = t, else_ = e } ->
-            ExprIf
-                { condition = rewriteExpr index helpers c
-                , then_ = rewriteExpr index helpers t
-                , else_ = rewriteExpr index helpers e
-                }
-
-        ExprNegation inner ->
-            ExprNegation (rewriteExpr index helpers inner)
-
-        ExprTuple items ->
-            ExprTuple (Array.map (rewriteExpr index helpers) items)
-
-        ExprList items ->
-            ExprList (Array.map (rewriteExpr index helpers) items)
-
-        ExprLet { declarations = declarations, expression = body } ->
-            ExprLet
-                { declarations = Array.map (rewriteLetDecl index helpers) declarations
-                , expression = rewriteExpr index helpers body
-                }
-
-        ExprCase { expression = scrutinee, cases = arms } ->
-            ExprCase
-                { expression = rewriteExpr index helpers scrutinee
-                , cases =
-                    Array.map
-                        (\arm ->
-                            { pattern = arm.pattern
-                            , body = rewriteExpr index helpers arm.body
-                            }
-                        )
-                        arms
-                }
-
-        ExprLambda { arguments = arguments, expression = body } ->
-            ExprLambda
-                { arguments = arguments
-                , expression = rewriteExpr index helpers body
-                }
-
-        ExprRecord fields ->
-            ExprRecord
-                (Array.map
-                    (\f ->
-                        { name = f.name
-                        , value = rewriteExpr index helpers f.value
-                        }
-                    )
-                    fields
-                )
-
-        ExprAccess { record = record, field = field } ->
-            ExprAccess { record = rewriteExpr index helpers record, field = field }
-
-        ExprUpdate { name = name, fields = fields } ->
-            ExprUpdate
-                { name = name
-                , fields =
-                    Array.map
-                        (\f ->
-                            { name = f.name
-                            , value = rewriteExpr index helpers f.value
-                            }
-                        )
-                        fields
-                }
-
         _ ->
-            expr
+            Walk.mapExprChildren (rewriteExpr index helpers) expr
 
 
 rewriteApplication : ArityIndex -> HelperLookup -> Array Expr -> Expr
@@ -542,25 +349,12 @@ rewriteApplication index helpers parts =
                         (Array.pushFirst (rewriteExpr index helpers head) rewrittenArgs)
 
 
-rewriteLetDecl : ArityIndex -> HelperLookup -> LetDecl -> LetDecl
-rewriteLetDecl index helpers declaration =
-    when declaration is
-        LetFunction fn ->
-            LetFunction { fn | expression = rewriteExpr index helpers fn.expression }
-
-        LetDestructure { pattern = pattern, expression = expression } ->
-            LetDestructure
-                { pattern = pattern
-                , expression = rewriteExpr index helpers expression
-                }
-
-
 -- LOOKUP --------------------------------------------------------------------
 
 
 lookupArity : ArityIndex -> NamedRef -> Maybe Int
 lookupArity index ref =
-    Dict.get (refKey ref) index.byKey
+    Dict.get (qualifiedKey index ref) index.byKey
 
 
 helperRef : ArityIndex -> HelperLookup -> NamedRef -> Maybe String
@@ -570,14 +364,9 @@ helperRef index helpers ref =
             Nothing
 
         Just _ ->
-            Dict.get (refKey ref) helpers
+            Dict.get (qualifiedKey index ref) helpers
 
 
-refKey : NamedRef -> String
-refKey ref =
-    when ref.moduleName is
-        Just moduleName ->
-            moduleName ++ "." ++ ref.name
-
-        Nothing ->
-            ref.name
+qualifiedKey : ArityIndex -> NamedRef -> String
+qualifiedKey index ref =
+    Ref.qualifiedName index.localModule ref

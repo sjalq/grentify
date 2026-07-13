@@ -389,7 +389,9 @@
           "target": "VirtualDom",
           "values": {
             "keyedNode": "ElmToGren.Compat.VirtualDom.Keyed.keyedNode",
-            "keyedNodeNS": "ElmToGren.Compat.VirtualDom.Keyed.keyedNodeNS"
+            "keyedNodeNS": "ElmToGren.Compat.VirtualDom.Keyed.keyedNodeNS",
+            "MayPreventDefault": "ElmToGren.Compat.VirtualDom.Handler.mayPreventDefault",
+            "MayStopPropagation": "ElmToGren.Compat.VirtualDom.Handler.mayStopPropagation"
           },
           "types": {}
         }

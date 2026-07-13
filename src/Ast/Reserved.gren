@@ -2,14 +2,18 @@ module Ast.Reserved exposing (apply, rewriteName)
 
 {-| Rename identifiers that are keywords in Gren but ordinary names in Elm.
 
-`when` / `is` (case/of keywords) and `as` (pattern keyword) become `when_` /
-`is_` / `as_`. Applied on the resolved AST so Print never emits invalid Gren.
+**Values / binders / exposing / @docs:** `when` → first free of `when_`,
+`when__`, … so we never collide with an existing `when_` (Elm authors often
+pre-escape params that way; Elm already forbids shadowing).
+
+**Record fields:** always the fixed escape `when` → `when_`. Fields are a
+separate namespace from values, and must match across modules (Internals vs
+callers) — occupancy-based field renames would desync payloads.
 -}
 
 import Array exposing (Array)
 import Ast.Types exposing
-    ( CaseArm
-    , Declaration(..)
+    ( Declaration(..)
     , Exposing(..)
     , Expr(..)
     , ExposedItem(..)
@@ -23,17 +27,33 @@ import Ast.Types exposing
     , Signature
     , TypeAnn(..)
     )
+import Ast.Walk as Walk
+import Dict exposing (Dict)
+import Maybe exposing (Maybe(..))
+import String
+
+
+type alias RenameMap =
+    Dict String String
 
 
 apply : File -> File
 apply file =
+    let
+        renames =
+            buildRenameMap (collectOccupied file)
+    in
     { file
-        | moduleDefinition = rewriteModuleDef file.moduleDefinition
-        , imports = Array.map rewriteImport file.imports
-        , declarations = Array.map rewriteDeclaration file.declarations
+        | moduleDefinition = rewriteModuleDef renames file.moduleDefinition
+        , imports = Array.map (rewriteImport renames) file.imports
+        , declarations = Array.map (rewriteDeclaration renames) file.declarations
+        , comments = Array.map (rewriteDocsComment renames) file.comments
     }
 
 
+{-| Public helper: naive single underscore escape (no occupancy). Prefer `apply`
+for full modules so collisions with existing `when_` are avoided.
+-}
 rewriteName : String -> String
 rewriteName name =
     if isReserved name then
@@ -43,382 +63,653 @@ rewriteName name =
         name
 
 
+rewriteWith : RenameMap -> String -> String
+rewriteWith renames name =
+    when Dict.get name renames is
+        Just target ->
+            target
+
+        Nothing ->
+            name
+
+
+{-| Record field names: fixed single `_` escape so all modules agree.
+-}
+rewriteField : String -> String
+rewriteField name =
+    if isReserved name then
+        name ++ "_"
+
+    else
+        name
+
+
 isReserved : String -> Bool
 isReserved name =
-    name
-        == "when"
-        || name
-        == "is"
-        || name
-        == "as"
-        || name
-        == "type"
-        || name
-        == "alias"
-        || name
-        == "module"
-        || name
-        == "import"
-        || name
-        == "exposing"
-        || name
-        == "port"
-        || name
-        == "if"
-        || name
-        == "then"
-        || name
-        == "else"
-        || name
-        == "let"
-        || name
-        == "in"
-        || name
-        == "case"
-        || name
-        == "of"
+    Array.member name reservedWords
 
 
-rewriteModuleDef : ModuleDef -> ModuleDef
-rewriteModuleDef moduleDef =
+reservedWords : Array String
+reservedWords =
+    [ "when"
+    , "is"
+    , "as"
+    , "type"
+    , "alias"
+    , "module"
+    , "import"
+    , "exposing"
+    , "port"
+    , "if"
+    , "then"
+    , "else"
+    , "let"
+    , "in"
+    , "case"
+    , "of"
+    ]
+
+
+{-| reserved → free escape. Only includes reserved names that appear as idents.
+-}
+buildRenameMap : Dict String {} -> RenameMap
+buildRenameMap occupied =
+    Array.foldl
+        (\reserved state ->
+            if Dict.member reserved state.taken then
+                let
+                    target =
+                        pickFree reserved state.taken
+                in
+                { map = Dict.set reserved target state.map
+                , taken = Dict.set target {} state.taken
+                }
+
+            else
+                state
+        )
+        { map = Dict.empty, taken = occupied }
+        reservedWords
+        |> .map
+
+
+{-| `when` → try `when_`, then `when__`, … until not in `taken`.
+-}
+pickFree : String -> Dict String {} -> String
+pickFree name taken =
+    let
+        candidate =
+            name ++ "_"
+    in
+    if Dict.member candidate taken then
+        pickFree candidate taken
+
+    else
+        candidate
+
+
+-- COLLECT --------------------------------------------------------------------
+
+
+occupy : String -> Dict String {} -> Dict String {}
+occupy name acc =
+    Dict.set name {} acc
+
+
+collectOccupied : File -> Dict String {}
+collectOccupied file =
+    let
+        fromModule =
+            collectExposing file.moduleDefinition.exposing_ Dict.empty
+
+        fromImports =
+            Array.foldl collectImport fromModule file.imports
+    in
+    Array.foldl collectDeclaration fromImports file.declarations
+
+
+collectImport : Import -> Dict String {} -> Dict String {}
+collectImport import_ acc =
+    let
+        withAlias =
+            when import_.alias is
+                Just a ->
+                    occupy a acc
+
+                Nothing ->
+                    acc
+    in
+    when import_.exposing_ is
+        Just exposing_ ->
+            collectExposing exposing_ withAlias
+
+        Nothing ->
+            withAlias
+
+
+collectExposing : Exposing -> Dict String {} -> Dict String {}
+collectExposing exposing_ acc =
+    when exposing_ is
+        ExposeAll ->
+            acc
+
+        ExposeExplicit items ->
+            Array.foldl collectExposedItem acc items
+
+
+collectExposedItem : ExposedItem -> Dict String {} -> Dict String {}
+collectExposedItem item acc =
+    when item is
+        ExposeInfix name ->
+            occupy name acc
+
+        ExposeFunction name ->
+            occupy name acc
+
+        ExposeTypeOrAlias name ->
+            occupy name acc
+
+        ExposeType { name = name } ->
+            occupy name acc
+
+
+collectDeclaration : Declaration -> Dict String {} -> Dict String {}
+collectDeclaration declaration acc =
+    when declaration is
+        DeclFunction fn ->
+            let
+                withName =
+                    occupy fn.name acc
+
+                withSig =
+                    when fn.signature is
+                        Just signature ->
+                            collectType signature.typeAnnotation withName
+
+                        Nothing ->
+                            withName
+
+                withArgs =
+                    Array.foldl collectPattern withSig fn.arguments
+            in
+            collectExpr fn.expression withArgs
+
+        DeclAlias aliasDecl ->
+            occupy aliasDecl.name acc
+                |> (\a -> Array.foldl occupy a aliasDecl.generics)
+                |> collectType aliasDecl.typeAnnotation
+
+        DeclCustomType custom ->
+            let
+                withType =
+                    occupy custom.name acc
+                        |> (\a -> Array.foldl occupy a custom.generics)
+            in
+            Array.foldl
+                (\ctor inner ->
+                    occupy ctor.name inner
+                        |> (\a -> Array.foldl collectType a ctor.arguments)
+                )
+                withType
+                custom.constructors
+
+        DeclPort signature ->
+            occupy signature.name acc
+                |> collectType signature.typeAnnotation
+
+        DeclInfix ->
+            acc
+
+        DeclDestructure { pattern = pattern, expression = expression } ->
+            collectPattern pattern acc
+                |> collectExpr expression
+
+
+collectType : TypeAnn -> Dict String {} -> Dict String {}
+collectType typeAnn acc =
+    when typeAnn is
+        TypeGeneric name ->
+            occupy name acc
+
+        TypeTyped { ref = ref, arguments = args } ->
+            occupy ref.name acc
+                |> (\a -> Array.foldl collectType a args)
+
+        TypeTuple items ->
+            Array.foldl collectType acc items
+
+        TypeRecord fields ->
+            Array.foldl collectRecordFieldType acc fields
+
+        TypeGenericRecord { extension = ext, fields = fields } ->
+            occupy ext acc
+                |> (\a -> Array.foldl collectRecordFieldType a fields)
+
+        TypeFunction { left = left, right = right } ->
+            collectType left acc
+                |> collectType right
+
+        TypeUnit ->
+            acc
+
+
+collectRecordFieldType : RecordFieldType -> Dict String {} -> Dict String {}
+collectRecordFieldType field acc =
+    occupy field.name acc
+        |> collectType field.typeAnnotation
+
+
+collectPattern : Pattern -> Dict String {} -> Dict String {}
+collectPattern pattern acc =
+    when pattern is
+        PatVar name ->
+            occupy name acc
+
+        PatNamed { ref = ref, arguments = args } ->
+            occupy ref.name acc
+                |> (\a -> Array.foldl collectPattern a args)
+
+        PatAs { pattern = inner, name = name } ->
+            collectPattern inner acc
+                |> occupy name
+
+        PatRecord fields ->
+            Array.foldl occupy acc fields
+
+        PatRecordBind fields ->
+            Array.foldl
+                (\field inner ->
+                    occupy field.name inner
+                        |> collectPattern field.pattern
+                )
+                acc
+                fields
+
+        _ ->
+            Walk.mapPatternChildren identity pattern
+                |> (\_ -> acc)
+                |> (\a ->
+                        -- structural children
+                        when pattern is
+                            PatTuple items ->
+                                Array.foldl collectPattern a items
+
+                            PatList items ->
+                                Array.foldl collectPattern a items
+
+                            PatCons { head = head, tail = tail } ->
+                                collectPattern head a
+                                    |> collectPattern tail
+
+                            _ ->
+                                a
+                   )
+
+
+collectExpr : Expr -> Dict String {} -> Dict String {}
+collectExpr expr acc =
+    when expr is
+        ExprVar ref ->
+            occupy ref.name acc
+
+        ExprRecord fields ->
+            Array.foldl
+                (\field inner ->
+                    occupy field.name inner
+                        |> collectExpr field.value
+                )
+                acc
+                fields
+
+        ExprAccess { record = record, field = field } ->
+            collectExpr record acc
+                |> occupy field
+
+        ExprAccessFunction field ->
+            occupy field acc
+
+        ExprUpdate { name = name, fields = fields } ->
+            occupy name acc
+                |> (\a ->
+                        Array.foldl
+                            (\field inner ->
+                                occupy field.name inner
+                                    |> collectExpr field.value
+                            )
+                            a
+                            fields
+                   )
+
+        _ ->
+            Walk.foldExprChildren collectExpr acc expr
+                |> (\a ->
+                        when expr is
+                            ExprLambda { arguments = arguments, expression = body } ->
+                                Array.foldl collectPattern a arguments
+                                    |> collectExpr body
+
+                            ExprCase { expression = scrutinee, cases = arms } ->
+                                collectExpr scrutinee a
+                                    |> (\inner ->
+                                            Array.foldl
+                                                (\arm acc2 ->
+                                                    collectPattern arm.pattern acc2
+                                                        |> collectExpr arm.body
+                                                )
+                                                inner
+                                                arms
+                                       )
+
+                            ExprLet { declarations = declarations, expression = body } ->
+                                Array.foldl collectLetDecl a declarations
+                                    |> collectExpr body
+
+                            _ ->
+                                -- foldExprChildren already walked child exprs for other forms
+                                a
+                   )
+
+
+collectLetDecl : LetDecl -> Dict String {} -> Dict String {}
+collectLetDecl declaration acc =
+    when declaration is
+        LetFunction fn ->
+            occupy fn.name acc
+                |> (\a -> Array.foldl collectPattern a fn.arguments)
+                |> collectExpr fn.expression
+
+        LetDestructure { pattern = pattern, expression = expression } ->
+            collectPattern pattern acc
+                |> collectExpr expression
+
+
+identity : a -> a
+identity x =
+    x
+
+
+-- REWRITE --------------------------------------------------------------------
+
+
+rewriteModuleDef : RenameMap -> ModuleDef -> ModuleDef
+rewriteModuleDef renames moduleDef =
     { moduleDef
-        | exposing_ = rewriteExposing moduleDef.exposing_
+        | exposing_ = rewriteExposing renames moduleDef.exposing_
     }
 
 
-rewriteImport : Import -> Import
-rewriteImport import_ =
+rewriteImport : RenameMap -> Import -> Import
+rewriteImport renames import_ =
     { import_
-        | alias = Maybe.map rewriteName import_.alias
-        , exposing_ = Maybe.map rewriteExposing import_.exposing_
+        | alias = Maybe.map (rewriteWith renames) import_.alias
+        , exposing_ = Maybe.map (rewriteExposing renames) import_.exposing_
     }
 
 
-rewriteExposing : Exposing -> Exposing
-rewriteExposing exposing_ =
+rewriteExposing : RenameMap -> Exposing -> Exposing
+rewriteExposing renames exposing_ =
     when exposing_ is
         ExposeAll ->
             ExposeAll
 
         ExposeExplicit items ->
-            ExposeExplicit (Array.map rewriteExposedItem items)
+            ExposeExplicit (Array.map (rewriteExposedItem renames) items)
 
 
-rewriteExposedItem : ExposedItem -> ExposedItem
-rewriteExposedItem item =
+rewriteExposedItem : RenameMap -> ExposedItem -> ExposedItem
+rewriteExposedItem renames item =
     when item is
         ExposeInfix name ->
             ExposeInfix name
 
         ExposeFunction name ->
-            ExposeFunction (rewriteName name)
+            ExposeFunction (rewriteWith renames name)
 
         ExposeTypeOrAlias name ->
-            ExposeTypeOrAlias (rewriteName name)
+            ExposeTypeOrAlias (rewriteWith renames name)
 
         ExposeType { name = name, open = open } ->
-            ExposeType { name = rewriteName name, open = open }
+            ExposeType { name = rewriteWith renames name, open = open }
 
 
-rewriteDeclaration : Declaration -> Declaration
-rewriteDeclaration declaration =
+rewriteDeclaration : RenameMap -> Declaration -> Declaration
+rewriteDeclaration renames declaration =
     when declaration is
         DeclFunction fn ->
             DeclFunction
                 { fn
-                    | name = rewriteName fn.name
-                    , signature = Maybe.map rewriteSignature fn.signature
-                    , arguments = Array.map rewritePattern fn.arguments
-                    , expression = rewriteExpr fn.expression
+                    | name = rewriteWith renames fn.name
+                    , signature = Maybe.map (rewriteSignature renames) fn.signature
+                    , arguments = Array.map (rewritePattern renames) fn.arguments
+                    , expression = rewriteExpr renames fn.expression
                 }
 
         DeclAlias aliasDecl ->
             DeclAlias
                 { aliasDecl
-                    | name = rewriteName aliasDecl.name
-                    , generics = Array.map rewriteName aliasDecl.generics
-                    , typeAnnotation = rewriteType aliasDecl.typeAnnotation
+                    | name = rewriteWith renames aliasDecl.name
+                    , generics = Array.map (rewriteWith renames) aliasDecl.generics
+                    , typeAnnotation = rewriteType renames aliasDecl.typeAnnotation
                 }
 
         DeclCustomType custom ->
             DeclCustomType
                 { custom
-                    | name = rewriteName custom.name
-                    , generics = Array.map rewriteName custom.generics
+                    | name = rewriteWith renames custom.name
+                    , generics = Array.map (rewriteWith renames) custom.generics
                     , constructors =
                         Array.map
                             (\ctor ->
-                                { name = rewriteName ctor.name
-                                , arguments = Array.map rewriteType ctor.arguments
+                                { name = rewriteWith renames ctor.name
+                                , arguments = Array.map (rewriteType renames) ctor.arguments
                                 }
                             )
                             custom.constructors
                 }
 
         DeclPort signature ->
-            DeclPort (rewriteSignature signature)
+            DeclPort (rewriteSignature renames signature)
 
         DeclInfix ->
             DeclInfix
 
         DeclDestructure { pattern = pattern, expression = expression } ->
             DeclDestructure
-                { pattern = rewritePattern pattern
-                , expression = rewriteExpr expression
+                { pattern = rewritePattern renames pattern
+                , expression = rewriteExpr renames expression
                 }
 
 
-rewriteSignature : Signature -> Signature
-rewriteSignature signature =
-    { name = rewriteName signature.name
-    , typeAnnotation = rewriteType signature.typeAnnotation
+rewriteSignature : RenameMap -> Signature -> Signature
+rewriteSignature renames signature =
+    { name = rewriteWith renames signature.name
+    , typeAnnotation = rewriteType renames signature.typeAnnotation
     }
 
 
-rewriteType : TypeAnn -> TypeAnn
-rewriteType typeAnn =
+rewriteType : RenameMap -> TypeAnn -> TypeAnn
+rewriteType renames typeAnn =
     when typeAnn is
         TypeGeneric name ->
-            TypeGeneric (rewriteName name)
+            TypeGeneric (rewriteWith renames name)
 
         TypeTyped { ref = ref, arguments = args } ->
             TypeTyped
-                { ref = rewriteRef ref
-                , arguments = Array.map rewriteType args
+                { ref = rewriteRef renames ref
+                , arguments = Array.map (rewriteType renames) args
                 }
 
         TypeUnit ->
             TypeUnit
 
         TypeTuple items ->
-            TypeTuple (Array.map rewriteType items)
+            TypeTuple (Array.map (rewriteType renames) items)
 
         TypeRecord fields ->
-            TypeRecord (Array.map rewriteRecordFieldType fields)
+            TypeRecord (Array.map (rewriteRecordFieldType renames) fields)
 
         TypeGenericRecord { extension = ext, fields = fields } ->
             TypeGenericRecord
-                { extension = rewriteName ext
-                , fields = Array.map rewriteRecordFieldType fields
+                { extension = rewriteWith renames ext
+                , fields = Array.map (rewriteRecordFieldType renames) fields
                 }
 
         TypeFunction { left = left, right = right } ->
             TypeFunction
-                { left = rewriteType left
-                , right = rewriteType right
+                { left = rewriteType renames left
+                , right = rewriteType renames right
                 }
 
 
-rewriteRecordFieldType : RecordFieldType -> RecordFieldType
-rewriteRecordFieldType field =
-    -- Field names are not keywords in the same way; leave them.
-    { field | typeAnnotation = rewriteType field.typeAnnotation }
+rewriteRecordFieldType : RenameMap -> RecordFieldType -> RecordFieldType
+rewriteRecordFieldType renames field =
+    { name = rewriteField field.name
+    , typeAnnotation = rewriteType renames field.typeAnnotation
+    }
 
 
-rewritePattern : Pattern -> Pattern
-rewritePattern pattern =
+rewritePattern : RenameMap -> Pattern -> Pattern
+rewritePattern renames pattern =
     when pattern is
-        PatAll ->
-            PatAll
+        PatVar name ->
+            PatVar (rewriteWith renames name)
 
-        PatUnit ->
-            PatUnit
+        PatNamed { ref = ref, arguments = args } ->
+            PatNamed
+                { ref = rewriteRef renames ref
+                , arguments = Array.map (rewritePattern renames) args
+                }
 
-        PatChar value ->
-            PatChar value
-
-        PatString value ->
-            PatString value
-
-        PatInt value ->
-            PatInt value
-
-        PatHex value ->
-            PatHex value
-
-        PatFloat value ->
-            PatFloat value
-
-        PatTuple items ->
-            PatTuple (Array.map rewritePattern items)
+        PatAs { pattern = inner, name = name } ->
+            PatAs
+                { pattern = rewritePattern renames inner
+                , name = rewriteWith renames name
+                }
 
         PatRecord fields ->
-            PatRecord (Array.map rewriteName fields)
+            PatRecord (Array.map rewriteField fields)
 
         PatRecordBind fields ->
             PatRecordBind
                 (Array.map
                     (\field ->
-                        { name = field.name
-                        , pattern = rewritePattern field.pattern
+                        { name = rewriteField field.name
+                        , pattern = rewritePattern renames field.pattern
                         }
                     )
                     fields
                 )
 
-        PatCons { head = head, tail = tail } ->
-            PatCons
-                { head = rewritePattern head
-                , tail = rewritePattern tail
-                }
-
-        PatList items ->
-            PatList (Array.map rewritePattern items)
-
-        PatVar name ->
-            PatVar (rewriteName name)
-
-        PatNamed { ref = ref, arguments = args } ->
-            PatNamed
-                { ref = rewriteRef ref
-                , arguments = Array.map rewritePattern args
-                }
-
-        PatAs { pattern = inner, name = name } ->
-            PatAs
-                { pattern = rewritePattern inner
-                , name = rewriteName name
-                }
+        _ ->
+            Walk.mapPatternChildren (rewritePattern renames) pattern
 
 
-rewriteExpr : Expr -> Expr
-rewriteExpr expr =
+rewriteExpr : RenameMap -> Expr -> Expr
+rewriteExpr renames expr =
     when expr is
-        ExprApplication parts ->
-            ExprApplication (Array.map rewriteExpr parts)
-
-        ExprBinop { operator = op, left = left, right = right } ->
-            ExprBinop
-                { operator = op
-                , left = rewriteExpr left
-                , right = rewriteExpr right
-                }
-
         ExprVar ref ->
-            ExprVar (rewriteRef ref)
-
-        ExprIf { condition = c, then_ = t, else_ = e } ->
-            ExprIf
-                { condition = rewriteExpr c
-                , then_ = rewriteExpr t
-                , else_ = rewriteExpr e
-                }
-
-        ExprPrefix op ->
-            ExprPrefix op
-
-        ExprOperator op ->
-            ExprOperator op
-
-        ExprInt value ->
-            ExprInt value
-
-        ExprHex value ->
-            ExprHex value
-
-        ExprFloat value ->
-            ExprFloat value
-
-        ExprNegation inner ->
-            ExprNegation (rewriteExpr inner)
-
-        ExprString value ->
-            ExprString value
-
-        ExprChar value ->
-            ExprChar value
-
-        ExprTuple items ->
-            ExprTuple (Array.map rewriteExpr items)
-
-        ExprLet { declarations = declarations, expression = body } ->
-            ExprLet
-                { declarations = Array.map rewriteLetDecl declarations
-                , expression = rewriteExpr body
-                }
-
-        ExprCase { expression = scrutinee, cases = arms } ->
-            ExprCase
-                { expression = rewriteExpr scrutinee
-                , cases =
-                    Array.map
-                        (\arm ->
-                            { pattern = rewritePattern arm.pattern
-                            , body = rewriteExpr arm.body
-                            }
-                        )
-                        arms
-                }
-
-        ExprLambda { arguments = arguments, expression = body } ->
-            ExprLambda
-                { arguments = Array.map rewritePattern arguments
-                , expression = rewriteExpr body
-                }
+            ExprVar (rewriteRef renames ref)
 
         ExprRecord fields ->
             ExprRecord
                 (Array.map
                     (\field ->
-                        { name = field.name
-                        , value = rewriteExpr field.value
+                        { name = rewriteField field.name
+                        , value = rewriteExpr renames field.value
                         }
                     )
                     fields
                 )
 
-        ExprList items ->
-            ExprList (Array.map rewriteExpr items)
-
         ExprAccess { record = record, field = field } ->
             ExprAccess
-                { record = rewriteExpr record
-                , field = field
+                { record = rewriteExpr renames record
+                , field = rewriteField field
                 }
 
         ExprAccessFunction field ->
-            ExprAccessFunction field
+            ExprAccessFunction (rewriteField field)
 
         ExprUpdate { name = name, fields = fields } ->
             ExprUpdate
-                { name = rewriteName name
+                { name = rewriteWith renames name
                 , fields =
                     Array.map
                         (\field ->
-                            { name = field.name
-                            , value = rewriteExpr field.value
+                            { name = rewriteField field.name
+                            , value = rewriteExpr renames field.value
                             }
                         )
                         fields
                 }
 
-        ExprGlsl code ->
-            ExprGlsl code
-
-        ExprUnit ->
-            ExprUnit
+        _ ->
+            Walk.mapExprChildrenWithPatterns (rewriteExpr renames) (rewritePattern renames) expr
 
 
-rewriteLetDecl : LetDecl -> LetDecl
-rewriteLetDecl declaration =
+rewriteDocsComment : RenameMap -> String -> String
+rewriteDocsComment renames comment =
+    comment
+        |> String.split "\n"
+        |> Array.map (rewriteDocsLine renames)
+        |> String.join "\n"
+
+
+rewriteDocsLine : RenameMap -> String -> String
+rewriteDocsLine renames line =
+    if String.contains "@docs" line then
+        rewriteDocsTokens renames line
+
+    else
+        line
+
+
+rewriteDocsTokens : RenameMap -> String -> String
+rewriteDocsTokens renames line =
+    let
+        parts =
+            String.split " " line
+    in
+    parts
+        |> Array.map
+            (\token ->
+                let
+                    bare =
+                        if String.endsWith "," token then
+                            String.dropLast 1 token
+
+                        else
+                            token
+
+                    rewritten =
+                        rewriteWith renames bare
+                in
+                if String.endsWith "," token && rewritten /= bare then
+                    rewritten ++ ","
+
+                else
+                    rewritten
+            )
+        |> String.join " "
+
+
+rewriteLetDecl : RenameMap -> LetDecl -> LetDecl
+rewriteLetDecl renames declaration =
     when declaration is
         LetFunction fn ->
             LetFunction
                 { fn
-                    | name = rewriteName fn.name
-                    , arguments = Array.map rewritePattern fn.arguments
-                    , expression = rewriteExpr fn.expression
+                    | name = rewriteWith renames fn.name
+                    , arguments = Array.map (rewritePattern renames) fn.arguments
+                    , expression = rewriteExpr renames fn.expression
                 }
 
-        LetDestructure { pattern = pattern, expression = expression } ->
-            LetDestructure
-                { pattern = rewritePattern pattern
-                , expression = rewriteExpr expression
-                }
+        LetDestructure _ ->
+            Walk.mapLetDecl (rewriteExpr renames) (rewritePattern renames) declaration
 
 
-rewriteRef : NamedRef -> NamedRef
-rewriteRef ref =
+rewriteRef : RenameMap -> NamedRef -> NamedRef
+rewriteRef renames ref =
     { moduleName = ref.moduleName
-    , name = rewriteName ref.name
+    , name = rewriteWith renames ref.name
     }

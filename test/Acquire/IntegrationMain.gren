@@ -184,7 +184,8 @@ fixtureFiles base cacheDirectory =
     , file "local/src/Top.elm" "module Top exposing (answer)\nanswer = 42\n"
     , file "local/src/Nested/Inner.elm" "module Nested.Inner exposing (value)\nvalue = True\n"
     , file "hazard/elm.json" (manifestJson "author/hazard" "1.0.0" "Hazard")
-    , file "hazard/src/Hazard.elm" "port module Hazard exposing (main)\nport main : String -> Cmd msg\n"
+    -- Hard-refusal fixture: effect module (ports are allowed).
+    , file "hazard/src/Hazard.elm" "effect module Hazard where { command = MyCmd } exposing (value)\nvalue = 1\n"
     , { path = Cache.allPackagesPath cacheDirectory
       , contents = "{\"author/latest\":[\"1.0.0\",\"2.0.0\"]}"
       }

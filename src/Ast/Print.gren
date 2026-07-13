@@ -517,16 +517,26 @@ printPattern locals prec pattern =
 
                     else
                         -- Gren multi-arg constructors take one record payload.
-                        head
-                            ++ " { "
-                            ++ String.join ", "
-                                (Array.indexedMap
-                                    (\index arg ->
-                                        fieldLabel index ++ " = " ++ printPattern locals 0 arg
-                                    )
-                                    args
-                                )
-                            ++ " }"
+                        -- Print as `Ctor ({ fields })` so a line break after the
+                        -- name (gren-format) stays valid application syntax:
+                        -- `Node\n    ({ first = … })` parses; `Node\n{ first` does not.
+                        let
+                            labels =
+                                ctorFieldLabels ref.name (Array.length args)
+
+                            record =
+                                "{ "
+                                    ++ String.join ", "
+                                        (Array.map2
+                                            (\label arg ->
+                                                label ++ " = " ++ printPattern locals 0 arg
+                                            )
+                                            labels
+                                            args
+                                        )
+                                    ++ " }"
+                        in
+                        head ++ " (" ++ record ++ ")"
             in
             -- Multi-arg ctor patterns always need parens in application position.
             if prec > 0 && not (Array.isEmpty args) then
@@ -723,12 +733,28 @@ printExpr locals prec expr =
                 rendered
 
         ExprLambda { arguments = arguments, expression = body } ->
+            -- Block bodies (let / when / if) already contain newlines. Gren
+            -- rejects `-> let` on one line (UNFINISHED LET); break after `->`
+            -- the same way case arms do.
             let
+                argsText =
+                    String.join " " (Array.map (printPattern locals 1) arguments)
+
+                bodyText =
+                    printExpr locals 0 body
+
                 rendered =
-                    "\\"
-                        ++ String.join " " (Array.map (printPattern locals 1) arguments)
-                        ++ " -> "
-                        ++ printExpr locals 0 body
+                    if String.contains "\n" bodyText then
+                        "\\"
+                            ++ argsText
+                            ++ " ->\n    "
+                            ++ indentBlock 1 bodyText
+
+                    else
+                        "\\"
+                            ++ argsText
+                            ++ " -> "
+                            ++ bodyText
             in
             if prec > 0 then
                 "(" ++ rendered ++ ")"
@@ -745,14 +771,16 @@ printExpr locals prec expr =
                     ++ String.join ", "
                         (Array.map
                             (\field ->
-                                field.name ++ " = " ++ printExpr locals 0 field.value
+                                printRecordField locals field.name field.value
                             )
                             fields
                         )
                     ++ " }"
 
         ExprList items ->
-            "[" ++ String.join ", " (Array.map (printExpr locals 0) items) ++ "]"
+            "["
+                ++ String.join ", " (Array.map (printEmbeddedExpr locals) items)
+                ++ "]"
 
         ExprAccess { record = record, field = field } ->
             printExpr locals 1 record ++ "." ++ field
@@ -767,7 +795,7 @@ printExpr locals prec expr =
                 ++ String.join ", "
                     (Array.map
                         (\field ->
-                            field.name ++ " = " ++ printExpr locals 0 field.value
+                            printRecordField locals field.name field.value
                         )
                         fields
                     )
@@ -829,6 +857,7 @@ printLetDecl locals declaration =
 
 
 {-| Uppercase head applied to 2+ args → Gren multi-arg ctor record form.
+Platform/Compat ctors keep Gren's named payload fields (see ctorFieldLabels).
 -}
 multiArgCtorApplication : Dict String {} -> Expr -> Array Expr -> Maybe String
 multiArgCtorApplication locals head args =
@@ -839,18 +868,24 @@ multiArgCtorApplication locals head args =
         when head is
             ExprVar ref ->
                 if startsUpper ref.name then
-                    Just
-                        (printNamedRef locals False ref
-                            ++ " { "
-                            ++ String.join ", "
-                                (Array.indexedMap
-                                    (\index arg ->
-                                        fieldLabel index ++ " = " ++ printExpr locals 0 arg
+                    let
+                        labels =
+                            ctorFieldLabels ref.name (Array.length args)
+
+                        record =
+                            "{ "
+                                ++ String.join ", "
+                                    (Array.map2
+                                        (\label arg ->
+                                            label ++ " = " ++ printEmbeddedExpr locals arg
+                                        )
+                                        labels
+                                        args
                                     )
-                                    args
-                                )
-                            ++ " }"
-                        )
+                                ++ " }"
+                    in
+                    -- `Ctor ({ fields })` — format-safe if the name wraps alone.
+                    Just (printNamedRef locals False ref ++ " (" ++ record ++ ")")
 
                 else
                     Nothing
@@ -886,7 +921,7 @@ printNamedRef locals isType ref =
                 if sameModuleType then
                     -- Prefer `Dict.Dict` over bare `Dict`: `import Dict` does not
                     -- expose the type, and bare `Dict` also collides with local types.
-                    if isDefaultTypeModule moduleName then
+                    if isDefaultTypeModule moduleName && not clashes then
                         short
 
                     else
@@ -896,7 +931,13 @@ printNamedRef locals isType ref =
                     long
 
             else if isDefaultCtor moduleName ref.name then
-                short
+                -- `Basics.False` must stay qualified when this module defines
+                -- its own `False` ctor (postgrest Value, etc.).
+                if clashes then
+                    long
+
+                else
+                    short
 
             else if clashes && sameModuleType then
                 long
@@ -945,6 +986,53 @@ startsUpper name =
 tupleFieldLabels : Int -> Array String
 tupleFieldLabels count =
     Array.initialize count 0 fieldLabel
+
+
+{-| Field names for a multi-arg ctor record payload.
+
+Default is positional `first`/`second`/…. Known Gren platform and Compat
+constructors keep their real field names so patterns and construction match
+the host API (same rationale as VirtualDom.Handler / Html.Events adapters).
+-}
+ctorFieldLabels : String -> Int -> Array String
+ctorFieldLabels name arity =
+    when platformCtorFieldLabels name arity is
+        Just labels ->
+            labels
+
+        Nothing ->
+            tupleFieldLabels arity
+
+
+{-| Named payload fields for platform / Compat multi-arg constructors.
+Keys are bare ctor names (module-qualified refs still print via printNamedRef).
+-}
+platformCtorFieldLabels : String -> Int -> Maybe (Array String)
+platformCtorFieldLabels name arity =
+    when name is
+        "BadStatus_" ->
+            if arity == 2 then
+                Just [ "metadata", "body" ]
+
+            else
+                Nothing
+
+        "GoodStatus_" ->
+            if arity == 2 then
+                Just [ "metadata", "body" ]
+
+            else
+                Nothing
+
+        "BadPayload" ->
+            if arity == 2 then
+                Just [ "message", "response" ]
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
 
 
 fieldLabel : Int -> String
@@ -1001,6 +1089,36 @@ indentBlock levels text =
                     pad ++ line
             )
         |> String.join "\n"
+
+
+{-| Record / update field layout.
+
+Block expressions (`let` / `when` / multi-line `if`) cannot start mid-line after
+`field =` — Gren reports UNFINISHED LET even when parenthesized, because the
+absolute indents inside the let no longer line up under the `let` keyword.
+
+Break after `=` and indent the value so the block owns its own column:
+`{ class =\n        let … in … }`.
+-}
+printRecordField : Dict String {} -> String -> Expr -> String
+printRecordField locals name value =
+    name ++ " = " ++ printEmbeddedExpr locals value
+
+
+{-| Embed an expression in a mid-line context (record field, list element).
+Multi-line values move to the next line and are indented one level.
+-}
+printEmbeddedExpr : Dict String {} -> Expr -> String
+printEmbeddedExpr locals value =
+    let
+        rendered =
+            printExpr locals 0 value
+    in
+    if String.contains "\n" rendered then
+        "\n        " ++ indentBlock 2 rendered
+
+    else
+        rendered
 
 
 escapeString : String -> String

@@ -4,9 +4,16 @@ module Acquire.Hazard exposing
     , errorToString
     )
 
-{-| Early detection for Elm constructs which cannot be transformed as an
-ordinary Gren package. Protected regions are skipped, except for actual GLSL
-blocks which are themselves a compatibility hazard.
+{-| Early detection for Elm constructs that **cannot** be ported as ordinary
+Gren source. These hard-refuse acquisition:
+
+- `Elm.Kernel` / native kernel imports
+- `effect module` (runtime managers)
+- GLSL shader blocks
+
+**Not** a hazard: `port module` / `port` declarations. Those are kept for
+application interop (syntax only; no JS kernel is generated). Protected
+regions (comments/strings) are skipped; real `[glsl|…|]` blocks are not.
 -}
 
 import Array exposing (Array)
@@ -16,7 +23,6 @@ import Char
 type Hazard
     = ElmKernel
     | EffectModule
-    | PortModule
     | Glsl
 
 
@@ -29,7 +35,6 @@ type alias Scan =
 type alias Findings =
     { elmKernel : Bool
     , effectModule : Bool
-    , portModule : Bool
     , glsl : Bool
     }
 
@@ -44,7 +49,6 @@ detect source =
             inspectTokens scan.tokens
                 { elmKernel = False
                 , effectModule = False
-                , portModule = False
                 , glsl = scan.glsl
                 }
     in
@@ -55,11 +59,6 @@ detect source =
         Nothing
     , if findings.effectModule then
         Just EffectModule
-
-      else
-        Nothing
-    , if findings.portModule then
-        Just PortModule
 
       else
         Nothing
@@ -134,9 +133,6 @@ inspectTokens tokens findings =
                         , effectModule =
                             findings.effectModule
                                 || (first == "effect" && next == Just "module")
-                        , portModule =
-                            findings.portModule
-                                || (first == "port" && next == Just "module")
                     }
             in
             inspectTokens rest updated
@@ -314,12 +310,6 @@ errorToString hazard =
 
         EffectModule ->
             "declares an Elm effect module, which is reserved for core/runtime packages"
-
-        PortModule ->
-            -- Port modules are allowed for application ports; package emit still
-            -- refuses them elsewhere if needed. Hazard scanning ignores this
-            -- string when apps are ported (see Source.allowPorts).
-            "declares an Elm port module"
 
         Glsl ->
             "contains an Elm [glsl|...|] shader block, which needs an explicit compatibility mapping"

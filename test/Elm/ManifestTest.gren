@@ -48,10 +48,18 @@ decodesAndNormalizesPackage =
 
 rejectsApplications : TestResult
 rejectsApplications =
+    -- Applications decode successfully (local `add` / app roots); they are
+    -- marked isApplication = True rather than a dedicated error variant.
     outcome
-        "application manifests are rejected explicitly"
-        (Manifest.decodeString "{\"type\":\"application\"}" == Err ApplicationManifest)
-        "Expected ApplicationManifest."
+        "application manifests decode as isApplication"
+        (when Manifest.decodeString "{\"type\":\"application\",\"elm-version\":\"0.19.1\",\"dependencies\":{\"direct\":{},\"indirect\":{}}}" is
+            Ok manifest ->
+                manifest.isApplication
+
+            Err _ ->
+                False
+        )
+        "Expected Ok with isApplication = True."
 
 
 rejectsRepeatedExposedModule : TestResult

@@ -148,7 +148,8 @@ generatedPackage sourceRoot spec =
     { sourcePackage = spec.sourcePackage
     , sourceRoot = sourceRoot
     , manifest =
-        { platform = CompilerPlatform.Common
+        { kind = Manifest.PackageKind
+        , platform = CompilerPlatform.Common
         , name = spec.name
         , summary = "A generated fixture"
         , license = "BSD-3-Clause"
@@ -156,6 +157,7 @@ generatedPackage sourceRoot spec =
         , exposedModules = Manifest.ExposedArray [ spec.moduleName ]
         , grenVersion = "0.6.0 <= v < 0.7.0"
         , dependencies = spec.dependencies
+        , sourceDirectories = [ "src" ]
         }
     , modules =
         [ { moduleName = spec.moduleName

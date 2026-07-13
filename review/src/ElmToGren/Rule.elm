@@ -1,12 +1,14 @@
 module ElmToGren.Rule exposing (rule)
 
-{-| Extract syntax-directed Elm-to-Gren edits.
+{-| Extract a resolved AST (when encodable) plus range edits and reference facts.
 
-The rule deliberately extracts edits instead of asking `elm-review --fix` to
-apply them. A fix which introduces Gren syntax is not valid Elm, so the
-elm-review fixer would reject exactly the changes this project needs. The
-Node host validates and applies the extracted ranges after review has finished.
+**Primary product for the host:** the encoded AST (`Types.ast`). Structural Gren
+laws (list peels, multi-arg / record-alias ctors, reserved binders) run on the
+host (`Ast.*`). This rule still emits range edits for modules without AST and
+for residual non-list shapes so fixtures and the no-AST fallback stay consistent.
 
+Edits are extracted rather than applied via `elm-review --fix` because Gren
+syntax is not valid Elm and the fixer would reject them.
 -}
 
 import Dict exposing (Dict)

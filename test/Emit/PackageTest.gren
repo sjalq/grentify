@@ -176,7 +176,8 @@ fixturePackage modules =
     { sourcePackage = "source/library"
     , sourceRoot = Path.fromPosixString "/tmp/source-library"
     , manifest =
-        { platform = CompilerPlatform.Common
+        { kind = Manifest.PackageKind
+        , platform = CompilerPlatform.Common
         , name = "ported/source-library"
         , summary = "A generated fixture"
         , license = "BSD-3-Clause"
@@ -184,6 +185,7 @@ fixturePackage modules =
         , exposedModules = Manifest.ExposedArray (Array.map .moduleName modules)
         , grenVersion = "0.6.0 <= v < 0.7.0"
         , dependencies = Dict.empty
+        , sourceDirectories = [ "src" ]
         }
     , modules = modules
     }

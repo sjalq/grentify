@@ -17,14 +17,15 @@ module Ast.Types exposing
     , TypeAnn(..)
     )
 
-{-| Phase 1 resolved simplified AST.
+{-| Resolved simplified AST (extractor → host lowers → print).
 
-The review extractor encodes Elm syntax with resolved module names. The host
-applies catalog name substitution and pretty-prints Gren source. Structural
-lowers (case/when, tuples, unit, list cons) live in `Ast.Print`.
+When the review extractor provides this AST, the host pipeline is mandatory:
 
-Gren custom-type variants take at most one payload, so multi-field nodes use
-records.
+    NameSub → RecordAlias → CtorLaw → MatchCompile → Reserved → Print
+
+Structural Gren laws (list peels, multi-arg ctors as records, record-alias
+ctors, reserved binders, import aliases) live on the host. Range edits are only
+for extractions without AST. Gren custom-type variants take at most one payload.
 -}
 
 

@@ -71,7 +71,8 @@ ignoresProtectedRegions =
                 , "{- outer case () {- nested of () -} still ignored -}"
                 , "ordinary = \"case of () \\\"still a string\\\"\""
                 , "character = 'c'"
-                , "multiline = \"\"\"case ignored of ()"
+                -- Gren requires a newline after opening """; lexical insert is intentional.
+                , "multiline = \"\"\"\ncase ignored of ()"
                 , "and still ignored\"\"\""
                 , "shader = [glsl| case ignored of () |]"
                 , "real value = when value is {} -> {}"
@@ -90,8 +91,18 @@ ignoresUnterminatedRegions =
             , "value = \"\"\"case value of ()"
             ]
 
+        -- Protected spans must not turn case/of into when/is. A leading newline
+        -- after """ (Gren multiline rule) is an allowed structural insert.
+        stillOpaque source =
+            when transformedSource source is
+                Ok out ->
+                    not (String.contains "when " out)
+
+                Err _ ->
+                    False
+
         passed =
-            Array.all (\source -> transformedSource source == Ok source) sources
+            Array.all stillOpaque sources
     in
     outcome "unterminated protected regions consume the remaining source" passed "A protected region was rewritten."
 

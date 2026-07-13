@@ -35,6 +35,7 @@
     "test:e2e": "node -e \"const fs=require('node:fs');fs.mkdirSync('dist',{recursive:true})\" && gren make E2EMain --output=dist/e2e-tests.js && node test/run-e2e.cjs",
     "test:ecosystem": "npm run build --silent && node test/ecosystem/run-ecosystem.cjs",
     "test:ecosystem-browser": "npm run build --silent && node test/ecosystem/run-ecosystem-browser.cjs",
+    "test:ast-probe": "npm run build --silent && node test/ecosystem/run-ast-probe.cjs",
     "test:apps": "npm run build --silent && node test/apps/run-apps.cjs",
     "test:format": "npm run build --silent && node test/format/run-format.cjs",
     "test:integration": "npm run test:e2e",

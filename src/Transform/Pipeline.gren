@@ -13,10 +13,13 @@ module Transform.Pipeline exposing
 
 {-| Apply an `ElmToGren` elm-review extraction to package sources.
 
-The review rule supplies structural, AST-derived edits plus every resolved
-value/type reference and import. This module validates the edits, derives
-catalog mapping edits from the resolved references, applies both edit sets in
-one pass, and finalizes the small lexical syntax differences.
+**Primary path (AST present):** decode the resolved module AST and run host
+lowers — `NameSub` → `RecordAlias` → `CtorLaw` → `MatchCompile` → `Reserved` →
+`Print`. Unported list/cons shapes are hard errors (no range-edit fallback).
+
+**Fallback path (no AST):** validate range edits, derive catalog mapping edits
+from resolved references, apply both in one pass, then lexical finalize. Used
+only for hand-crafted / legacy extractions without an encoded AST.
 -}
 
 import Array exposing (Array)

@@ -64,26 +64,29 @@ with Gren-native modules.
 flowchart TD
     A["elm-to-gren author/package"] --> B["Acquire<br/>package.elm-lang.org or local path"]
     B --> C["Resolve dependency graph<br/>catalog packages vs transpile targets"]
-    C --> D["elm-review rule (Elm)<br/>structural edits + resolved references + import facts"]
-    D --> E["Map references against catalog<br/>mappings/builtin.json"]
-    E --> F["Apply all edits in one pass<br/>+ lexical finalize"]
-    F --> G["Generate ElmToGren.Compat.* adapters<br/>+ missing imports"]
-    G --> H["Emit Gren workspace atomically<br/>gren.json, src/, package bundles"]
-    H --> I["Verify with the Gren compiler"]
-    I -->|ok| J["Ported package(s)"]
-    I -->|compile error| K["Fail with diagnostics<br/>catalog gap or refused feature"]
+    C --> D["elm-review rule (Elm)<br/>resolved AST + references + import facts"]
+    D --> E{"Module has resolved AST?"}
+    E -->|yes| F["Host AST pipeline<br/>NameSub → RecordAlias → CtorLaw<br/>→ MatchCompile → Reserved → Print"]
+    E -->|no| G["Range edits + catalog maps<br/>+ lexical finalize only"]
+    F --> H["Catalog maps + Compat adapters<br/>+ missing imports"]
+    G --> H
+    H --> I["Emit Gren workspace<br/>gren.json, src/, bundles"]
+    I --> J["Verify with Gren compiler"]
+    J -->|ok| K["Ported package(s)"]
+    J -->|error| L["Fail with diagnostics"]
 ```
 
 1. **Acquire** the Elm package and resolve its dependency graph
    (package.elm-lang.org or a local path).
 2. **Analyze** every module with a custom [elm-review](https://package.elm-lang.org/packages/jfmengels/elm-review/latest/)
-   rule that emits AST-derived structural edits (`case`→`when`, tuples→records,
-   list cons→`Array` operations) plus every resolved value/type reference and
-   import, keyed by source range.
-3. **Map** those references against a package/API catalog
-   (`mappings/builtin.json`): `List.filter`→`Array.keepIf`,
-   `Basics.round`→`Math.round`, `elm/regex`→`String.Regex`, and so on.
-   Unmapped gaps are bridged by generated `ElmToGren.Compat.*` adapter modules.
+   rule that encodes a **resolved simplified AST** (when available), plus resolved
+   value/type references and imports. List/cons totalization and multi-arg ctor
+   lowers are **host-owned** (`Ast.MatchCompile`, `Ast.CtorLaw`, `Ast.RecordAlias`),
+   not Rule exception hunting.
+3. **Transform** on the host when AST is present:
+   `NameSub` → `RecordAlias` → `CtorLaw` → `MatchCompile` → `Reserved` → `Print`.
+   Catalog renames (`List.filter`→`Array.keepIf`, etc.) and `ElmToGren.Compat.*`
+   adapters fill API gaps. Extractions without AST still use range edits only.
 4. **Emit** Gren manifests, sources, and package bundles atomically
    (`port`), or vendor under `.elm-to-gren/packages/` and update the app
    `gren.json` (`add`).
@@ -108,10 +111,15 @@ Refused with a diagnostic (no portable translation exists):
 Identifiers named `when` or `is` (Gren keywords; Elm's `case`/`of`) are
 rewritten to `when_` / `is_` at every binding and use site.
 
-List patterns are rewritten for Gren arrays: `x :: xs` becomes
-`Array.popFirst` with `Just { first, rest }`, multi-cons (`x :: y :: rest`)
-nests further `popFirst` in the branch body, and uncons under `Maybe`,
-`Result`, or other single-argument constructors is rewritten in place.
+**Gren kernel laws** (host AST, generic):
+
+- **List peels:** `x :: xs` / fixed lists → nested `Array.popFirst` with binders
+  in patterns; scope-aware α-rename (no shadowing); fallthrough as shared lets
+- **Multi-arg ctors:** type/payload as one record; bare ctors η-expanded for
+  `Parser.succeed Ctor`
+- **Record type-alias ctors:** `Iso f g` → `{ get = f, reverseGet = g }`
+- **Names:** import aliases (`Json.Decode`→`Decode`); `Dict.Dict` not bare
+  `Dict` when that would collide or fail under `import Dict`
 
 If an Elm function is in a mapped package (like `elm/core`) but we never taught
 the tool its Gren name, the port still runs and then fails when Gren compiles

@@ -62,7 +62,6 @@ mapPool(packages, args.concurrency, async (pkg, index) => {
     cache,
     ...platform,
   ];
-  if (args.noVerify) cliArgs.push("--no-verify");
 
   process.stdout.write(
     `[${index + 1}/${packages.length}] port ${label}${pkg.surface ? ` (${pkg.surface})` : ""} ... `,
@@ -74,9 +73,8 @@ mapPool(packages, args.concurrency, async (pkg, index) => {
   const reportPath = path.join(out, "elm-to-gren.report.json");
   if (result.status === 0 && fs.existsSync(reportPath)) {
     try {
-      verified = args.noVerify
-        ? true
-        : JSON.parse(fs.readFileSync(reportPath, "utf8")).verified === true;
+      verified =
+        JSON.parse(fs.readFileSync(reportPath, "utf8")).verified === true;
     } catch {
       verified = false;
     }
@@ -117,7 +115,6 @@ mapPool(packages, args.concurrency, async (pkg, index) => {
       finishedAt,
       wallMs,
       concurrency: args.concurrency,
-      noVerify: args.noVerify,
       total: results.length,
       passed: results.filter((r) => r.status === "ok").length,
       failed,

@@ -80,11 +80,8 @@ type alias Options =
     , grenExecutable : String
     , formatExecutable : String
     , elmHome : Maybe Path
-    , namespace : Maybe String
     , requestedPlatform : Cli.PlatformChoice
     , offline : Bool
-    , verify : Bool
-    , format : Bool
     , toolVersion : String
     }
 
@@ -560,7 +557,7 @@ planOne options registry resolution drafts name state =
             in
             CoreResult.map2
                 (\grenName platform -> { grenName = grenName, platform = platform })
-                (Plan.targetName options.namespace registry draft.source.manifest)
+                (Plan.targetName registry draft.source.manifest)
                 (Plan.inferPackagePlatform
                     options.requestedPlatform
                     (key == rootKey)
@@ -673,7 +670,7 @@ emitGraph permissions options registry resolution drafts planned =
                         , packageCount = Array.length planned.packages
                         , dependencyFirstOrder = Array.map PackageName.toString resolution.order
                         , packages = summaries
-                        , verified = options.verify
+                        , verified = True
                         , workspace = workspace
                         , lockfile = lockfile
                         , report = report
@@ -698,14 +695,9 @@ prepareStaging platform fileSystem permission options rootIdentity planned stagi
         rootIdentity
         planned
         staging
-        options.format
         |> Task.andThen
             (\_ ->
-                if options.verify then
-                    verifyStaging platform permission options.grenExecutable rootIdentity planned staging
-
-                else
-                    Task.succeed {}
+                verifyStaging platform permission options.grenExecutable rootIdentity planned staging
             )
 
 
@@ -717,9 +709,8 @@ formatStaging
     -> Plan.Identity
     -> Planned
     -> Path
-    -> Bool
     -> Task Error {}
-formatStaging platform fileSystem permission formatExecutable rootIdentity planned staging formatEnabled =
+formatStaging platform fileSystem permission formatExecutable rootIdentity planned staging =
     planned.packages
         |> Array.foldl
             (\package pending ->
@@ -730,23 +721,19 @@ formatStaging platform fileSystem permission formatExecutable rootIdentity plann
                                 dir =
                                     packageDirectory rootIdentity staging package
                             in
-                            if not formatEnabled then
-                                Task.succeed {}
+                            Volume.scanPackageDirectory fileSystem dir
+                                |> Task.andThen
+                                    (\metrics ->
+                                        if Volume.shouldSkipFormat metrics then
+                                            Task.succeed {}
 
-                            else
-                                Volume.scanPackageDirectory fileSystem dir
-                                    |> Task.andThen
-                                        (\metrics ->
-                                            if Volume.shouldSkipFormat metrics then
-                                                Task.succeed {}
-
-                                            else
-                                                Format.formatPackage platform
-                                                    permission
-                                                    { packageDirectory = dir
-                                                    , formatExecutable = formatExecutable
-                                                    }
-                                        )
+                                        else
+                                            Format.formatPackage platform
+                                                permission
+                                                { packageDirectory = dir
+                                                , formatExecutable = formatExecutable
+                                                }
+                                    )
                         )
             )
             (Task.succeed {})
@@ -828,7 +815,7 @@ encodeReport options rootIdentity packages diagnostics =
         , { key = "sourceRoot", value = Encode.string rootIdentity.elmName }
         , { key = "toolVersion", value = Encode.string options.toolVersion }
         , { key = "output", value = Encode.string (Path.toPosixString options.output) }
-        , { key = "verified", value = Encode.bool options.verify }
+        , { key = "verified", value = Encode.bool True }
         , { key = "packages", value = Encode.array encodePackageSummary packages }
         , { key = "diagnostics", value = Encode.array encodeDiagnostic diagnostics }
         ]

@@ -30,6 +30,7 @@ import Ast.NameSub as AstNameSub
 import Ast.Print as AstPrint
 import Ast.RecordAlias as AstRecordAlias
 import Ast.Reserved as AstReserved
+import Ast.Types exposing (File)
 import Char
 import Dict exposing (Dict)
 import Json.Decode as Decode
@@ -358,14 +359,18 @@ transform registry extraction sources =
         |> Result.andThen
             (\_ ->
                 let
+                    -- Collect package-wide maps *after* NameSub so keys match
+                    -- transformed module names (`Elm.Internal.Model.StyleClass`)
+                    -- and import-alias indexes (`Internal.StyleClass`) used by
+                    -- RecordAlias / CtorLaw / MatchCompile.
                     packageRecordAliases =
-                        collectPackageRecordAliases extraction.modules
+                        collectPackageRecordAliases registry extraction.modules
 
                     packageCtorArities =
-                        collectPackageCtorArities extraction.modules
+                        collectPackageCtorArities registry extraction.modules
 
                     packageSoleCtors =
-                        collectPackageSoleCtors extraction.modules
+                        collectPackageSoleCtors registry extraction.modules
                 in
                 sources
                     |> Array.sortBy (\source -> (normalizePath source.path).path)
@@ -413,67 +418,59 @@ transform registry extraction sources =
 
 {-| `"Module.AliasName"` → ordered record field names, from every AST in the package.
 -}
-collectPackageRecordAliases : Array Protocol.ModuleExtraction -> Dict String (Array String)
-collectPackageRecordAliases modules =
-    Array.foldl
-        (\moduleExtraction acc ->
-            when moduleExtraction.ast is
-                Nothing ->
-                    acc
-
-                Just astValue ->
-                    when AstDecode.decode astValue is
-                        Err _ ->
-                            acc
-
-                        Ok file ->
-                            Dict.foldl Dict.set acc (AstRecordAlias.collectFromFile file)
-        )
-        Dict.empty
-        modules
+collectPackageRecordAliases :
+    Registry
+    -> Array Protocol.ModuleExtraction
+    -> Dict String (Array String)
+collectPackageRecordAliases registry modules =
+    foldNamedAsts registry modules AstRecordAlias.collectFromFile Dict.empty
 
 
 {-| `"Module.Ctor"` → arity (≥ 2), from every AST in the package.
 -}
-collectPackageCtorArities : Array Protocol.ModuleExtraction -> Dict String Int
-collectPackageCtorArities modules =
-    Array.foldl
-        (\moduleExtraction acc ->
-            when moduleExtraction.ast is
-                Nothing ->
-                    acc
-
-                Just astValue ->
-                    when AstDecode.decode astValue is
-                        Err _ ->
-                            acc
-
-                        Ok file ->
-                            Dict.foldl Dict.set acc (AstCtorLaw.collectFromFile file)
-        )
-        Dict.empty
-        modules
+collectPackageCtorArities :
+    Registry
+    -> Array Protocol.ModuleExtraction
+    -> Dict String Int
+collectPackageCtorArities registry modules =
+    foldNamedAsts registry modules AstCtorLaw.collectFromFile Dict.empty
 
 
 {-| Sole custom-type constructors (`Module.Ctor` + short name) for irrefutable peels.
 -}
-collectPackageSoleCtors : Array Protocol.ModuleExtraction -> Dict String {}
-collectPackageSoleCtors modules =
+collectPackageSoleCtors :
+    Registry
+    -> Array Protocol.ModuleExtraction
+    -> Dict String {}
+collectPackageSoleCtors registry modules =
+    foldNamedAsts registry modules AstMatchCompile.collectSoleCtorsFromFile Dict.empty
+
+
+{-| Decode each module AST, apply NameSub, then merge `collect` into `acc`.
+-}
+foldNamedAsts :
+    Registry
+    -> Array Protocol.ModuleExtraction
+    -> (File -> Dict String a)
+    -> Dict String a
+    -> Dict String a
+foldNamedAsts registry modules collect acc =
     Array.foldl
-        (\moduleExtraction acc ->
+        (\moduleExtraction inner ->
             when moduleExtraction.ast is
                 Nothing ->
-                    acc
+                    inner
 
                 Just astValue ->
                     when AstDecode.decode astValue is
                         Err _ ->
-                            acc
+                            inner
 
                         Ok file ->
-                            Dict.foldl Dict.set acc (AstMatchCompile.collectSoleCtorsFromFile file)
+                            Dict.foldl Dict.set inner
+                                (collect (AstNameSub.apply registry file))
         )
-        Dict.empty
+        acc
         modules
 
 

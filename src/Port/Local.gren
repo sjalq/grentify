@@ -40,11 +40,8 @@ type alias Options =
     , elmReviewExecutable : String
     , grenExecutable : String
     , formatExecutable : String
-    , namespace : Maybe String
     , requestedPlatform : Cli.PlatformChoice
     , offline : Bool
-    , verify : Bool
-    , format : Bool
     }
 
 
@@ -70,7 +67,7 @@ run options =
                 Port.Mapping.load options.fileSystem options.builtinMapping options.overlayMappings
                     |> Task.andThen
                         (\loadedMappings ->
-                            Port.Names.targetName options.namespace loadedMappings.registry manifest
+                            Port.Names.targetName loadedMappings.registry manifest
                                 |> taskFromResult
                                 |> Task.andThen
                                     (\targetName ->
@@ -205,7 +202,7 @@ emit options mappingFingerprint manifest targetName builtManifest transformed ex
                 { rootElm = sourceName
                 , rootGren = targetName
                 , outputDirectory = System.File.pathToString options.platform options.destination
-                , verified = options.verify
+                , verified = True
                 , diagnostics = diagnostics
                 }
 
@@ -236,42 +233,33 @@ emit options mappingFingerprint manifest targetName builtManifest transformed ex
                         )
 
                 validate staging =
-                    (if not options.format then
-                        Task.succeed {}
-
-                     else
-                        Volume.scanPackageDirectory options.fileSystem staging
-                            |> Task.andThen
-                                (\metrics ->
-                                    if Volume.shouldSkipFormat metrics then
-                                        Task.succeed {}
-
-                                    else
-                                        Format.formatPackage options.platform
-                                            options.childProcess
-                                            { packageDirectory = staging
-                                            , formatExecutable = options.formatExecutable
-                                            }
-                                )
-                    )
+                    Volume.scanPackageDirectory options.fileSystem staging
                         |> Task.andThen
-                            (\_ ->
-                                if options.verify then
-                                    Verify.Package.verify options.platform
-                                        options.childProcess
-                                        { packageDirectory = staging
-                                        , grenExecutable = options.grenExecutable
-                                        , isApplication =
-                                            when builtManifest.spec.kind is
-                                                GrenManifest.ApplicationKind ->
-                                                    True
-
-                                                GrenManifest.PackageKind ->
-                                                    False
-                                        }
+                            (\metrics ->
+                                if Volume.shouldSkipFormat metrics then
+                                    Task.succeed {}
 
                                 else
-                                    Task.succeed {}
+                                    Format.formatPackage options.platform
+                                        options.childProcess
+                                        { packageDirectory = staging
+                                        , formatExecutable = options.formatExecutable
+                                        }
+                            )
+                        |> Task.andThen
+                            (\_ ->
+                                Verify.Package.verify options.platform
+                                    options.childProcess
+                                    { packageDirectory = staging
+                                    , grenExecutable = options.grenExecutable
+                                    , isApplication =
+                                        when builtManifest.spec.kind is
+                                            GrenManifest.ApplicationKind ->
+                                                True
+
+                                            GrenManifest.PackageKind ->
+                                                False
+                                    }
                             )
             in
             Emit.Workspace.emit
@@ -294,7 +282,7 @@ emit options mappingFingerprint manifest targetName builtManifest transformed ex
                         { sourceName = sourceName
                         , targetName = targetName
                         , destination = workspace.rootDirectory
-                        , verified = options.verify
+                        , verified = True
                         , report = report
                         }
                     )

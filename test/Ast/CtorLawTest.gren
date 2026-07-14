@@ -32,6 +32,7 @@ tests =
     , localMultiArgStillGetsHelper
     , importedMultiArgViaQualifiedName
     , collectSkipsUnaryCtors
+    , importedMultiArgViaImportAlias
     ]
 
 
@@ -206,6 +207,62 @@ collectSkipsUnaryCtors =
         "collectFromFile only indexes multi-arg ctors"
         ok
         ("map keys: " ++ String.join ", " (Dict.keys arities))
+
+
+{-| elm-ui shape: `import Elm.Internal.Model as Internal` + unsaturated
+`Internal.StyleClass flag <| style` must get a curried helper when package
+arities use the post-NameSub module key.
+-}
+importedMultiArgViaImportAlias : TestResult
+importedMultiArgViaImportAlias =
+    let
+        packageArities =
+            Dict.empty
+                |> Dict.set "Elm.Internal.Model.StyleClass" 2
+
+        file =
+            emptyFile "Elm.Element"
+                [ { moduleName = "Elm.Internal.Model"
+                  , alias = Just "Internal"
+                  , exposing_ = Nothing
+                  }
+                ]
+                [ DeclFunction
+                    { name = "alpha"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "flag", PatVar "style" ]
+                    , expression =
+                        ExprBinop
+                            { operator = "<|"
+                            , left =
+                                ExprApplication
+                                    [ ExprVar
+                                        { moduleName = Just "Internal"
+                                        , name = "StyleClass"
+                                        }
+                                    , ExprVar
+                                        { moduleName = Nothing, name = "flag" }
+                                    ]
+                            , right =
+                                ExprVar
+                                    { moduleName = Nothing, name = "style" }
+                            }
+                    }
+                ]
+
+        printed =
+            Print.print (CtorLaw.apply packageArities file)
+
+        ok =
+            String.contains "ctor_StyleClass_elmToGren" printed
+                && String.contains "ctor_StyleClass_elmToGren flag" printed
+                && not (String.contains "(Internal.StyleClass flag)" printed)
+    in
+    outcome
+        "import-alias Internal.StyleClass gets a curried helper"
+        ok
+        ("printed:\n" ++ printed)
 
 
 -- helpers -------------------------------------------------------------------

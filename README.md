@@ -1,200 +1,168 @@
 # Grenity
 
-`elm-to-gren` — a Gren-native CLI that ports an Elm package and its whole
-dependency graph into compiler-validated [Gren](https://gren-lang.org) packages.
+`elm-to-gren` — Gren-native CLI that ports an Elm package (and its dependency
+graph) into compiler-validated Gren packages.
 
-Point it at an Elm package, get an installable Gren workspace back:
+Always formats (volume packages auto-skip) and always verifies with the Gren
+compiler. One List/Tuple strategy: Gren Array + records (no shim mode).
 
 ```sh
-npm install
-npm run build
+npm install && npm run build
 node bin/elm-to-gren.cjs elm-community/list-extra --out ./out --cache ./cache
-cd out && gren docs   # the output compiles with the official Gren compiler
 ```
 
-Or vendor a package into an existing Gren application:
+Vendor into an existing Gren **application** (`gren.json` type `application`):
 
 ```sh
-# from a Gren app root (must have gren.json with type "application")
+# from the app root
 node bin/elm-to-gren.cjs add elm-community/list-extra --cache ./cache
-# writes ./.elm-to-gren/packages/... and adds a local dependency to gren.json
+# → ./.elm-to-gren/packages/<author>_<name>__<version>/
+# → gren.json direct: "local:.elm-to-gren/packages/..."
+# modules get an Elm. prefix
 ```
 
 ## Commands
 
 ```
-elm-to-gren <author/package[@version] | local-path> [options]
-elm-to-gren port <author/package[@version] | local-path> [options]
-elm-to-gren add  <author/package[@version] | local-path> [options]
+elm-to-gren [port] <author/package[@version] | local-path> [options]
+elm-to-gren add    <author/package[@version] | local-path> [options]
 ```
 
-| Command | Purpose |
+| Command | Role |
 | --- | --- |
-| `port` (default) | Port into a fresh Gren workspace (`--out`, default `./gren-output`). |
-| `add` | Vendor into the current Gren app: source under `./.elm-to-gren/packages/`, local dep in `./gren.json`. `--out` is the project root (default `.`). |
+| `port` (default) | Fresh workspace (`--out`, default `./gren-output`). Modules unprefixed. |
+| `add` | Vendor into app root (`--out`, default `.`). Modules **`Elm.`-prefixed**. Idempotent. |
 
 ### Options
 
 | Flag | Meaning |
 | --- | --- |
-| `-o, --out <dir>` | Workspace (`port`) or project root (`add`) |
-| `--cache <dir>` | Download and analysis cache |
-| `--platform <p>` | `auto`, `common`, `browser`, or `node` (default `auto`) |
-| `--namespace <author>` | Namespace generated package names |
-| `--elm-namespace` | Prefix ported modules with `Elm.` (default for `add`) |
-| `--no-elm-namespace` | Do not prefix modules (default for `port`) |
-| `--mapping <file>` | Add or override mappings; may be repeated |
-| `--offline` | Use cached registry data only |
-| `--no-verify` | Skip the final Gren compiler check |
-| `--json` | Print the final report as JSON |
+| `-o, --out <dir>` | Workspace (`port`) or app root (`add`) |
+| `--cache <dir>` | Download / analysis cache (default: `~/.cache/elm-to-gren`) |
+| `--platform <p>` | `auto` (default), `common`, `browser`, or `node` |
+| `--mapping <file>` | Extra/override mappings; repeatable |
+| `--offline` | Registry/cache only |
+| `--json` | Machine-readable report |
+| `-h, --help` / `-v, --version` | Help / version |
 
-`add` requires an application `gren.json` (not a package). It is idempotent:
-re-running overwrites the vendored packages and updates the same dependency
-entry. Mapped registry deps land in the app's `dependencies.indirect`; the
-library itself is added under `dependencies.direct` as
-`local:.elm-to-gren/packages/<name>-<version>`.
-
-With `--elm-namespace` (on by default for `add`), module paths, declarations,
-imports, and exposed names get an `Elm.` prefix so vendored APIs do not collide
-with Gren-native modules.
+`add` maps known registry packages into the app’s `dependencies.indirect` where
+applicable; the ported library is `dependencies.direct` as
+`local:.elm-to-gren/packages/<author>_<pkg>__<ver>`.
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A["elm-to-gren author/package"] --> B["Acquire<br/>package.elm-lang.org or local path"]
-    B --> C["Resolve dependency graph<br/>catalog packages vs transpile targets"]
-    C --> D["elm-review rule (Elm)<br/>resolved AST + references + import facts"]
-    D --> E{"Module has resolved AST?"}
-    E -->|yes| F["Host AST pipeline<br/>NameSub → RecordAlias → CtorLaw<br/>→ MatchCompile → Reserved → Print"]
-    E -->|no| G["Range edits + catalog maps<br/>+ lexical finalize only"]
-    F --> H["Catalog maps + Compat adapters<br/>+ missing imports"]
+    A["elm-to-gren"] --> B["Acquire<br/>package.elm-lang.org or path"]
+    B --> C["Resolve graph<br/>catalog map vs transpile"]
+    C --> D["elm-review extraction<br/>resolved AST + refs + imports"]
+    D --> E{"Resolved AST?"}
+    E -->|yes| F["Host pipeline<br/>NameSub → RecordAlias → CtorLaw<br/>→ MatchCompile → Reserved → Print"]
+    E -->|no| G["Range edits + catalog<br/>+ lexical finalize only"]
+    F --> H["Catalog renames + Compat adapters"]
     G --> H
-    H --> I["Emit Gren workspace<br/>gren.json, src/, bundles"]
-    I --> J["Verify with Gren compiler"]
-    J -->|ok| K["Ported package(s)"]
-    J -->|error| L["Fail with diagnostics"]
+    H --> I["Emit gren.json + src<br/>port workspace or add vendor"]
+    I --> J["Format<br/>skip volume packages"]
+    J --> K["Verify with Gren compiler"]
 ```
 
-1. **Acquire** the Elm package and resolve its dependency graph
-   (package.elm-lang.org or a local path).
-2. **Analyze** every module with a custom [elm-review](https://package.elm-lang.org/packages/jfmengels/elm-review/latest/)
-   rule that encodes a **resolved simplified AST** (when available), plus resolved
-   value/type references and imports. List/cons totalization and multi-arg ctor
-   lowers are **host-owned** (`Ast.MatchCompile`, `Ast.CtorLaw`, `Ast.RecordAlias`),
-   not Rule exception hunting.
-3. **Transform** on the host when AST is present:
-   `NameSub` → `RecordAlias` → `CtorLaw` → `MatchCompile` → `Reserved` → `Print`.
-   Catalog renames (`List.filter`→`Array.keepIf`, etc.) and `ElmToGren.Compat.*`
-   adapters fill API gaps. Extractions without AST still use range edits only.
-4. **Emit** Gren manifests, sources, and package bundles atomically
-   (`port`), or vendor under `.elm-to-gren/packages/` and update the app
-   `gren.json` (`add`).
-5. **Format** every package with the vendored [gilramir/gren-format](https://github.com/gilramir/gren-format)
-   tool (community reimplementation of official `gren format`, removed in 0.5).
-6. **Verify** with the real Gren compiler (`gren docs`) before finishing
-   (skipped with `--no-verify`).
+1. **Acquire** package + recursive deps (catalog hits map to Gren packages; rest transpile).
+2. **Analyze** with a custom elm-review rule: resolved simplified AST when available, plus refs/imports.
+3. **Transform** (AST path, host-owned):
+   `NameSub → RecordAlias → CtorLaw → MatchCompile → Reserved → Print`.
+   Then catalog renames (`List.filter` → `Array.keepIf`, …) and `ElmToGren.Compat.*`.
+   No AST → range edits + catalog + lexical only.
+4. **Emit** workspace (`port`) or `.elm-to-gren/packages/` + `gren.json` (`add`).
+5. **Format** with vendored [gilramir/gren-format](https://github.com/gilramir/gren-format)
+   unless **volume** (any of: ≥200 modules, ≥400KB total, ≥100KB single module).
+   Volume skip also skips record-pattern collapse.
+6. **Verify** with the real Gren binary:
+   - applications: `gren make Main --output=/dev/null`
+   - packages: try `gren make Main`; on non-zero, `gren docs --output=/dev/null`
 
-## What ports
+### What ports / what does not
 
-Pure library packages over `elm/core` (plus `elm/json`, `elm/time`,
-`elm/random`, `elm/bytes`, `elm/regex`, `elm/url`, `elm/parser`) are the
-supported path — `elm-community/list-extra` and `rtfeldman/elm-hex` are the
-reference targets. Unknown dependencies are transpiled recursively.
+Supported target: pure (and browser) libraries over `elm/core` and common
+companions (`json`, `time`, `random`, `bytes`, `regex`, `url`, `parser`, …).
+Unknown deps are transpiled recursively. Catalog packages are not re-ported.
 
-**Hard-refused** (no portable Gren package source):
+**Hard-refused** (acquisition):
 
-- `effect module` (runtime/effect managers)
-- `Elm.Kernel` / `Native` kernel code
-- GLSL shader expressions (`[glsl|…|]`)
+- `effect module`
+- `Elm.Kernel` / Native kernel imports
+- GLSL blocks (`[glsl|…|]`)
 
-**Kept, not refused:** `port module` and `port` declarations. Syntax is
-preserved for application interop; the tool does **not** generate the JS/kernel
-side of ports. Wire them in the Gren app as you would any other port surface.
+**Kept:** `port module` / `port` **syntax** is preserved for app interop. The
+tool does **not** emit the JS/kernel half of ports; wire that in the Gren app
+as you would any other port surface.
 
-Identifiers named `when` or `is` (Gren keywords; Elm's `case`/`of`) are
-rewritten to `when_` / `is_` at every binding and use site.
+**Keywords:** binders/uses of `when` / `is` → `when_` / `is_`.
 
-**Gren kernel laws** (host AST, generic):
+**Host laws** (generic): list peels → nested `Array.popFirst`; multi-arg ctors
+→ single record payload; record type-alias ctors; reserved renames;
+import-alias / qualified-name hygiene. Some unreachable fallthroughs are
+`Debug.todo "elm-to-gren: …"`.
 
-- **List peels:** `x :: xs` / fixed lists → nested `Array.popFirst` with binders
-  in patterns; scope-aware α-rename (no shadowing); fallthrough as shared lets
-- **Multi-arg ctors:** type/payload as one record; bare ctors η-expanded for
-  `Parser.succeed Ctor`
-- **Record type-alias ctors:** `Iso f g` → `{ get = f, reverseGet = g }`
-- **Names:** import aliases (`Json.Decode`→`Decode`); `Dict.Dict` not bare
-  `Dict` when that would collide or fail under `import Dict`
-
-If an Elm function is in a mapped package (like `elm/core`) but we never taught
-the tool its Gren name, the port still runs and then fails when Gren compiles
-the result. Fix that by adding a mapping or a small compatibility helper, not
-by editing the generated package by hand.
-
-Example: Elm `List.filter` is mapped to Gren `Array.keepIf`, so this:
+Unmapped APIs in mapped packages still emit; Gren then fails at verify. Fix the
+catalog or a Compat helper, not one hand-edited package.
 
 ```elm
 List.filter (\n -> n > 0) numbers
 ```
 
-becomes something Gren accepts:
-
 ```gren
 Array.keepIf (\n -> n > 0) numbers
 ```
 
-If `filter` had no mapping, the tool might still emit `List.filter` (or a half-rewritten form). `gren docs` would then fail with a missing-function style error. You would not patch that one package by hand; you would add a catalog line (or a Compat helper) so every future port gets the fix.
-
 ## Ecosystem smoke tests
 
-**Current phase brief (compact/resume):** [`docs/PHASE-ECOSYSTEM-HARDENING.md`](docs/PHASE-ECOSYSTEM-HARDENING.md)
-covers measurement rules, the unit→canary→residual→full loop, landed host laws, and open items for this phase only.
+Phase notes: [`docs/PHASE-ECOSYSTEM-HARDENING.md`](docs/PHASE-ECOSYSTEM-HARDENING.md).
 
-**Catalogs are candidate lists, not success counts.** The only proof that packages
-port on a given tree is a commit-stamped **full** suite run.
+Catalogs are **candidates**, not success counts. Only a **full unfiltered** suite
+run writes commit-stamped proof to `.test-cache/ecosystem-proof/LAST_RUN.json`.
+Canary/residual/filtered runs write triage only.
+
+| Catalog | Role | Size |
+| --- | --- | --- |
+| `test/ecosystem/packages.json` | pure candidates | 200 |
+| `test/ecosystem/packages-browser.json` | browser candidates | 252 |
+| `test/ecosystem/packages-canary.json` | fast regression | 14 |
 
 ```sh
-npm run ecosystem:status       # what HEAD actually proved (or NO/STALE PROOF)
-npm run dev:loop               # unit tests + 12-package canary (~fast feedback)
-npm run ecosystem:canary       # canary only (parallel, triage, never proof)
-npm run ecosystem:residual     # re-port only latest failures (parallel)
-npm run ecosystem:pure:j       # full pure suite, -j 6 (writes proof)
-npm run ecosystem:browser:j    # full browser suite, -j 6 (writes proof)
-npm run test:ecosystem         # full pure suite serial (writes proof)
-npm run test:ecosystem-browser # full browser suite serial (writes proof)
+npm run ecosystem:status        # proof for HEAD (or NO/STALE)
+npm run dev:loop                # build + unit + canary -j4
+npm run ecosystem:canary        # 14-pkg canary (triage, not proof)
+npm run ecosystem:residual      # re-port last failures (triage)
+npm run ecosystem:pure:j        # full pure -j6 (proof)
+npm run ecosystem:browser:j     # full browser -j6 (proof)
+npm run test:ecosystem          # full pure serial (proof)
+npm run test:ecosystem-browser  # full browser serial (proof)
 ```
 
-Suite flags (after `--`): `--limit N`, `--offset N`, `--only a@v,b@v`,
-`-j N` / `--concurrency N`, `--fail-fast`, `--no-verify`, `--no-proof`.
+Suite flags (after `--`): `--limit`, `--offset`, `--only a@v,b@v`,
+`-j` / `--concurrency`, `--timeout-ms`, `--no-adaptive-timeout`,
+`--fail-fast`, `--keep-out`, `--no-proof`.
 
-**Iteration rule:** fix one `failReason` class at a time. Canary/residual print a
-histogram and up to 3 representative packages per reason. Only promote to full
-suite when canary is green. Filtered runs never write suite proof.
-
-- `test/ecosystem/packages.json` — pure-platform **candidates**
-- `test/ecosystem/packages-browser.json` — browser-platform **candidates**
-- `test/ecosystem/packages-canary.json` — sub-minute regression surfaces
-- Proof: `.test-cache/ecosystem-proof/LAST_RUN.json` (full runs only)
-- Triage: `.test-cache/ecosystem-proof/TRIAGE.json` (canary/residual/partial)
-
-Do **not** treat catalog sizes, old logs, or `scripts/temp/*` as success counts.
+Volume packages get **adaptive** per-package timeouts; budget exceedance is
+classified **`scale`**, not hang/`timeout`, when the package is volume-sized.
 
 ## Development
 
 ```sh
-npm run dev:loop               # build + unit + canary (default fix loop)
-npm run ecosystem:status       # commit-stamped pure+browser proof only
-npm run ecosystem:residual     # only packages that failed last triage/proof
-npm run ecosystem:pure:j       # full pure proof run, parallel
-npm run test:all               # unit, rule, e2e, full ecosystem (network)
+npm run build
+npm run check
+npm test
+npm run test:all                # check, unit, rule, format, e2e, both ecosystems
 ```
 
-- `src/` — the Gren CLI (acquire, resolve, transform, format, emit, verify)
-- `review/` — the elm-review rule that produces the resolved AST, references, and imports
-- `mappings/builtin.json` — the Elm→Gren package/API catalog
-- `tools/gren-format/` — vendored gilramir/gren-format binary (`scripts/build-gren-format.sh` rebuilds it)
-- `test/` — unit, format, end-to-end, and ecosystem suites
-- `test/ecosystem/packages*.json` — candidate suites only (see Ecosystem smoke tests)
-- `scripts/temp/` — disposable experiments; never suite proof
+| Path | Role |
+| --- | --- |
+| `src/` | Gren CLI (acquire, resolve, transform, emit, format, verify) |
+| `review/` | elm-review extractor (AST, refs, imports) |
+| `mappings/builtin.json` | Elm→Gren package/API catalog |
+| `tools/gren-format/` | vendored formatter (+ `collapse-record-patterns.cjs`) |
+| `test/` | unit, format, e2e, ecosystem |
+| `scripts/temp/` | disposable; never suite proof |
 
 ## License
 

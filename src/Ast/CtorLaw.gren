@@ -118,8 +118,14 @@ buildArityIndex packageArities file =
     let
         localModule =
             file.moduleDefinition.moduleName
+
+        -- Always index this file's multi-arg ctors under the *current*
+        -- module name (post-NameSub). Package maps collected before NameSub
+        -- would otherwise miss `Elm.Internal.Model.StyleClass` etc.
+        withLocal =
+            Dict.foldl Dict.set packageArities (collectFromFile file)
     in
-    { byKey = Ref.addImportAliasKeys file.imports packageArities packageArities
+    { byKey = Ref.addImportAliasKeys file.imports withLocal withLocal
     , localModule = localModule
     }
 

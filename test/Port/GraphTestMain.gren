@@ -93,11 +93,8 @@ fixtureOptions platform workingDirectory fixture =
     , grenExecutable = Path.toPosixString (inProject "node_modules/.bin/gren")
     , formatExecutable = Path.toPosixString (inProject "tools/gren-format/app")
     , elmHome = Just (Path.append (Path.fromPosixString "elm-home") cacheDirectory)
-    , namespace = Nothing
     , requestedPlatform = Cli.Auto
     , offline = False
-    , verify = True
-    , format = True
     , toolVersion = "integration-test"
     }
 

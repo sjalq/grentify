@@ -87,7 +87,7 @@ npm run ecosystem:pure:j                # pure 200, -j6, writes proof
 npm run ecosystem:browser:j             # browser candidates, -j6, writes proof
 ```
 
-Suite flags (after `--`): `--limit N`, `--offset N`, `--only a@v,b@v`, `-j N`, `--timeout-ms N`, `--fail-fast`, `--no-verify`, `--no-proof`.
+Suite flags (after `--`): `--limit N`, `--offset N`, `--only a@v,b@v`, `-j N`, `--timeout-ms N`, `--fail-fast`, `--keep-out`, `--no-proof`.
 
 **Rule:** never debug on a full 200/252 serial run first. Canary green → residual class → full parallel proof.
 
@@ -142,7 +142,7 @@ then catalog maps / Compat, format, `gren docs` verify.
 | module count | ≥ 200 |
 | total source bytes | ≥ 400 KB |
 
-**Host:** auto-skip `gren-format` + collapse when volume (`Port.Volume`); CLI `--no-format` forces skip.
+**Host:** auto-skip `gren-format` + collapse when volume (`Port.Volume`).
 
 **Suite:** adaptive timeout (floor 12 min, cap 25 min from size); exceedance → failReason **`scale`** not `timeout`. See `test/ecosystem/lib/volume.cjs`.
 

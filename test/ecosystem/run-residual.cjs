@@ -105,8 +105,6 @@ mapPool(failures, args.concurrency, async (item, index) => {
   const budgetMs = adaptiveTimeoutMs(volume, args.timeoutMs);
 
   const cliArgs = [cli, label, "--out", out, "--cache", cache, ...platform];
-  if (args.noVerify) cliArgs.push("--no-verify");
-  if (args.noFormat || (volume && volume.volume)) cliArgs.push("--no-format");
 
   process.stdout.write(
     `[${index + 1}/${failures.length}] port ${label} (was ${item.reason || "?"}` +
@@ -125,9 +123,8 @@ mapPool(failures, args.concurrency, async (item, index) => {
   const reportPath = path.join(out, "elm-to-gren.report.json");
   if (result.status === 0 && fs.existsSync(reportPath)) {
     try {
-      verified = args.noVerify
-        ? true
-        : JSON.parse(fs.readFileSync(reportPath, "utf8")).verified === true;
+      verified =
+        JSON.parse(fs.readFileSync(reportPath, "utf8")).verified === true;
     } catch {
       verified = false;
     }
@@ -175,7 +172,6 @@ mapPool(failures, args.concurrency, async (item, index) => {
       finishedAt,
       wallMs,
       concurrency: args.concurrency,
-      noVerify: args.noVerify,
       total: results.length,
       passed: recovered,
       failed,

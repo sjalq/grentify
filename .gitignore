@@ -8,3 +8,6 @@ elm-stuff/
 review/elm-stuff/
 *.log
 .DS_Store
+
+# Demo Gren app (local only; not part of the port tool)
+example-project/

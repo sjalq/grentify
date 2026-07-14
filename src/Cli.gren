@@ -22,20 +22,24 @@ type PlatformChoice
     | ExactPlatform Platform
 
 
+{-| CLI options. Command chooses policy:
+
+  * `port` → fresh workspace, modules unprefixed
+  * `add` → vendor into app, modules get `Elm.` prefix
+
+Always verify, always format (volume auto-skips format), Array List path.
+Package names from catalog or Elm coordinates.
+-}
 type alias Options =
     { input : String
     , outputDirectory : String
     , cacheDirectory : String
     , platform : PlatformChoice
-    , namespace : Maybe String
     , mappingFiles : Array String
     , offline : Bool
-    , verify : Bool
-    , format : Bool
     , json : Bool
     , namespaceModules : Bool
     , vendor : Bool
-    , shim : Bool
     }
 
 
@@ -50,22 +54,14 @@ type alias ParseState =
     , outputDirectory : String
     , cacheDirectory : String
     , platform : PlatformChoice
-    , namespace : Maybe String
     , mappingFiles : Array String
     , offline : Bool
-    , verify : Bool
-    , format : Bool
     , json : Bool
     , namespaceModules : Bool
     , vendor : Bool
-    , shim : Bool
     }
 
 
-{-| Whether the raw argv requests machine-readable errors.
-
-Used when parse fails before `Options` exist so `--json` still yields Port.Error JSON.
--}
 wantsJson : Array String -> Bool
 wantsJson arguments =
     Array.member "--json" arguments
@@ -74,9 +70,6 @@ wantsJson arguments =
 parse : Defaults -> Array String -> Result String Command
 parse defaults rawArguments =
     let
-        -- The `add` subcommand vendors a ported library into the current Gren
-        -- project: it defaults to Elm.-namespaced modules and writes into the
-        -- working directory rather than a fresh workspace.
         selection =
             when Array.first rawArguments is
                 Just "port" ->
@@ -101,15 +94,11 @@ parse defaults rawArguments =
                     defaults.outputDirectory
             , cacheDirectory = defaults.cacheDirectory
             , platform = Auto
-            , namespace = Nothing
             , mappingFiles = []
             , offline = False
-            , verify = True
-            , format = True
             , json = False
             , namespaceModules = selection.vendor
             , vendor = selection.vendor
-            , shim = False
             }
     in
     if selection.vendor then
@@ -168,23 +157,8 @@ parseArguments state arguments =
                 "--offline" ->
                     parseArguments { state | offline = True } rest
 
-                "--no-verify" ->
-                    parseArguments { state | verify = False } rest
-
-                "--no-format" ->
-                    parseArguments { state | format = False } rest
-
                 "--json" ->
                     parseArguments { state | json = True } rest
-
-                "--shim" ->
-                    parseArguments { state | shim = True } rest
-
-                "--elm-namespace" ->
-                    parseArguments { state | namespaceModules = True } rest
-
-                "--no-elm-namespace" ->
-                    parseArguments { state | namespaceModules = False } rest
 
                 "--out" ->
                     withValue "--out" rest (\value remaining -> parseArguments { state | outputDirectory = value } remaining)
@@ -201,9 +175,6 @@ parseArguments state arguments =
                             parsePlatform value
                                 |> Result.andThen (\choice -> parseArguments { state | platform = choice } remaining)
                         )
-
-                "--namespace" ->
-                    withValue "--namespace" rest (\value remaining -> parseArguments { state | namespace = Just value } remaining)
 
                 "--mapping" ->
                     withValue "--mapping" rest
@@ -244,7 +215,6 @@ parseLongAssignment state argument remaining =
         attempts =
             [ assignment "--out=" (\value -> parseArguments { state | outputDirectory = value } remaining)
             , assignment "--cache=" (\value -> parseArguments { state | cacheDirectory = value } remaining)
-            , assignment "--namespace=" (\value -> parseArguments { state | namespace = Just value } remaining)
             , assignment "--mapping="
                 (\value -> parseArguments { state | mappingFiles = Array.pushLast value state.mappingFiles } remaining)
             , assignment "--platform="
@@ -318,15 +288,11 @@ finalize state =
                     , outputDirectory = state.outputDirectory
                     , cacheDirectory = state.cacheDirectory
                     , platform = state.platform
-                    , namespace = state.namespace
                     , mappingFiles = state.mappingFiles
                     , offline = state.offline
-                    , verify = state.verify
-                    , format = state.format
                     , json = state.json
                     , namespaceModules = state.namespaceModules
                     , vendor = state.vendor
-                    , shim = state.shim
                     }
 
 
@@ -343,26 +309,19 @@ Usage:
   elm-to-gren add <author/package[@version] | local-path> [options]
 
 Commands:
-  port  Port a package into a fresh Gren workspace (default).
-  add   Port a package and vendor it into the current Gren project
-        (writes source into ./.elm-to-gren/packages and adds a local
-        dependency to ./gren.json). Defaults to Elm.-namespaced
-        modules; --out sets the project root.
+  port  Port into a fresh Gren workspace (default). Modules unprefixed.
+  add   Vendor into the current Gren application (./.elm-to-gren/packages +
+        local dep in gren.json). Modules get an Elm. prefix. --out is the
+        app root (default: .). Always verifies with the Gren compiler.
 
 Options:
   -o, --out <directory>      Output workspace (default: ./gren-output);
                              for `add`, the target project root (default: .)
       --cache <directory>    Download and analysis cache
+                             (default: ~/.cache/elm-to-gren)
       --platform <platform>  auto, common, browser, or node (default: auto)
-      --namespace <author>   Namespace generated package names
-      --elm-namespace        Prefix ported modules with Elm. (default for add)
-      --no-elm-namespace     Do not prefix ported modules (default for port)
       --mapping <file>       Add or override mappings; may be repeated
-      --shim                 Keep Elm List/Tuple APIs via injected shims
-                             (syntax still ports; no List→Array renames)
       --offline              Use cached registry data only
-      --no-verify            Skip the final Gren compiler check
-      --no-format            Skip gren-format (also auto-skipped for volume catalogs)
       --json                 Print the final report as JSON
   -h, --help                 Show this help
   -v, --version              Show the tool version

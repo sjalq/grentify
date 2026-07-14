@@ -23,7 +23,7 @@ const {
  * Parse suite CLI flags from process.argv.
  *   --limit N | --offset N | --only a/b@v,c/d
  *   --concurrency N | -j N | --fail-fast
- *   --no-verify | --keep-out | --no-format
+ *   --keep-out
  */
 function parseSuiteArgs(argv = process.argv.slice(2)) {
   const opts = {
@@ -34,8 +34,7 @@ function parseSuiteArgs(argv = process.argv.slice(2)) {
     // Per-package hard cap for normal packages. Volume catalogs get adaptive budgets.
     timeoutMs: Number(process.env.PORT_TIMEOUT_MS || 120000),
     failFast: false,
-    noVerify: false,
-    noFormat: false,
+
     keepOut: false,
     writeProof: true,
     adaptiveTimeout: true,
@@ -49,8 +48,6 @@ function parseSuiteArgs(argv = process.argv.slice(2)) {
       opts.concurrency = Number(argv[++i]);
     else if (a === "--timeout-ms") opts.timeoutMs = Number(argv[++i]);
     else if (a === "--fail-fast") opts.failFast = true;
-    else if (a === "--no-verify") opts.noVerify = true;
-    else if (a === "--no-format") opts.noFormat = true;
     else if (a === "--keep-out") opts.keepOut = true;
     else if (a === "--no-proof") opts.writeProof = false;
     else if (a === "--no-adaptive-timeout") opts.adaptiveTimeout = false;
@@ -77,8 +74,6 @@ function printHelp() {
   --timeout-ms N     base per-package timeout (default 120000; volume packages adapt)
   --no-adaptive-timeout  disable volume adaptive timeouts
   --fail-fast        stop scheduling after first failure
-  --no-verify        pass --no-verify to elm-to-gren (faster transform debug)
-  --no-format        pass --no-format (host also auto-skips format on volume catalogs)
   --keep-out         do not wipe outDir before run
   --no-proof         never write LAST_RUN.json (always true for filtered runs)
 `);
@@ -130,7 +125,6 @@ async function runSuite(options) {
   const isFullProofRun =
     mode === "full" &&
     args.writeProof &&
-    !args.noVerify &&
     filtered.kind === "full" &&
     filtered.packages.length === packages.length;
 
@@ -193,13 +187,7 @@ async function runSuite(options) {
       : args.timeoutMs;
 
     const cliArgs = [cli, input, "--out", out, "--cache", cacheDir, ...platformArg];
-    if (args.noVerify) {
-      cliArgs.push("--no-verify");
-    }
-    // Host auto-skips format for volume packages; suite may force skip for all.
-    if (args.noFormat || (volume && volume.volume)) {
-      cliArgs.push("--no-format");
-    }
+    // Host always verifies and formats (volume packages auto-skip format).
 
     const started = Date.now();
     const volNote =
@@ -222,7 +210,7 @@ async function runSuite(options) {
     if (result.status === 0 && fs.existsSync(reportPath)) {
       try {
         const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
-        verified = args.noVerify ? true : report.verified === true;
+        verified = report.verified === true;
       } catch {
         verified = false;
       }
@@ -315,7 +303,6 @@ async function runSuite(options) {
     finishedAt,
     wallMs,
     concurrency: args.concurrency,
-    noVerify: args.noVerify,
     total: results.length,
     passed: results.filter((r) => r.status === "ok").length,
     failed,

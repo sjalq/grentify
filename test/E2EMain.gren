@@ -192,15 +192,11 @@ runScenario runtime spec =
             , outputDirectory = Path.toPosixString output
             , cacheDirectory = Path.toPosixString cache
             , platform = Cli.Auto
-            , namespace = Nothing
             , mappingFiles = []
             , offline = False
-            , verify = True
-            , format = True
             , json = False
             , namespaceModules = False
             , vendor = False
-            , shim = False
             }
     in
     Orchestrator.run runtime.context runtime.permissions options

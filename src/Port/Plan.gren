@@ -11,7 +11,6 @@ names, platforms, dependency requirements, and package manifests.
 -}
 
 import Cli
-import Compiler.PackageName as GrenPackageName
 import Compiler.Platform as CompilerPlatform exposing (Platform)
 import Dict exposing (Dict)
 import Elm.Manifest exposing (Manifest)
@@ -38,8 +37,10 @@ type alias LocalDependency =
     }
 
 
-targetName : Maybe String -> Registry -> Manifest -> Result Error String
-targetName namespace registry manifest =
+{-| Gren package name: catalog mapping if present, else the Elm coordinate.
+-}
+targetName : Registry -> Manifest -> Result Error String
+targetName registry manifest =
     let
         sourceName =
             PackageName.toString manifest.name
@@ -49,81 +50,7 @@ targetName namespace registry manifest =
             Ok (Mapping.mappingGrenPackage mapping)
 
         Nothing ->
-            when namespace is
-                Nothing ->
-                    Ok sourceName
-
-                Just author ->
-                    namespacedTarget author manifest
-
-
-namespacedTarget : String -> Manifest -> Result Error String
-namespacedTarget namespace manifest =
-    let
-        normalizedNamespace =
-            String.toLower namespace
-
-        project =
-            encodeSourceSegment (String.toLower (PackageName.author manifest.name))
-                ++ "zp"
-                ++ encodeSourceSegment (String.toLower (PackageName.project manifest.name))
-
-        target =
-            normalizedNamespace ++ "/" ++ project
-    in
-    if String.isEmpty normalizedNamespace
-        || String.count normalizedNamespace > 40
-        || not (validGrenSegment normalizedNamespace)
-    then
-        Err (PortError.create "INVALID_NAMESPACE" ("Invalid Gren namespace " ++ namespace ++ "."))
-
-    else if String.count project > 40 then
-        Err <|
-            PortError.create "INVALID_PACKAGE_NAME"
-                ("Namespaced target project " ++ project ++ " exceeds Gren's 40-character package segment limit.")
-
-    else if GrenPackageName.fromString target == Nothing then
-        Err (PortError.create "INVALID_PACKAGE_NAME" ("Invalid namespaced Gren package " ++ target ++ "."))
-
-    else
-        Ok target
-
-
-{-| Encode both Elm package segments into one reversible Gren project segment.
-`z` is escaped as `zz`, `-` as `zh`, and the otherwise impossible `zp`
-sequence separates author from project. This avoids namespace collisions such
-as `a-b/c` versus `a/b-c` without using Gren-invalid consecutive hyphens.
--}
-encodeSourceSegment : String -> String
-encodeSourceSegment segment =
-    segment
-        |> String.toArray
-        |> Array.map
-            (\character ->
-                when character is
-                    'z' ->
-                        "zz"
-
-                    '-' ->
-                        "zh"
-
-                    _ ->
-                        String.fromArray [ character ]
-            )
-        |> String.join ""
-
-
-validGrenSegment : String -> Bool
-validGrenSegment segment =
-    when Array.first (String.toArray segment) is
-        Nothing ->
-            False
-
-        Just first ->
-            Char.isLower first
-                && Array.all (\character -> Char.isLower character || Char.isDigit character || character == '-') (String.toArray segment)
-                && not (String.endsWith "-" segment)
-                && not (String.contains "--" segment)
+            Ok sourceName
 
 
 inferPackagePlatform

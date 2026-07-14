@@ -30,7 +30,6 @@ import Json.Encode as Encode
 import Mapping.Adapter as Adapter exposing (AdapterError(..))
 import Mapping.Load
 import Mapping.Registry as MappingRegistry
-import Mapping.Shim as Shim
 import Mapping.Types as Mapping exposing (MappingKind(..), Registry)
 import Math
 import Node
@@ -124,16 +123,7 @@ run context permissions cliOptions =
                 in
                 Mapping.Load.load permissions.fileSystem assets.mappings overlays
                     |> Task.andThen
-                        (\loadedRegistry ->
-                            let
-                                -- Strategy A: keep List/Tuple as Elm APIs via injected shims.
-                                registry =
-                                    if cliOptions.shim then
-                                        Shim.applyRegistry loadedRegistry
-
-                                    else
-                                        loadedRegistry
-                            in
+                        (\registry ->
                             Acquire.parseInput context.platform context.workingDirectory context.homeDirectory cliOptions.input
                                 |> resultTask identity
                                 |> Task.andThen (Acquire.acquire context.platform permissions acquireOptions)
@@ -153,10 +143,8 @@ run context permissions cliOptions =
                                                         |> Task.andThen
                                                             (\sources ->
                                                                 let
-                                                                    -- Feature 2: overlay a synthetic `M -> Elm.M` module
-                                                                    -- mapping for every ported module so the transform
-                                                                    -- pass rewrites intra-package cross-module imports and
-                                                                    -- qualified references automatically.
+                                                                    -- `add`: overlay synthetic `M -> Elm.M` so transform
+                                                                    -- rewrites cross-module imports/refs under Elm. prefix.
                                                                     transformRegistry =
                                                                         if cliOptions.namespaceModules then
                                                                             overlayPortedModules sources registryForRoot
@@ -164,7 +152,7 @@ run context permissions cliOptions =
                                                                         else
                                                                             registryForRoot
                                                                 in
-                                                                transformSources context permissions cache cliOptions.offline cliOptions.namespaceModules cliOptions.shim assets transformRegistry resolution sources
+                                                                transformSources context permissions cache cliOptions.offline cliOptions.namespaceModules assets transformRegistry resolution sources
                                                             )
                                                         |> Task.andThen
                                                             (\drafts ->
@@ -311,13 +299,12 @@ transformSources
     -> Path
     -> Bool
     -> Bool
-    -> Bool
     -> Assets
     -> Registry
     -> Resolution
     -> Dict String Acquire.PackageSource
     -> Task Error (Dict String Draft)
-transformSources context permissions cache offline namespaceModules shim assets registry resolution sources =
+transformSources context permissions cache offline namespaceModules assets registry resolution sources =
     let
         elmHome =
             Path.join [ cache, Path.fromPosixString "elm-home" ]
@@ -349,7 +336,7 @@ transformSources context permissions cache offline namespaceModules shim assets 
                                                         ("Acquired source set is missing " ++ key ++ ".")
 
                                             Just source ->
-                                                transformOne context permissions elmHome reviewAppCache offline namespaceModules shim assets registry source
+                                                transformOne context permissions elmHome reviewAppCache offline namespaceModules assets registry source
                                                     |> Task.map (\draft -> Dict.set key draft drafts)
                                     )
                         )
@@ -364,12 +351,11 @@ transformOne
     -> Path
     -> Bool
     -> Bool
-    -> Bool
     -> Assets
     -> Registry
     -> Acquire.PackageSource
     -> Task Error Draft
-transformOne context permissions elmHome reviewAppCache offline namespaceModules shim assets registry source =
+transformOne context permissions elmHome reviewAppCache offline namespaceModules assets registry source =
     Task.map2
         (\extraction sourceFiles -> { extraction = extraction, sourceFiles = sourceFiles })
         (Review.Runner.run context.platform permissions.childProcess
@@ -405,15 +391,7 @@ transformOne context permissions elmHome reviewAppCache offline namespaceModules
                             )
 
                 else
-                    let
-                        compatRequirements =
-                            if shim then
-                                Shim.filterCompatRequirements transformed.requiredAdapters
-
-                            else
-                                transformed.requiredAdapters
-                    in
-                    Adapter.generateFromRequirements compatRequirements
+                    Adapter.generateFromRequirements transformed.requiredAdapters
                         |> Result.mapError adapterFailure
                         |> Result.andThen
                             (\adapters ->
@@ -421,8 +399,8 @@ transformOne context permissions elmHome reviewAppCache offline namespaceModules
                                     |> Result.map
                                         (\detectedPlatform ->
                                             let
-                                                -- Feature 2: prefix only ported source modules with Elm.;
-                                                -- compatibility adapters and List/Tuple shims are left alone.
+                                                -- `add`: prefix only ported source modules with Elm.;
+                                                -- Compat adapters stay unprefixed.
                                                 portedModules =
                                                     if namespaceModules then
                                                         Array.map namespaceGeneratedModule transformed.modules
@@ -430,15 +408,8 @@ transformOne context permissions elmHome reviewAppCache offline namespaceModules
                                                     else
                                                         transformed.modules
 
-                                                withCompat =
-                                                    Array.append portedModules adapters
-
                                                 allModules =
-                                                    if shim then
-                                                        Array.append withCompat Shim.modules
-
-                                                    else
-                                                        withCompat
+                                                    Array.append portedModules adapters
                                             in
                                             { source = source
                                             , modules = allModules
@@ -537,7 +508,7 @@ planOne cliOptions registry resolution drafts name state =
             in
             Result.map2
                 (\grenName platform -> { grenName = grenName, platform = platform })
-                (Plan.targetName cliOptions.namespace registry draft.source.manifest)
+                (Plan.targetName registry draft.source.manifest)
                 (Plan.inferPackagePlatform
                     cliOptions.platform
                     (key == rootKey)
@@ -634,8 +605,6 @@ finalize context permissions cliOptions output overlayPaths assets registry reso
                                     rootIdentity
                                     planned
                                     staging
-                                    cliOptions.verify
-                                    cliOptions.format
                         in
                         Workspace.emit
                             { fileSystem = permissions.fileSystem }
@@ -657,7 +626,7 @@ finalize context permissions cliOptions output overlayPaths assets registry reso
                     )
 
 
-{-| Pretty-print every emitted package (unless volume/no-format), then optionally `gren docs`.
+{-| Pretty-print every emitted package (skip volume catalogs), then verify with Gren.
 -}
 prepareStaging
     : Node.Platform
@@ -667,18 +636,12 @@ prepareStaging
     -> Plan.Identity
     -> Planned
     -> Path
-    -> Bool
-    -> Bool
     -> Task Error {}
-prepareStaging platform fileSystem permission assets rootIdentity planned staging verify formatEnabled =
-    formatStaging platform fileSystem permission assets.formatExecutable rootIdentity planned staging formatEnabled
+prepareStaging platform fileSystem permission assets rootIdentity planned staging =
+    formatStaging platform fileSystem permission assets.formatExecutable rootIdentity planned staging
         |> Task.andThen
             (\_ ->
-                if verify then
-                    verifyStaging platform permission assets.grenExecutable rootIdentity planned staging
-
-                else
-                    Task.succeed {}
+                verifyStaging platform permission assets.grenExecutable rootIdentity planned staging
             )
 
 
@@ -690,9 +653,8 @@ formatStaging
     -> Plan.Identity
     -> Planned
     -> Path
-    -> Bool
     -> Task Error {}
-formatStaging platform fileSystem permission formatExecutable rootIdentity planned staging formatEnabled =
+formatStaging platform fileSystem permission formatExecutable rootIdentity planned staging =
     planned.packages
         |> Array.foldl
             (\package pending ->
@@ -703,13 +665,13 @@ formatStaging platform fileSystem permission formatExecutable rootIdentity plann
                                 dir =
                                     packageDirectory rootIdentity planned staging package
                             in
-                            maybeFormatPackage platform fileSystem permission formatExecutable dir formatEnabled
+                            maybeFormatPackage platform fileSystem permission formatExecutable dir
                         )
             )
             (Task.succeed {})
 
 
-{-| Format unless disabled or the package is a volume catalog (icon/CSS dumps).
+{-| Format unless the package is a volume catalog (icon/CSS dumps).
 -}
 maybeFormatPackage
     : Node.Platform
@@ -717,26 +679,21 @@ maybeFormatPackage
     -> ChildProcess.Permission
     -> String
     -> Path
-    -> Bool
     -> Task Error {}
-maybeFormatPackage platform fileSystem permission formatExecutable packageDir formatEnabled =
-    if not formatEnabled then
-        Task.succeed {}
+maybeFormatPackage platform fileSystem permission formatExecutable packageDir =
+    Volume.scanPackageDirectory fileSystem packageDir
+        |> Task.andThen
+            (\metrics ->
+                if Volume.shouldSkipFormat metrics then
+                    Task.succeed {}
 
-    else
-        Volume.scanPackageDirectory fileSystem packageDir
-            |> Task.andThen
-                (\metrics ->
-                    if Volume.shouldSkipFormat metrics then
-                        Task.succeed {}
-
-                    else
-                        Format.formatPackage platform
-                            permission
-                            { packageDirectory = packageDir
-                            , formatExecutable = formatExecutable
-                            }
-                )
+                else
+                    Format.formatPackage platform
+                        permission
+                        { packageDirectory = packageDir
+                        , formatExecutable = formatExecutable
+                        }
+            )
 
 
 verifyStaging : Node.Platform -> ChildProcess.Permission -> String -> Plan.Identity -> Planned -> Path -> Task Error {}
@@ -1006,7 +963,7 @@ encodeReport context cliOptions output rootIdentity compiler planned =
         , { key = "toolVersion", value = Encode.string context.toolVersion }
         , { key = "compilerVersion", value = Encode.string compiler }
         , { key = "output", value = Encode.string (Path.toPosixString output) }
-        , { key = "verified", value = Encode.bool cliOptions.verify }
+        , { key = "verified", value = Encode.bool True }
         , { key = "packages", value = Encode.array encodePackage planned.packages }
         , { key = "diagnostics", value = Encode.array encodeDiagnostic planned.diagnostics }
         ]
@@ -1387,8 +1344,6 @@ finalizeAdd context permissions cliOptions output assets resolution planned =
                                                 assets
                                                 packagesRoot
                                                 vendored
-                                                cliOptions.verify
-                                                cliOptions.format
                                         )
                                     |> Task.andThen
                                         (\_ ->
@@ -1412,10 +1367,8 @@ writeVendored
     -> Assets
     -> Path
     -> Array Workspace.Package
-    -> Bool
-    -> Bool
     -> Task Error {}
-writeVendored context permissions assets packagesRoot packages verify formatEnabled =
+writeVendored context permissions assets packagesRoot packages =
     Array.foldl
         (\package pending ->
             pending
@@ -1447,26 +1400,21 @@ writeVendored context permissions assets packagesRoot packages verify formatEnab
                                                 permissions.childProcess
                                                 assets.formatExecutable
                                                 directory
-                                                formatEnabled
                                         )
                                     |> Task.andThen
                                         (\_ ->
-                                            if verify then
-                                                Verify.Package.verify context.platform
-                                                    permissions.childProcess
-                                                    { packageDirectory = directory
-                                                    , grenExecutable = assets.grenExecutable
-                                                    , isApplication =
-                                                        when package.manifest.kind is
-                                                            Manifest.ApplicationKind ->
-                                                                True
+                                            Verify.Package.verify context.platform
+                                                permissions.childProcess
+                                                { packageDirectory = directory
+                                                , grenExecutable = assets.grenExecutable
+                                                , isApplication =
+                                                    when package.manifest.kind is
+                                                        Manifest.ApplicationKind ->
+                                                            True
 
-                                                            Manifest.PackageKind ->
-                                                                False
-                                                    }
-
-                                            else
-                                                Task.succeed {}
+                                                        Manifest.PackageKind ->
+                                                            False
+                                                }
                                         )
                     )
         )

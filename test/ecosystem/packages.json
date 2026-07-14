@@ -1,7 +1,9 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "role": "candidate-suite",
+  "notProof": "This file is a CANDIDATE list only. Package count here is not a success count. The only proof of successful ports is .test-cache/ecosystem-proof/LAST_RUN.json produced by npm run test:ecosystem / test:ecosystem-browser on the current git commit. Query with: npm run ecosystem:status",
   "methodology": "reverse-dependency-popularity",
-  "selection": "Most popular qualifying packages by reverse-dependency count (how many published Elm packages list this package in direct dependencies of their latest elm.json). Pure: direct deps \u2286 {elm/core, elm/json, elm/time, elm/random, elm/bytes, elm/regex, elm/url, elm/parser}. Browser: direct deps \u2286 pure set + {elm/browser, elm/html, elm/svg, elm/virtual-dom, elm/http, elm/file} and \u22651 browser-surface dep. Platform packages (elm/*, elm-explorations/*) excluded as subjects. Failures (kernel/ports/GLSL/mapping/etc.) skipped in popularity order until 200 verified each. No pure/browser overlap.",
+  "selection": "Most popular qualifying packages by reverse-dependency count. When the catalog was assembled, failures (kernel/ports/GLSL/timeouts/etc.) were skipped in popularity order so the list could grow; that historical selection is NOT a claim that HEAD still ports them. Re-run the suite after transform changes.",
   "target": 200,
   "platformSet": [
     "elm/bytes",
@@ -13,6 +15,8 @@
     "elm/time",
     "elm/url"
   ],
+  "suiteId": "pure",
+  "platform": "common",
   "packages": [
     {
       "name": "elm-community/list-extra",
@@ -814,12 +818,5 @@
       "name": "mpizenberg/elm-placeholder-pkg",
       "version": "1.0.0"
     }
-  ],
-  "meta": {
-    "pureVerified": 200,
-    "browserVerified": 200,
-    "pureCandidates": 620,
-    "browserCandidates": 344,
-    "updatedAt": "2026-07-12T14:51:33.568723Z"
-  }
+  ]
 }

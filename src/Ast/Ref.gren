@@ -1,7 +1,4 @@
-module Ast.Ref exposing
-    ( addImportAliasKeys
-    , qualifiedName
-    )
+module Ast.Ref exposing ( addImportAliasKeys, qualifiedName )
 
 {-| Shared name resolution for host AST laws.
 
@@ -14,10 +11,10 @@ This is the same collision class as `Execute.Continue` vs `Types.Continue` and
 `Deque` vs `Internal.Deque`.
 -}
 
-import Array exposing (Array)
-import Ast.Types exposing (Import, NamedRef)
-import Dict exposing (Dict)
-import Maybe exposing (Maybe(..))
+import Array exposing ( Array )
+import Ast.Types exposing ( Import, NamedRef )
+import Dict exposing ( Dict )
+import Maybe exposing ( Maybe(..) )
 import String
 
 
@@ -41,7 +38,11 @@ qualifiedName localModule ref =
 `source` is the package-wide map (`Module.Name` → value) used to discover keys;
 `base` is the starting index (often `source`, or local shorts ∪ source).
 -}
-addImportAliasKeys : Array Import -> Dict String a -> Dict String a -> Dict String a
+addImportAliasKeys :
+    Array Import
+    -> Dict String a
+    -> Dict String a
+    -> Dict String a
 addImportAliasKeys imports source base =
     Array.foldl
         (\import_ acc ->
@@ -59,15 +60,11 @@ addImportAliasKeys imports source base =
                             if String.startsWith prefix key then
                                 let
                                     short =
-                                        String.dropFirst (String.count prefix) key
+                                        String.dropFirst (String.count prefix)
+                                            key
                                 in
-                                Dict.set (aliasName ++ "." ++ short) value inner
+                                Dict.set (aliasName ++ "." ++ short) value
+                                    inner
 
                             else
-                                inner
-                        )
-                        acc
-                        source
-        )
-        base
-        imports
+                                inner) acc source) base imports

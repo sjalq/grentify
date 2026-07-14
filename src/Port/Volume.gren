@@ -1,0 +1,133 @@
+module Port.Volume exposing
+    ( Metrics
+    , empty
+    , isVolume
+    , scanPackageDirectory
+    , shouldSkipFormat
+    , summary
+    )
+
+{-| Detect **volume catalog** packages (icon packs, CSS class dumps).
+
+These are finite O(size) work, not hangs. Pretty-printing them is pure cost for
+suite proof (`gren` verify does not need format). Thresholds match
+`docs/PHASE-ECOSYSTEM-HARDENING.md` scale policy.
+-}
+
+import Array exposing (Array)
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Maybe exposing (Maybe(..))
+import Port.Error as PortError exposing (Error)
+import String
+import System.File
+import Task exposing (Task)
+
+
+type alias Metrics =
+    { modules : Int
+    , totalBytes : Int
+    , maxModuleBytes : Int
+    }
+
+
+empty : Metrics
+empty =
+    { modules = 0
+    , totalBytes = 0
+    , maxModuleBytes = 0
+    }
+
+
+{-| Volume package if any threshold is hit (bytes proxy for LOC).
+-}
+isVolume : Metrics -> Bool
+isVolume m =
+    m.maxModuleBytes
+        >= 100000
+        || m.modules
+        >= 200
+        || m.totalBytes
+        >= 400000
+
+
+{-| Skip gren-format + collapse for volume catalogs.
+-}
+shouldSkipFormat : Metrics -> Bool
+shouldSkipFormat =
+    isVolume
+
+
+summary : Metrics -> String
+summary m =
+    String.fromInt m.modules
+        ++ " modules, "
+        ++ String.fromInt m.totalBytes
+        ++ " bytes, max module "
+        ++ String.fromInt m.maxModuleBytes
+        ++ " bytes"
+
+
+{-| Scan package root for `.elm` / `.gren` under `src/` (or whole tree if no src).
+-}
+scanPackageDirectory : FileSystem.Permission -> Path -> Task Error Metrics
+scanPackageDirectory permission packageRoot =
+    let
+        src =
+            Path.join [ packageRoot, Path.fromPosixString "src" ]
+    in
+    System.File.exists permission src
+        |> Task.andThen
+            (\hasSrc ->
+                let
+                    root =
+                        if hasSrc then
+                            src
+
+                        else
+                            packageRoot
+                in
+                System.File.listFilesRecursively permission root
+                    |> Task.andThen (foldSourceFiles permission)
+                    |> Task.onError (\_ -> Task.succeed empty)
+            )
+
+
+foldSourceFiles : FileSystem.Permission -> Array Path -> Task Error Metrics
+foldSourceFiles permission files =
+    Array.foldl
+        (\path pending ->
+            pending
+                |> Task.andThen
+                    (\acc ->
+                        if isSourcePath path then
+                            FileSystem.metadata permission { resolveLink = True } path
+                                |> Task.map
+                                    (\meta ->
+                                        { modules = acc.modules + 1
+                                        , totalBytes = acc.totalBytes + meta.byteSize
+                                        , maxModuleBytes =
+                                            if meta.byteSize > acc.maxModuleBytes then
+                                                meta.byteSize
+
+                                            else
+                                                acc.maxModuleBytes
+                                        }
+                                    )
+                                |> Task.onError (\_ -> Task.succeed acc)
+
+                        else
+                            Task.succeed acc
+                    )
+        )
+        (Task.succeed empty)
+        files
+
+
+isSourcePath : Path -> Bool
+isSourcePath path =
+    let
+        name =
+            Path.toPosixString path
+    in
+    String.endsWith ".elm" name || String.endsWith ".gren" name

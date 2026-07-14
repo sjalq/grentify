@@ -196,6 +196,7 @@ runScenario runtime spec =
             , mappingFiles = []
             , offline = False
             , verify = True
+            , format = True
             , json = False
             , namespaceModules = False
             , vendor = False

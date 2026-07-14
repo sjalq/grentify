@@ -1,7 +1,4 @@
-module Ast.CtorLaw exposing
-    ( apply
-    , collectFromFile
-    )
+module Ast.CtorLaw exposing ( apply, collectFromFile )
 
 {-| Gren ctor law: multi-arg ADT constructors take one record payload.
 
@@ -23,7 +20,7 @@ imported ctors under bare short names — `Execute.Continue` (1-arg) and
 `Types.Continue` (2-arg) must not share a `Continue` key.
 -}
 
-import Array exposing (Array)
+import Array exposing ( Array )
 import Ast.Ref as Ref
 import Ast.Types exposing
     ( Declaration(..)
@@ -34,8 +31,8 @@ import Ast.Types exposing
     , Pattern(..)
     )
 import Ast.Walk as Walk
-import Dict exposing (Dict)
-import Maybe exposing (Maybe(..))
+import Dict exposing ( Dict )
+import Maybe exposing ( Maybe(..) )
 
 
 type alias ArityMap =
@@ -61,19 +58,14 @@ collectFromFile file =
                                     Array.length ctor.arguments
                             in
                             if n >= 2 then
-                                Dict.set (moduleName ++ "." ++ ctor.name) n inner
+                                Dict.set (moduleName ++ "." ++ ctor.name) n
+                                    inner
 
                             else
-                                inner
-                        )
-                        acc
-                        custom.constructors
+                                inner) acc custom.constructors
 
                 _ ->
-                    acc
-        )
-        Dict.empty
-        file.declarations
+                    acc) Dict.empty file.declarations
 
 
 apply : ArityMap -> File -> File
@@ -97,10 +89,11 @@ apply packageArities file =
                 buildHelpers index occupied needed
 
             rewritten =
-                Array.map (rewriteDeclaration index helpers.lookup) file.declarations
+                Array.map (rewriteDeclaration index helpers.lookup)
+                    file.declarations
         in
-        { file
-            | declarations = Array.foldl Array.pushLast rewritten helpers.decls
+        { file | declarations =
+            Array.foldl Array.pushLast rewritten helpers.decls
         }
 
 
@@ -143,19 +136,14 @@ collectOccupiedNames declarations =
                     Dict.set aliasDecl.name {} acc
 
                 DeclCustomType custom ->
-                    Array.foldl
-                        (\ctor inner -> Dict.set ctor.name {} inner)
-                        (Dict.set custom.name {} acc)
-                        custom.constructors
+                    Array.foldl (\ctor inner -> Dict.set ctor.name {} inner)
+                        (Dict.set custom.name {} acc) custom.constructors
 
                 DeclPort signature ->
                     Dict.set signature.name {} acc
 
                 _ ->
-                    acc
-        )
-        Dict.empty
-        declarations
+                    acc) Dict.empty declarations
 
 
 {-| Keys of multi-arg ctors that appear in value position (need a helper).
@@ -172,13 +160,14 @@ collectNeededHelpers index declarations =
                     collectNeededExpr index expression acc
 
                 _ ->
-                    acc
-        )
-        Dict.empty
-        declarations
+                    acc) Dict.empty declarations
 
 
-collectNeededExpr : ArityIndex -> Expr -> Dict String NamedRef -> Dict String NamedRef
+collectNeededExpr :
+    ArityIndex
+    -> Expr
+    -> Dict String NamedRef
+    -> Dict String NamedRef
 collectNeededExpr index expr acc =
     let
         withSelf =
@@ -200,7 +189,11 @@ collectNeededExpr index expr acc =
     Walk.foldExprChildren (collectNeededExpr index) withSelf expr
 
 
-noteNeeded : ArityIndex -> NamedRef -> Dict String NamedRef -> Dict String NamedRef
+noteNeeded :
+    ArityIndex
+    -> NamedRef
+    -> Dict String NamedRef
+    -> Dict String NamedRef
 noteNeeded index ref acc =
     when lookupArity index ref is
         Just _ ->
@@ -210,7 +203,11 @@ noteNeeded index ref acc =
             acc
 
 
-buildHelpers : ArityIndex -> Dict String {} -> Dict String NamedRef -> HelperBuild
+buildHelpers :
+    ArityIndex
+    -> Dict String {}
+    -> Dict String NamedRef
+    -> HelperBuild
 buildHelpers index occupied needed =
     Dict.foldl
         (\key ref acc ->
@@ -232,9 +229,7 @@ buildHelpers index occupied needed =
                     { decls = Array.pushLast decl acc.decls
                     , lookup = Dict.set key name acc.lookup
                     , occupied = Dict.set name {} acc.occupied
-                    }
-        )
-        { decls = [], lookup = Dict.empty, occupied = occupied }
+                    }) { decls = [], lookup = Dict.empty, occupied = occupied }
         needed
         |> (\built -> { decls = built.decls, lookup = built.lookup })
 
@@ -278,7 +273,8 @@ helperDeclaration name ref arity =
             Array.map PatVar argNames
 
         argVars =
-            Array.map (\n -> ExprVar { moduleName = Nothing, name = n }) argNames
+            Array.map (\n -> ExprVar { moduleName = Nothing, name = n })
+                argNames
 
         body =
             ExprApplication (Array.pushFirst (ExprVar ref) argVars)
@@ -290,7 +286,6 @@ helperDeclaration name ref arity =
         , arguments = args
         , expression = body
         }
-
 
 -- REWRITE -------------------------------------------------------------------
 
@@ -336,18 +331,20 @@ rewriteApplication index helpers parts =
                             -- Bare or applied multi-arg ctor → shared curried helper.
                             ExprApplication
                                 (Array.pushFirst
-                                    (ExprVar { moduleName = Nothing, name = name })
-                                    rewrittenArgs
-                                )
+                                    (ExprVar
+                                        { moduleName = Nothing, name = name })
+                                    rewrittenArgs)
 
                         Nothing ->
                             ExprApplication
-                                (Array.pushFirst (rewriteExpr index helpers head) rewrittenArgs)
+                                (Array.pushFirst
+                                    (rewriteExpr index helpers head)
+                                    rewrittenArgs)
 
                 _ ->
                     ExprApplication
-                        (Array.pushFirst (rewriteExpr index helpers head) rewrittenArgs)
-
+                        (Array.pushFirst (rewriteExpr index helpers head)
+                            rewrittenArgs)
 
 -- LOOKUP --------------------------------------------------------------------
 

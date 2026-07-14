@@ -1,4 +1,4 @@
-module Ast.NameSub exposing (apply)
+module Ast.NameSub exposing ( apply )
 
 {-| Catalog-driven name substitution on a resolved AST.
 
@@ -8,7 +8,7 @@ implicit module aliases (`Platform.Cmd` → `Cmd`, `Platform.Sub` → `Sub`),
 matching the edit-path seed in `Transform.Pipeline.collectMappingEdits`.
 -}
 
-import Array exposing (Array)
+import Array exposing ( Array )
 import Ast.Types as Types exposing
     ( Declaration(..)
     , Exposing(..)
@@ -25,25 +25,225 @@ import Ast.Types as Types exposing
     , TypeAnn(..)
     )
 import Ast.Walk as Walk
-import Dict exposing (Dict)
+import Dict exposing ( Dict )
 import Mapping.Registry as Registry
-import Mapping.Types exposing (ModuleMapping, Registry)
-import Maybe exposing (Maybe(..))
+import Mapping.Types exposing ( ModuleMapping, Registry )
+import Maybe exposing ( Maybe(..) )
 
 
 apply : Registry -> File -> File
 apply registry file =
     let
+        -- Bare names exposed from imports that remap to multi-segment Compat
+        -- targets (e.g. Expect → ElmToGren.Compat.Http.Expect) are dropped from
+        -- the exposing clause; type/value refs often stay bare (`Expect a`).
+        -- Collect those remaps before filtering so we can re-qualify bare uses.
+        bareRemaps =
+            collectBareRemaps registry file.imports
+
         withMapped =
             { file
                 | imports = Array.map (subImport registry) file.imports
-                , declarations = Array.map (subDeclaration registry) file.declarations
+                , declarations =
+                      file.declarations
+                          |> Array.map (subDeclaration registry)
+                          |> Array.map (rewriteBareRemaps bareRemaps)
                 , moduleDefinition = subModuleDef registry file.moduleDefinition
             }
     in
     -- Law: qualified refs must use the local import alias when present.
     -- `import Json.Decode as Decode` forbids `Json.Decode.field` in Gren/Elm.
     qualifyByImports withMapped
+
+
+{-| From `import Http exposing (Expect, …)`, if Expect remaps to a multi-segment
+target, map bare `"Expect"` → `{ moduleName = Just "ElmToGren.Compat.Http", name = "Expect" }`.
+-}
+collectBareRemaps : Registry -> Array Import -> Dict String NamedRef
+collectBareRemaps registry imports =
+    Array.foldl
+        (\import_ acc ->
+            when import_.exposing_ is
+                Just (ExposeExplicit items) ->
+                    Array.foldl
+                        (\item inner ->
+                            when exposedItemName item is
+                                Just { name = name, isType = isType } ->
+                                    let
+                                        target =
+                                            subSymbolName registry
+                                                (Just import_.moduleName) name
+                                                isType
+                                    in
+                                    if String.contains "." target then
+                                        let
+                                            split =
+                                                splitQualified target
+                                        in
+                                        Dict.set name
+                                            { moduleName = split.moduleName
+                                            , name = split.name
+                                            } inner
+
+                                    else
+                                        inner
+
+                                Nothing ->
+                                    inner) acc items
+
+                _ ->
+                    acc) Dict.empty imports
+
+
+exposedItemName : ExposedItem -> Maybe { name : String, isType : Bool }
+exposedItemName item =
+    when item is
+        ExposeFunction name ->
+            Just { name = name, isType = False }
+
+        ExposeTypeOrAlias name ->
+            Just { name = name, isType = True }
+
+        ExposeType { name = name } ->
+            Just { name = name, isType = True }
+
+        ExposeInfix _ ->
+            Nothing
+
+
+rewriteBareRemaps : Dict String NamedRef -> Declaration -> Declaration
+rewriteBareRemaps remaps declaration =
+    if Array.isEmpty (Dict.keys remaps) then
+        declaration
+
+    else
+        when declaration is
+            DeclFunction fn ->
+                DeclFunction
+                    { fn
+                        | signature =
+                              Maybe.map (rewriteBareSignature remaps)
+                                  fn.signature
+                        , arguments =
+                              Array.map (rewriteBarePattern remaps) fn.arguments
+                        , expression = rewriteBareExpr remaps fn.expression
+                    }
+
+            DeclAlias aliasDecl ->
+                DeclAlias
+                    { aliasDecl | typeAnnotation =
+                        rewriteBareType remaps aliasDecl.typeAnnotation
+                    }
+
+            DeclCustomType custom ->
+                DeclCustomType
+                    { custom | constructors =
+                        Array.map
+                            (\ctor ->
+                                { ctor | arguments =
+                                    Array.map (rewriteBareType remaps)
+                                        ctor.arguments
+                                }) custom.constructors
+                    }
+
+            DeclPort signature ->
+                DeclPort (rewriteBareSignature remaps signature)
+
+            DeclDestructure { pattern = pattern, expression = expression } ->
+                DeclDestructure
+                    { pattern = rewriteBarePattern remaps pattern
+                    , expression = rewriteBareExpr remaps expression
+                    }
+
+            DeclInfix ->
+                DeclInfix
+
+
+rewriteBareSignature : Dict String NamedRef -> Signature -> Signature
+rewriteBareSignature remaps signature =
+    { signature | typeAnnotation =
+        rewriteBareType remaps signature.typeAnnotation
+    }
+
+
+rewriteBareType : Dict String NamedRef -> TypeAnn -> TypeAnn
+rewriteBareType remaps typeAnn =
+    when typeAnn is
+        TypeTyped { ref = ref, arguments = args } ->
+            TypeTyped
+                { ref = rewriteBareRef remaps ref
+                , arguments = Array.map (rewriteBareType remaps) args
+                }
+
+        TypeTuple items ->
+            TypeTuple (Array.map (rewriteBareType remaps) items)
+
+        TypeRecord fields ->
+            TypeRecord
+                (Array.map
+                    (\field ->
+                        { field | typeAnnotation =
+                            rewriteBareType remaps field.typeAnnotation
+                        }) fields)
+
+        TypeGenericRecord { extension = ext, fields = fields } ->
+            TypeGenericRecord
+                { extension = ext
+                , fields =
+                    Array.map
+                        (\field ->
+                            { field | typeAnnotation =
+                                rewriteBareType remaps field.typeAnnotation
+                            }) fields
+                }
+
+        TypeFunction { left = left, right = right } ->
+            TypeFunction
+                { left = rewriteBareType remaps left
+                , right = rewriteBareType remaps right
+                }
+
+        _ ->
+            typeAnn
+
+
+rewriteBareExpr : Dict String NamedRef -> Expr -> Expr
+rewriteBareExpr remaps expr =
+    when expr is
+        ExprVar ref ->
+            ExprVar (rewriteBareRef remaps ref)
+
+        _ ->
+            Walk.mapExprChildrenWithPatterns (rewriteBareExpr remaps)
+                (rewriteBarePattern remaps) expr
+
+
+rewriteBarePattern : Dict String NamedRef -> Pattern -> Pattern
+rewriteBarePattern remaps pattern =
+    when pattern is
+        PatNamed { ref = ref, arguments = args } ->
+            PatNamed
+                { ref = rewriteBareRef remaps ref
+                , arguments = Array.map (rewriteBarePattern remaps) args
+                }
+
+        _ ->
+            Walk.mapPatternChildren (rewriteBarePattern remaps) pattern
+
+
+rewriteBareRef : Dict String NamedRef -> NamedRef -> NamedRef
+rewriteBareRef remaps ref =
+    when ref.moduleName is
+        Just _ ->
+            ref
+
+        Nothing ->
+            when Dict.get ref.name remaps is
+                Just target ->
+                    target
+
+                Nothing ->
+                    ref
 
 
 {-| Map each imported module name to the qualifier used in source (`alias` or bare module).
@@ -61,10 +261,7 @@ importQualifiers imports =
                         Nothing ->
                             import_.moduleName
             in
-            Dict.set import_.moduleName qualifier acc
-        )
-        Dict.empty
-        imports
+            Dict.set import_.moduleName qualifier acc) Dict.empty imports
 
 
 qualifyByImports : File -> File
@@ -77,8 +274,8 @@ qualifyByImports file =
         file
 
     else
-        { file
-            | declarations = Array.map (qualifyDeclaration quals) file.declarations
+        { file | declarations =
+            Array.map (qualifyDeclaration quals) file.declarations
         }
 
 
@@ -88,28 +285,26 @@ qualifyDeclaration quals declaration =
         DeclFunction fn ->
             DeclFunction
                 { fn
-                    | signature = Maybe.map (qualifySignature quals) fn.signature
+                    | signature =
+                          Maybe.map (qualifySignature quals) fn.signature
                     , arguments = Array.map (qualifyPattern quals) fn.arguments
                     , expression = qualifyExpr quals fn.expression
                 }
 
         DeclAlias aliasDecl ->
             DeclAlias
-                { aliasDecl
-                    | typeAnnotation = qualifyType quals aliasDecl.typeAnnotation
+                { aliasDecl | typeAnnotation =
+                    qualifyType quals aliasDecl.typeAnnotation
                 }
 
         DeclCustomType custom ->
             DeclCustomType
-                { custom
-                    | constructors =
-                        Array.map
-                            (\ctor ->
-                                { ctor
-                                    | arguments = Array.map (qualifyType quals) ctor.arguments
-                                }
-                            )
-                            custom.constructors
+                { custom | constructors =
+                    Array.map
+                        (\ctor ->
+                            { ctor | arguments =
+                                Array.map (qualifyType quals) ctor.arguments
+                            }) custom.constructors
                 }
 
         DeclPort signature ->
@@ -146,10 +341,9 @@ qualifyType quals typeAnn =
             TypeRecord
                 (Array.map
                     (\field ->
-                        { field | typeAnnotation = qualifyType quals field.typeAnnotation }
-                    )
-                    fields
-                )
+                        { field | typeAnnotation =
+                            qualifyType quals field.typeAnnotation
+                        }) fields)
 
         TypeGenericRecord { extension = ext, fields = fields } ->
             TypeGenericRecord
@@ -157,9 +351,9 @@ qualifyType quals typeAnn =
                 , fields =
                     Array.map
                         (\field ->
-                            { field | typeAnnotation = qualifyType quals field.typeAnnotation }
-                        )
-                        fields
+                            { field | typeAnnotation =
+                                qualifyType quals field.typeAnnotation
+                            }) fields
                 }
 
         TypeFunction { left = left, right = right } ->
@@ -192,10 +386,8 @@ qualifyExpr quals expr =
             ExprVar (qualifyRef quals ref)
 
         _ ->
-            Walk.mapExprChildrenWithPatterns
-                (qualifyExpr quals)
-                (qualifyPattern quals)
-                expr
+            Walk.mapExprChildrenWithPatterns (qualifyExpr quals)
+                (qualifyPattern quals) expr
 
 
 qualifyRef : Dict String String -> NamedRef -> NamedRef
@@ -219,23 +411,24 @@ qualifyRef quals ref =
 
 subModuleDef : Registry -> ModuleDef -> ModuleDef
 subModuleDef registry moduleDef =
-    { moduleDef
-        | exposing_ = subExposing registry Nothing moduleDef.exposing_
-    }
+    { moduleDef | exposing_ = subExposing registry Nothing moduleDef.exposing_ }
 
 
 subImport : Registry -> Import -> Import
 subImport registry import_ =
     when Registry.moduleMappingFor import_.moduleName registry is
         Nothing ->
-            { import_
-                | exposing_ = Maybe.map (subExposing registry (Just import_.moduleName)) import_.exposing_
+            { import_ | exposing_ =
+                Maybe.map (subExposing registry (Just import_.moduleName))
+                    import_.exposing_
             }
 
         Just mapping ->
             { moduleName = mapping.target
             , alias = import_.alias
-            , exposing_ = Maybe.map (subExposing registry (Just import_.moduleName)) import_.exposing_
+            , exposing_ =
+                Maybe.map (subExposing registry (Just import_.moduleName))
+                    import_.exposing_
             }
 
 
@@ -247,7 +440,8 @@ subExposing registry sourceModule exposing_ =
 
         ExposeExplicit items ->
             ExposeExplicit
-                (Array.mapAndKeepJust (subExposedItem registry sourceModule) items)
+                (Array.mapAndKeepJust (subExposedItem registry sourceModule)
+                    items)
 
 
 subExposedItem : Registry -> Maybe String -> ExposedItem -> Maybe ExposedItem
@@ -294,8 +488,7 @@ subExposedItem registry sourceModule item =
                     (ExposeType
                         { name = target
                         , open = open
-                        }
-                    )
+                        })
 
 
 subDeclaration : Registry -> Declaration -> Declaration
@@ -311,21 +504,18 @@ subDeclaration registry declaration =
 
         DeclAlias aliasDecl ->
             DeclAlias
-                { aliasDecl
-                    | typeAnnotation = subType registry aliasDecl.typeAnnotation
+                { aliasDecl | typeAnnotation =
+                    subType registry aliasDecl.typeAnnotation
                 }
 
         DeclCustomType custom ->
             DeclCustomType
-                { custom
-                    | constructors =
-                        Array.map
-                            (\ctor ->
-                                { ctor
-                                    | arguments = Array.map (subType registry) ctor.arguments
-                                }
-                            )
-                            custom.constructors
+                { custom | constructors =
+                    Array.map
+                        (\ctor ->
+                            { ctor | arguments =
+                                Array.map (subType registry) ctor.arguments
+                            }) custom.constructors
                 }
 
         DeclPort signature ->
@@ -427,10 +617,8 @@ subExpr registry expr =
                 ExprPrefix op
 
         _ ->
-            Walk.mapExprChildrenWithPatterns
-                (subExpr registry)
-                (subPattern registry)
-                expr
+            Walk.mapExprChildrenWithPatterns (subExpr registry)
+                (subPattern registry) expr
 
 
 subRef : Registry -> NamedRef -> Bool -> NamedRef
@@ -470,10 +658,14 @@ subRef registry ref isType =
                                     split =
                                         splitQualified mappedName
                                 in
-                                { moduleName = split.moduleName, name = split.name }
+                                { moduleName = split.moduleName
+                                , name = split.name
+                                }
 
                             else
-                                { moduleName = Just mapping.target, name = mappedName }
+                                { moduleName = Just mapping.target
+                                , name = mappedName
+                                }
             in
             applyImplicitModuleAlias mapped
 

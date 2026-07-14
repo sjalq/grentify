@@ -1,7 +1,9 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "role": "candidate-suite",
+  "notProof": "This file is a CANDIDATE list only. Package count here is not a success count. The only proof of successful ports is .test-cache/ecosystem-proof/LAST_RUN.json produced by npm run test:ecosystem / test:ecosystem-browser on the current git commit. Query with: npm run ecosystem:status",
   "methodology": "reverse-dependency-popularity",
-  "selection": "Most popular qualifying packages by reverse-dependency count (how many published Elm packages list this package in direct dependencies of their latest elm.json). Pure: direct deps \u2286 {elm/core, elm/json, elm/time, elm/random, elm/bytes, elm/regex, elm/url, elm/parser}. Browser: direct deps \u2286 pure set + {elm/browser, elm/html, elm/svg, elm/virtual-dom, elm/http, elm/file} and \u22651 browser-surface dep. Platform packages (elm/*, elm-explorations/*) excluded as subjects. Failures (kernel/ports/GLSL/mapping/etc.) skipped in popularity order until verified. Expanded beyond the original 200 with host law fixes (Print let-in-record, VirtualDom.Handler adapters, Http named multi-arg fields, NameSub multi-segment expose drop). No pure/browser overlap.",
+  "selection": "Most popular qualifying packages by reverse-dependency count. When the catalog was assembled, failures (kernel/ports/GLSL/timeouts/etc.) were skipped in popularity order so the list could grow; that historical selection is NOT a claim that HEAD still ports them. Re-run the suite after transform changes.",
   "target": 252,
   "platformSet": [
     "elm/browser",
@@ -19,6 +21,8 @@
     "elm/url",
     "elm/virtual-dom"
   ],
+  "suiteId": "browser",
+  "platform": "browser",
   "packages": [
     {
       "name": "mdgriffith/elm-ui",
@@ -1028,13 +1032,5 @@
       "name": "yotamDvir/elm-katex",
       "version": "2.0.2"
     }
-  ],
-  "meta": {
-    "pureVerified": 200,
-    "browserVerified": 252,
-    "pureCandidates": 620,
-    "browserCandidates": 344,
-    "updatedAt": "2026-07-13T15:29:15.958Z",
-    "note": "Host law fixes: nested ctor list peels, reserved record fields, format post-pass (type headers, ctor payloads, glued let patterns, docs), Print multi-arg layout."
-  }
+  ]
 }

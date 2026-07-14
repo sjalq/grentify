@@ -97,6 +97,7 @@ fixtureOptions platform workingDirectory fixture =
     , requestedPlatform = Cli.Auto
     , offline = False
     , verify = True
+    , format = True
     , toolVersion = "integration-test"
     }
 

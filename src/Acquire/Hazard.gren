@@ -1,8 +1,4 @@
-module Acquire.Hazard exposing
-    ( Hazard(..)
-    , detect
-    , errorToString
-    )
+module Acquire.Hazard exposing ( Hazard(..), detect, errorToString )
 
 {-| Early detection for Elm constructs that **cannot** be ported as ordinary
 Gren source. These hard-refuse acquisition:
@@ -16,7 +12,7 @@ application interop (syntax only; no JS kernel is generated). Protected
 regions (comments/strings) are skipped; real `[glsl|…|]` blocks are not.
 -}
 
-import Array exposing (Array)
+import Array exposing ( Array )
 import Char
 
 
@@ -53,20 +49,20 @@ detect source =
                 }
     in
     [ if findings.elmKernel then
-        Just ElmKernel
+            Just ElmKernel
 
-      else
-        Nothing
+        else
+            Nothing
     , if findings.effectModule then
-        Just EffectModule
+            Just EffectModule
 
-      else
-        Nothing
+        else
+            Nothing
     , if findings.glsl then
-        Just Glsl
+            Just Glsl
 
-      else
-        Nothing
+        else
+            Nothing
     ]
         |> Array.mapAndKeepJust identity
 
@@ -79,22 +75,28 @@ scanFrom characters offset scan =
 
         Just character ->
             if matchesAt characters offset lineCommentStart then
-                scanFrom characters (skipLineComment characters (offset + 2)) scan
+                scanFrom characters (skipLineComment characters (offset + 2))
+                    scan
 
             else if matchesAt characters offset blockCommentStart then
-                scanFrom characters (skipBlockComment characters (offset + 2) 1) scan
+                scanFrom characters (skipBlockComment characters (offset + 2) 1)
+                    scan
 
             else if matchesAt characters offset glslStart then
-                scanFrom characters (skipGlsl characters (offset + 6)) { scan | glsl = True }
+                scanFrom characters (skipGlsl characters (offset + 6))
+                    { scan | glsl = True }
 
             else if matchesAt characters offset multilineQuote then
-                scanFrom characters (skipMultilineString characters (offset + 3)) scan
+                scanFrom characters
+                    (skipMultilineString characters (offset + 3)) scan
 
             else if character == '"' then
-                scanFrom characters (skipQuoted characters '"' (offset + 1)) scan
+                scanFrom characters (skipQuoted characters '"' (offset + 1))
+                    scan
 
             else if character == '\'' then
-                scanFrom characters (skipQuoted characters '\'' (offset + 1)) scan
+                scanFrom characters (skipQuoted characters '\'' (offset + 1))
+                    scan
 
             else if isIdentifierStart character then
                 let
@@ -106,7 +108,8 @@ scanFrom characters offset scan =
                             |> Array.slice offset tokenEnd
                             |> String.fromArray
                 in
-                scanFrom characters tokenEnd { scan | tokens = Array.pushLast token scan.tokens }
+                scanFrom characters tokenEnd
+                    { scan | tokens = Array.pushLast token scan.tokens }
 
             else
                 scanFrom characters (offset + 1) scan
@@ -126,13 +129,13 @@ inspectTokens tokens findings =
                 updated =
                     { findings
                         | elmKernel =
-                            findings.elmKernel
-                                || first
-                                == "Elm.Kernel"
-                                || String.startsWith "Elm.Kernel." first
+                              findings.elmKernel
+                                  || first == "Elm.Kernel"
+                                  || String.startsWith "Elm.Kernel." first
                         , effectModule =
-                            findings.effectModule
-                                || (first == "effect" && next == Just "module")
+                              findings.effectModule
+                                  || (first == "effect"
+                                      && next == Just "module")
                     }
             in
             inspectTokens rest updated
@@ -254,10 +257,8 @@ isIdentifierContinuation : Char -> Bool
 isIdentifierContinuation character =
     isIdentifierStart character
         || Char.isDigit character
-        || character
-        == '\''
-        || character
-        == '.'
+        || character == '\''
+        || character == '.'
 
 
 matchesAt : Array Char -> Int -> Array Char -> Bool
@@ -265,11 +266,8 @@ matchesAt characters offset expected =
     Array.indexedFoldl
         (\relativeIndex expectedCharacter matches ->
             matches
-                && Array.get (offset + relativeIndex) characters
-                == Just expectedCharacter
-        )
-        True
-        expected
+                && Array.get (offset + relativeIndex) characters == Just
+                    expectedCharacter) True expected
 
 
 lineCommentStart : Array Char

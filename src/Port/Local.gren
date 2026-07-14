@@ -18,6 +18,7 @@ import Port.Manifest
 import Port.Mapping
 import Port.Names
 import Port.Report
+import Port.Volume as Volume
 import Review.Protocol as Review
 import Review.Runner
 import System.File
@@ -43,6 +44,7 @@ type alias Options =
     , requestedPlatform : Cli.PlatformChoice
     , offline : Bool
     , verify : Bool
+    , format : Bool
     }
 
 
@@ -234,11 +236,24 @@ emit options mappingFingerprint manifest targetName builtManifest transformed ex
                         )
 
                 validate staging =
-                    Format.formatPackage options.platform
-                        options.childProcess
-                        { packageDirectory = staging
-                        , formatExecutable = options.formatExecutable
-                        }
+                    (if not options.format then
+                        Task.succeed {}
+
+                     else
+                        Volume.scanPackageDirectory options.fileSystem staging
+                            |> Task.andThen
+                                (\metrics ->
+                                    if Volume.shouldSkipFormat metrics then
+                                        Task.succeed {}
+
+                                    else
+                                        Format.formatPackage options.platform
+                                            options.childProcess
+                                            { packageDirectory = staging
+                                            , formatExecutable = options.formatExecutable
+                                            }
+                                )
+                    )
                         |> Task.andThen
                             (\_ ->
                                 if options.verify then

@@ -27,7 +27,38 @@ type alias TestResult =
 tests : Array TestResult
 tests =
     [ reservedEscapesAroundExistingUnderscore
+    , docsRewriteKeepsCommasWhenNameUnchanged
     ]
+
+
+{-| `@docs a, b, c` must keep commas even when no reserved rename applies.
+Dropping them makes `gren docs` fail with DOCS MISTAKE on almost every package.
+-}
+docsRewriteKeepsCommasWhenNameUnchanged : TestResult
+docsRewriteKeepsCommasWhenNameUnchanged =
+    let
+        base =
+            emptyFile []
+
+        file =
+            { base
+                | comments =
+                    [ "{-| Module.\n\n@docs Response, res, andThen\n\n-}"
+                    ]
+            }
+
+        printed =
+            file
+                |> Reserved.apply
+                |> Print.print
+
+        passed =
+            String.contains "@docs Response, res, andThen" printed
+    in
+    outcome
+        "reserved @docs rewrite keeps commas when names are unchanged"
+        passed
+        ("printed:\n" ++ printed)
 
 
 {-| Elm already avoids shadowing: top-level `when`, param `when_`.

@@ -43,6 +43,7 @@ import System.File
 import System.Process
 import Task exposing (Task)
 import Format.Gren as Format
+import Port.Volume as Volume
 import Transform.Pipeline as Pipeline
 import Verify.Package
 
@@ -627,12 +628,14 @@ finalize context permissions cliOptions output overlayPaths assets registry reso
 
                             validate staging =
                                 prepareStaging context.platform
+                                    permissions.fileSystem
                                     permissions.childProcess
                                     assets
                                     rootIdentity
                                     planned
                                     staging
                                     cliOptions.verify
+                                    cliOptions.format
                         in
                         Workspace.emit
                             { fileSystem = permissions.fileSystem }
@@ -654,19 +657,21 @@ finalize context permissions cliOptions output overlayPaths assets registry reso
                     )
 
 
-{-| Pretty-print every emitted package, then optionally run `gren docs`.
+{-| Pretty-print every emitted package (unless volume/no-format), then optionally `gren docs`.
 -}
 prepareStaging
     : Node.Platform
+    -> FileSystem.Permission
     -> ChildProcess.Permission
     -> Assets
     -> Plan.Identity
     -> Planned
     -> Path
     -> Bool
+    -> Bool
     -> Task Error {}
-prepareStaging platform permission assets rootIdentity planned staging verify =
-    formatStaging platform permission assets.formatExecutable rootIdentity planned staging
+prepareStaging platform fileSystem permission assets rootIdentity planned staging verify formatEnabled =
+    formatStaging platform fileSystem permission assets.formatExecutable rootIdentity planned staging formatEnabled
         |> Task.andThen
             (\_ ->
                 if verify then
@@ -677,22 +682,61 @@ prepareStaging platform permission assets rootIdentity planned staging verify =
             )
 
 
-formatStaging : Node.Platform -> ChildProcess.Permission -> String -> Plan.Identity -> Planned -> Path -> Task Error {}
-formatStaging platform permission formatExecutable rootIdentity planned staging =
+formatStaging
+    : Node.Platform
+    -> FileSystem.Permission
+    -> ChildProcess.Permission
+    -> String
+    -> Plan.Identity
+    -> Planned
+    -> Path
+    -> Bool
+    -> Task Error {}
+formatStaging platform fileSystem permission formatExecutable rootIdentity planned staging formatEnabled =
     planned.packages
         |> Array.foldl
             (\package pending ->
                 pending
                     |> Task.andThen
                         (\_ ->
-                            Format.formatPackage platform
-                                permission
-                                { packageDirectory = packageDirectory rootIdentity planned staging package
-                                , formatExecutable = formatExecutable
-                                }
+                            let
+                                dir =
+                                    packageDirectory rootIdentity planned staging package
+                            in
+                            maybeFormatPackage platform fileSystem permission formatExecutable dir formatEnabled
                         )
             )
             (Task.succeed {})
+
+
+{-| Format unless disabled or the package is a volume catalog (icon/CSS dumps).
+-}
+maybeFormatPackage
+    : Node.Platform
+    -> FileSystem.Permission
+    -> ChildProcess.Permission
+    -> String
+    -> Path
+    -> Bool
+    -> Task Error {}
+maybeFormatPackage platform fileSystem permission formatExecutable packageDir formatEnabled =
+    if not formatEnabled then
+        Task.succeed {}
+
+    else
+        Volume.scanPackageDirectory fileSystem packageDir
+            |> Task.andThen
+                (\metrics ->
+                    if Volume.shouldSkipFormat metrics then
+                        Task.succeed {}
+
+                    else
+                        Format.formatPackage platform
+                            permission
+                            { packageDirectory = packageDir
+                            , formatExecutable = formatExecutable
+                            }
+                )
 
 
 verifyStaging : Node.Platform -> ChildProcess.Permission -> String -> Plan.Identity -> Planned -> Path -> Task Error {}
@@ -1336,7 +1380,16 @@ finalizeAdd context permissions cliOptions output assets resolution planned =
 
                             Ok updatedManifest ->
                                 System.File.ensureDirectory permissions.fileSystem packagesRoot
-                                    |> Task.andThen (\_ -> writeVendored context permissions assets packagesRoot vendored cliOptions.verify)
+                                    |> Task.andThen
+                                        (\_ ->
+                                            writeVendored context
+                                                permissions
+                                                assets
+                                                packagesRoot
+                                                vendored
+                                                cliOptions.verify
+                                                cliOptions.format
+                                        )
                                     |> Task.andThen
                                         (\_ ->
                                             System.File.writeText permissions.fileSystem manifestPath updatedManifest
@@ -1353,8 +1406,16 @@ finalizeAdd context permissions cliOptions output assets resolution planned =
                     )
 
 
-writeVendored : Context -> Permissions -> Assets -> Path -> Array Workspace.Package -> Bool -> Task Error {}
-writeVendored context permissions assets packagesRoot packages verify =
+writeVendored
+    : Context
+    -> Permissions
+    -> Assets
+    -> Path
+    -> Array Workspace.Package
+    -> Bool
+    -> Bool
+    -> Task Error {}
+writeVendored context permissions assets packagesRoot packages verify formatEnabled =
     Array.foldl
         (\package pending ->
             pending
@@ -1381,11 +1442,12 @@ writeVendored context permissions assets packagesRoot packages verify =
                                     |> Task.andThen (\_ -> PackageEmit.write permissions.fileSystem directory prepared)
                                     |> Task.andThen
                                         (\_ ->
-                                            Format.formatPackage context.platform
+                                            maybeFormatPackage context.platform
+                                                permissions.fileSystem
                                                 permissions.childProcess
-                                                { packageDirectory = directory
-                                                , formatExecutable = assets.formatExecutable
-                                                }
+                                                assets.formatExecutable
+                                                directory
+                                                formatEnabled
                                         )
                                     |> Task.andThen
                                         (\_ ->

@@ -1,4 +1,4 @@
-module Ast.Print exposing (print)
+module Ast.Print exposing ( print )
 
 {-| Pretty-print a resolved, name-substituted AST as Gren source.
 
@@ -9,7 +9,7 @@ Phase 1 structural lowers:
 - list cons already rewritten by NameSub to `Array.pushFirst`
 -}
 
-import Array exposing (Array)
+import Array exposing ( Array )
 import Ast.Types as Types exposing
     ( CaseArm
     , Declaration(..)
@@ -28,8 +28,8 @@ import Ast.Types as Types exposing
     , TypeAnn(..)
     )
 import Char
-import Dict exposing (Dict)
-import Maybe exposing (Maybe(..))
+import Dict exposing ( Dict )
+import Maybe exposing ( Maybe(..) )
 
 
 print : File -> String
@@ -89,22 +89,18 @@ localDeclaredNames declarations =
                         withType =
                             Dict.set custom.name {} acc
                     in
-                    Array.foldl
-                        (\ctor inner -> Dict.set ctor.name {} inner)
-                        withType
-                        custom.constructors
+                    Array.foldl (\ctor inner -> Dict.set ctor.name {} inner)
+                        withType custom.constructors
 
                 DeclPort signature ->
                     Dict.set signature.name {} acc
 
                 DeclDestructure { pattern = pattern } ->
-                    Array.foldl (\n inner -> Dict.set n {} inner) acc (patternBoundNames pattern)
+                    Array.foldl (\n inner -> Dict.set n {} inner) acc
+                        (patternBoundNames pattern)
 
                 DeclInfix ->
-                    acc
-        )
-        Dict.empty
-        declarations
+                    acc) Dict.empty declarations
 
 
 patternBoundNames : Pattern -> Array String
@@ -117,19 +113,29 @@ patternBoundNames pattern =
             Array.pushLast name (patternBoundNames inner)
 
         PatTuple items ->
-            Array.foldl (\p acc -> Array.foldl Array.pushLast acc (patternBoundNames p)) [] items
+            Array.foldl
+                (\p acc -> Array.foldl Array.pushLast acc (patternBoundNames p))
+                [] items
 
         PatList items ->
-            Array.foldl (\p acc -> Array.foldl Array.pushLast acc (patternBoundNames p)) [] items
+            Array.foldl
+                (\p acc -> Array.foldl Array.pushLast acc (patternBoundNames p))
+                [] items
 
         PatCons { head = head, tail = tail } ->
-            Array.foldl Array.pushLast (patternBoundNames head) (patternBoundNames tail)
+            Array.foldl Array.pushLast (patternBoundNames head)
+                (patternBoundNames tail)
 
         PatNamed { arguments = args } ->
-            Array.foldl (\p acc -> Array.foldl Array.pushLast acc (patternBoundNames p)) [] args
+            Array.foldl
+                (\p acc -> Array.foldl Array.pushLast acc (patternBoundNames p))
+                [] args
 
         PatRecordBind fields ->
-            Array.foldl (\f acc -> Array.foldl Array.pushLast acc (patternBoundNames f.pattern)) [] fields
+            Array.foldl
+                (\f acc ->
+                    Array.foldl Array.pushLast acc
+                        (patternBoundNames f.pattern)) [] fields
 
         _ ->
             []
@@ -188,7 +194,8 @@ printImport import_ =
 
                     else
                         " exposing ("
-                            ++ String.join ", " (Array.map printExposedItem items)
+                            ++ String.join ", "
+                                (Array.map printExposedItem items)
                             ++ ")"
     in
     "import " ++ import_.moduleName ++ aliasPart ++ exposingPart
@@ -250,12 +257,20 @@ printDeclaration locals declaration =
                         ""
 
                     else
-                        " " ++ String.join " " (Array.map (printPattern locals 1) fn.arguments)
+                        " "
+                            ++ String.join " "
+                                (Array.map (printPattern locals 1)
+                                    fn.arguments)
 
                 body =
                     printExpr locals 0 fn.expression
             in
-            docs ++ signature ++ fn.name ++ args ++ " =\n    " ++ indentBlock 1 body
+            docs
+                ++ signature
+                ++ fn.name
+                ++ args
+                ++ " =\n    "
+                ++ indentBlock 1 body
 
         DeclAlias aliasDecl ->
             let
@@ -317,10 +332,15 @@ printDeclaration locals declaration =
             ""
 
         DeclDestructure { pattern = pattern, expression = expression } ->
-            printPattern locals 1 pattern ++ " =\n    " ++ printExpr locals 0 expression
+            printPattern locals 1 pattern
+                ++ " =\n    "
+                ++ printExpr locals 0 expression
 
 
-printConstructor : Dict String {} -> { name : String, arguments : Array TypeAnn } -> String
+printConstructor :
+    Dict String {}
+    -> { name : String, arguments : Array TypeAnn }
+    -> String
 printConstructor locals ctor =
     if Array.isEmpty ctor.arguments then
         ctor.name
@@ -340,10 +360,8 @@ printConstructor locals ctor =
             ++ String.join ", "
                 (Array.indexedMap
                     (\index arg ->
-                        fieldLabel index ++ " : " ++ printType locals 0 arg
-                    )
-                    ctor.arguments
-                )
+                        fieldLabel index ++ " : " ++ printType locals 0 arg)
+                    ctor.arguments)
             ++ " }"
 
 
@@ -368,7 +386,10 @@ printType locals prec typeAnn =
                         head
 
                     else
-                        head ++ " " ++ String.join " " (Array.map (printType locals 1) args)
+                        head
+                            ++ " "
+                            ++ String.join " "
+                                (Array.map (printType locals 1) args)
             in
             if prec > 0 && not (Array.isEmpty args) then
                 "(" ++ rendered ++ ")"
@@ -391,10 +412,10 @@ printType locals prec typeAnn =
                     ++ String.join ", "
                         (Array.map
                             (\field ->
-                                field.name ++ " : " ++ printType locals 0 field.typeAnnotation
-                            )
-                            fields
-                        )
+                                field.name
+                                    ++ " : "
+                                    ++ printType locals 0 field.typeAnnotation)
+                            fields)
                     ++ " }"
 
         TypeGenericRecord { extension = ext, fields = fields } ->
@@ -404,16 +425,18 @@ printType locals prec typeAnn =
                 ++ String.join ", "
                     (Array.map
                         (\field ->
-                            field.name ++ " : " ++ printType locals 0 field.typeAnnotation
-                        )
-                        fields
-                    )
+                            field.name
+                                ++ " : "
+                                ++ printType locals 0 field.typeAnnotation)
+                        fields)
                 ++ " }"
 
         TypeFunction { left = left, right = right } ->
             let
                 rendered =
-                    printType locals 1 left ++ " -> " ++ printType locals 0 right
+                    printType locals 1 left
+                        ++ " -> "
+                        ++ printType locals 0 right
             in
             if prec > 0 then
                 "(" ++ rendered ++ ")"
@@ -435,12 +458,8 @@ printTupleType locals items =
         "{ "
             ++ String.join ", "
                 (Array.map2
-                    (\label item ->
-                        label ++ " : " ++ printType locals 0 item
-                    )
-                    labels
-                    items
-                )
+                    (\label item -> label ++ " : " ++ printType locals 0 item)
+                    labels items)
             ++ " }"
 
 
@@ -483,17 +502,19 @@ printPattern locals prec pattern =
                     ++ String.join ", "
                         (Array.map
                             (\field ->
-                                field.name ++ " = " ++ printPattern locals 0 field.pattern
-                            )
-                            fields
-                        )
+                                field.name
+                                    ++ " = "
+                                    ++ printPattern locals 0 field.pattern)
+                            fields)
                     ++ " }"
 
         PatCons { head = head, tail = tail } ->
             printConsPattern locals head tail
 
         PatList items ->
-            "[" ++ String.join ", " (Array.map (printPattern locals 0) items) ++ "]"
+            "["
+                ++ String.join ", " (Array.map (printPattern locals 0) items)
+                ++ "]"
 
         PatVar name ->
             name
@@ -522,18 +543,18 @@ printPattern locals prec pattern =
                         -- `Node\n    ({ first = … })` parses; `Node\n{ first` does not.
                         let
                             labels =
-                                ctorFieldLabels ref.name (Array.length args)
+                                ctorFieldLabels ref.moduleName ref.name
+                                    (Array.length args)
 
                             record =
                                 "{ "
                                     ++ String.join ", "
                                         (Array.map2
                                             (\label arg ->
-                                                label ++ " = " ++ printPattern locals 0 arg
-                                            )
-                                            labels
-                                            args
-                                        )
+                                                label
+                                                    ++ " = "
+                                                    ++ printPattern locals 0
+                                                        arg) labels args)
                                     ++ " }"
                         in
                         head ++ " (" ++ record ++ ")"
@@ -596,11 +617,8 @@ printTuplePattern locals items =
             ++ String.join ", "
                 (Array.map2
                     (\label item ->
-                        label ++ " = " ++ printPattern locals 0 item
-                    )
-                    labels
-                    items
-                )
+                        label ++ " = " ++ printPattern locals 0 item) labels
+                    items)
             ++ " }"
 
 
@@ -629,7 +647,9 @@ printExpr locals prec expr =
                                     else
                                         printExpr locals 1 first
                                             ++ " "
-                                            ++ String.join " " (Array.map (printExpr locals 1) rest)
+                                            ++ String.join " "
+                                                (Array.map (printExpr locals 1)
+                                                    rest)
                     in
                     if prec > 0 then
                         "(" ++ rendered ++ ")"
@@ -638,9 +658,30 @@ printExpr locals prec expr =
                         rendered
 
         ExprBinop { operator = op, left = left, right = right } ->
+            -- Block RHS (`let` / `when` / multi-line `if`) cannot start mid-line
+            -- after an operator. Parenthesizing (`|| (let`) still fails UNFINISHED LET
+            -- (Gren needs the block at its own column; alt-core-elm Data.List).
+            -- Only special-case true block expressions: other multiline RHS (e.g.
+            -- `|= (var |> andThen …)`) must keep prec-1 parens for association
+            -- (edn-parser String.stringHelp).
             let
+                leftText =
+                    printExpr locals 1 left
+
                 rendered =
-                    printExpr locals 1 left ++ " " ++ op ++ " " ++ printExpr locals 1 right
+                    if isBlockExpr right then
+                        leftText
+                            ++ " "
+                            ++ op
+                            ++ "\n    "
+                            ++ indentBlock 1 (printExpr locals 0 right)
+
+                    else
+                        leftText
+                            ++ " "
+                            ++ op
+                            ++ " "
+                            ++ printExpr locals 1 right
             in
             if prec > 0 then
                 "(" ++ rendered ++ ")"
@@ -738,7 +779,8 @@ printExpr locals prec expr =
             -- the same way case arms do.
             let
                 argsText =
-                    String.join " " (Array.map (printPattern locals 1) arguments)
+                    String.join " "
+                        (Array.map (printPattern locals 1) arguments)
 
                 bodyText =
                     printExpr locals 0 body
@@ -771,10 +813,8 @@ printExpr locals prec expr =
                     ++ String.join ", "
                         (Array.map
                             (\field ->
-                                printRecordField locals field.name field.value
-                            )
-                            fields
-                        )
+                                printRecordField locals field.name field.value)
+                            fields)
                     ++ " }"
 
         ExprList items ->
@@ -795,10 +835,8 @@ printExpr locals prec expr =
                 ++ String.join ", "
                     (Array.map
                         (\field ->
-                            printRecordField locals field.name field.value
-                        )
-                        fields
-                    )
+                            printRecordField locals field.name field.value)
+                        fields)
                 ++ " }"
 
         ExprGlsl code ->
@@ -818,12 +856,8 @@ printTupleExpr locals items =
         "{ "
             ++ String.join ", "
                 (Array.map2
-                    (\label item ->
-                        label ++ " = " ++ printExpr locals 0 item
-                    )
-                    labels
-                    items
-                )
+                    (\label item -> label ++ " = " ++ printExpr locals 0 item)
+                    labels items)
             ++ " }"
 
 
@@ -844,9 +878,14 @@ printLetDecl locals declaration =
                         ""
 
                     else
-                        " " ++ String.join " " (Array.map (printPattern locals 1) fn.arguments)
+                        " "
+                            ++ String.join " "
+                                (Array.map (printPattern locals 1) fn.arguments)
             in
-            fn.name ++ args ++ " =\n        " ++ indentBlock 2 (printExpr locals 0 fn.expression)
+            fn.name
+                ++ args
+                ++ " =\n        "
+                ++ indentBlock 2 (printExpr locals 0 fn.expression)
 
         LetDestructure { pattern = pattern, expression = expression } ->
             -- Constructor / record / tuple patterns must be parenthesized on the
@@ -870,22 +909,26 @@ multiArgCtorApplication locals head args =
                 if startsUpper ref.name then
                     let
                         labels =
-                            ctorFieldLabels ref.name (Array.length args)
+                            ctorFieldLabels ref.moduleName ref.name
+                                (Array.length args)
 
                         record =
                             "{ "
                                 ++ String.join ", "
                                     (Array.map2
                                         (\label arg ->
-                                            label ++ " = " ++ printEmbeddedExpr locals arg
-                                        )
-                                        labels
-                                        args
-                                    )
+                                            label
+                                                ++ " = "
+                                                ++ printEmbeddedExpr locals arg)
+                                        labels args)
                                 ++ " }"
                     in
                     -- `Ctor ({ fields })` — format-safe if the name wraps alone.
-                    Just (printNamedRef locals False ref ++ " (" ++ record ++ ")")
+                    Just
+                        (printNamedRef locals False ref
+                            ++ " ("
+                            ++ record
+                            ++ ")")
 
                 else
                     Nothing
@@ -909,8 +952,7 @@ printNamedRef locals isType ref =
                     moduleName ++ "." ++ ref.name
 
                 sameModuleType =
-                    moduleName
-                        == ref.name
+                    moduleName == ref.name
                         || String.endsWith ("." ++ ref.name) moduleName
 
                 -- Local declaration shadows the short name (e.g. this file defines `Dict`).
@@ -993,19 +1035,53 @@ tupleFieldLabels count =
 Default is positional `first`/`second`/…. Known Gren platform and Compat
 constructors keep their real field names so patterns and construction match
 the host API (same rationale as VirtualDom.Handler / Html.Events adapters).
--}
-ctorFieldLabels : String -> Int -> Array String
-ctorFieldLabels name arity =
-    when platformCtorFieldLabels name arity is
-        Just labels ->
-            labels
 
-        Nothing ->
-            tupleFieldLabels arity
+Named platform fields apply only when the ref is module-qualified to a
+platform/Compat module. Local ctors that share a name (e.g. local `BadPayload`
+in Http.Legacy) must stay positional first/second — otherwise type definitions
+and helpers disagree (http-upgrade-shim).
+-}
+ctorFieldLabels : Maybe String -> String -> Int -> Array String
+ctorFieldLabels moduleName name arity =
+    if usesPlatformCtorFields moduleName then
+        when platformCtorFieldLabels name arity is
+            Just labels ->
+                labels
+
+            Nothing ->
+                tupleFieldLabels arity
+
+    else
+        tupleFieldLabels arity
+
+
+usesPlatformCtorFields : Maybe String -> Bool
+usesPlatformCtorFields moduleName =
+    when moduleName is
+        Just "Http" ->
+            True
+
+        Just "ElmToGren.Compat.Http" ->
+            True
+
+        Just "VirtualDom" ->
+            True
+
+        Just "Html.Events" ->
+            True
+
+        Just "ElmToGren.Compat.Html.Events" ->
+            True
+
+        Just "ElmToGren.Compat.VirtualDom.Handler" ->
+            True
+
+        _ ->
+            False
 
 
 {-| Named payload fields for platform / Compat multi-arg constructors.
-Keys are bare ctor names (module-qualified refs still print via printNamedRef).
+Keys are bare ctor names (only used when module is platform/Compat).
 -}
 platformCtorFieldLabels : String -> Int -> Maybe (Array String)
 platformCtorFieldLabels name arity =
@@ -1086,8 +1162,7 @@ indentBlock levels text =
                     line
 
                 else
-                    pad ++ line
-            )
+                    pad ++ line)
         |> String.join "\n"
 
 
@@ -1103,6 +1178,25 @@ Break after `=` and indent the value so the block owns its own column:
 printRecordField : Dict String {} -> String -> Expr -> String
 printRecordField locals name value =
     name ++ " = " ++ printEmbeddedExpr locals value
+
+
+{-| True for expressions whose printed form is a multi-line block that cannot
+start mid-line after `=` / operators without breaking layout.
+-}
+isBlockExpr : Expr -> Bool
+isBlockExpr expr =
+    when expr is
+        ExprLet _ ->
+            True
+
+        ExprCase _ ->
+            True
+
+        ExprIf _ ->
+            True
+
+        _ ->
+            False
 
 
 {-| Embed an expression in a mid-line context (record field, list element).

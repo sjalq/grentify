@@ -31,6 +31,9 @@ tests =
     , caseArmStillMultiline
     , basicsFalseKeepsModuleWhenLocalFalseCtor
     , recordFieldLetIsParenthesized
+    , multiDeclLetIfKeepsSiblingBinds
+    , fixedListPatternPrintsAsArray
+    , binopLetRhsBreaksAfterOperator
     ]
 
 
@@ -242,6 +245,185 @@ basicsFalseKeepsModuleWhenLocalFalseCtor =
     in
     outcome
         "Basics.False stays qualified when local False exists"
+        ok
+        ("printed:\n" ++ printed)
+
+
+{-| Multi-decl let whose earlier binding is an if must print later bindings as
+siblings, not nested under else (iso8601 fromTime class; format post-pass also
+guards this, but Print itself must emit correct structure).
+-}
+multiDeclLetIfKeepsSiblingBinds : TestResult
+multiDeclLetIfKeepsSiblingBinds =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "fromTime"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "ms" ]
+                    , expression =
+                        ExprLet
+                            { declarations =
+                                [ LetDestructure
+                                    { pattern =
+                                        PatRecordBind
+                                            [ { name = "first", pattern = PatVar "years" }
+                                            , { name = "second", pattern = PatVar "remainingDays" }
+                                            ]
+                                    , expression =
+                                        ExprIf
+                                            { condition =
+                                                ExprBinop
+                                                    { operator = "=="
+                                                    , left = ExprVar { moduleName = Nothing, name = "ms" }
+                                                    , right = ExprInt 0
+                                                    }
+                                            , then_ =
+                                                ExprApplication
+                                                    [ ExprVar { moduleName = Nothing, name = "daysToYears" }
+                                                    , ExprInt 1
+                                                    ]
+                                            , else_ =
+                                                ExprApplication
+                                                    [ ExprVar { moduleName = Nothing, name = "daysToYears" }
+                                                    , ExprVar { moduleName = Nothing, name = "ms" }
+                                                    ]
+                                            }
+                                    }
+                                , LetDestructure
+                                    { pattern =
+                                        PatRecordBind
+                                            [ { name = "first", pattern = PatVar "months" }
+                                            , { name = "second", pattern = PatVar "daysInMonth" }
+                                            ]
+                                    , expression =
+                                        ExprApplication
+                                            [ ExprVar { moduleName = Nothing, name = "daysToMonths" }
+                                            , ExprVar { moduleName = Nothing, name = "years" }
+                                            , ExprVar { moduleName = Nothing, name = "remainingDays" }
+                                            ]
+                                    }
+                                ]
+                            , expression =
+                                ExprVar { moduleName = Nothing, name = "months" }
+                            }
+                    }
+                ]
+
+        printed =
+            Print.print file
+
+        -- months bind must appear after the if's else arm, not glued to it
+        ok =
+            String.contains "daysToYears ms" printed
+                && String.contains "first = months" printed
+                && not (String.contains "daysToYears ms { first = months" printed)
+                && not (String.contains "daysToYears ms({ first = months" printed)
+    in
+    outcome
+        "multi-decl let with if keeps sibling record binds"
+        ok
+        ("printed:\n" ++ printed)
+
+
+{-| Gren rejects `|| (let` mid-line (UNFINISHED LET). Break after the operator.
+-}
+binopLetRhsBreaksAfterOperator : TestResult
+binopLetRhsBreaksAfterOperator =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "ok"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprBinop
+                            { operator = "||"
+                            , left = ExprVar { moduleName = Nothing, name = "a" }
+                            , right =
+                                ExprLet
+                                    { declarations =
+                                        [ LetDestructure
+                                            { pattern = PatVar "b"
+                                            , expression =
+                                                ExprVar { moduleName = Nothing, name = "c" }
+                                            }
+                                        ]
+                                    , expression =
+                                        ExprVar { moduleName = Nothing, name = "b" }
+                                    }
+                            }
+                    }
+                ]
+
+        printed =
+            Print.print file
+
+        ok =
+            not (String.contains "|| (let" printed)
+                && not (String.contains "|| let" printed)
+                && String.contains "||" printed
+                && String.contains "let" printed
+    in
+    outcome
+        "binop with let RHS breaks after operator"
+        ok
+        ("printed:\n" ++ printed)
+
+
+{-| Fixed list patterns stay as Gren array patterns in when arms (hang-class
+guard: do not force cons peels for multi-arm fixed lists).
+-}
+fixedListPatternPrintsAsArray : TestResult
+fixedListPatternPrintsAsArray =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "rgb"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "xs" ]
+                    , expression =
+                        ExprCase
+                            { expression = ExprVar { moduleName = Nothing, name = "xs" }
+                            , cases =
+                                [ { pattern =
+                                        PatList
+                                            [ PatVar "r"
+                                            , PatVar "g"
+                                            , PatVar "b"
+                                            ]
+                                  , body =
+                                        ExprApplication
+                                            [ ExprVar { moduleName = Nothing, name = "triple" }
+                                            , ExprVar { moduleName = Nothing, name = "r" }
+                                            , ExprVar { moduleName = Nothing, name = "g" }
+                                            , ExprVar { moduleName = Nothing, name = "b" }
+                                            ]
+                                  }
+                                ]
+                            }
+                    }
+                ]
+
+        printed =
+            Print.print file
+
+        ok =
+            String.contains "when" printed
+                && (String.contains "[ r, g, b ]" printed
+                        || String.contains "[r, g, b]" printed
+                        || String.contains "[ r,g,b ]" printed
+                   )
+                && not (String.contains " :: " printed)
+    in
+    outcome
+        "fixed list pattern prints as array not cons peel"
         ok
         ("printed:\n" ++ printed)
 

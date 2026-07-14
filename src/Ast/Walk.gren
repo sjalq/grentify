@@ -18,7 +18,7 @@ Law modules supply *node* rewrites; this module owns the recursive skeleton so
 - `foldExprChildren` — accumulate over child expressions (collectors / scans)
 -}
 
-import Array exposing (Array)
+import Array exposing ( Array )
 import Ast.Types exposing
     ( CaseArm
     , Declaration(..)
@@ -26,7 +26,6 @@ import Ast.Types exposing
     , LetDecl(..)
     , Pattern(..)
     )
-
 
 -- MAP EXPR -------------------------------------------------------------------
 
@@ -42,7 +41,11 @@ mapExprChildren f expr =
 {-| Like `mapExprChildren`, but also maps patterns in lambda args, case arms,
 and let bindings.
 -}
-mapExprChildrenWithPatterns : (Expr -> Expr) -> (Pattern -> Pattern) -> Expr -> Expr
+mapExprChildrenWithPatterns :
+    (Expr -> Expr)
+    -> (Pattern -> Pattern)
+    -> Expr
+    -> Expr
 mapExprChildrenWithPatterns f mapPat expr =
     when expr is
         ExprApplication parts ->
@@ -87,10 +90,7 @@ mapExprChildrenWithPatterns f mapPat expr =
                     (\field ->
                         { name = field.name
                         , value = f field.value
-                        }
-                    )
-                    fields
-                )
+                        }) fields)
 
         ExprAccess { record = record, field = field } ->
             ExprAccess { record = f record, field = field }
@@ -103,9 +103,7 @@ mapExprChildrenWithPatterns f mapPat expr =
                         (\field ->
                             { name = field.name
                             , value = f field.value
-                            }
-                        )
-                        fields
+                            }) fields
                 }
 
         _ ->
@@ -122,7 +120,6 @@ mapCaseArm f mapPat arm =
 identityPattern : Pattern -> Pattern
 identityPattern pattern =
     pattern
-
 
 -- MAP PATTERN ----------------------------------------------------------------
 
@@ -150,17 +147,13 @@ mapPatternChildren f pattern =
                     (\field ->
                         { name = field.name
                         , pattern = f field.pattern
-                        }
-                    )
-                    fields
-                )
+                        }) fields)
 
         PatAs { pattern = inner, name = name } ->
             PatAs { pattern = f inner, name = name }
 
         _ ->
             pattern
-
 
 -- MAP LET / DECL -------------------------------------------------------------
 
@@ -185,7 +178,11 @@ mapLetDecl f mapPat declaration =
 {-| Map expressions (and optionally patterns) on value declarations only.
 Type/port/infix declarations pass through unchanged.
 -}
-mapDeclaration : (Expr -> Expr) -> (Pattern -> Pattern) -> Declaration -> Declaration
+mapDeclaration :
+    (Expr -> Expr)
+    -> (Pattern -> Pattern)
+    -> Declaration
+    -> Declaration
 mapDeclaration f mapPat declaration =
     when declaration is
         DeclFunction fn ->
@@ -203,7 +200,6 @@ mapDeclaration f mapPat declaration =
 
         _ ->
             declaration
-
 
 -- FOLD EXPR ------------------------------------------------------------------
 

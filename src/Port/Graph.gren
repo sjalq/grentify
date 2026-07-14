@@ -49,6 +49,7 @@ import Mapping.Types as Mapping exposing (MappingKind(..), Registry)
 import Node
 import Port.Error as PortError exposing (Error)
 import Port.Plan as Plan
+import Port.Volume as Volume
 import Resolve.Online
 import Resolve.Solver as Solver exposing (Resolution)
 import Result as CoreResult
@@ -83,6 +84,7 @@ type alias Options =
     , requestedPlatform : Cli.PlatformChoice
     , offline : Bool
     , verify : Bool
+    , format : Bool
     , toolVersion : String
     }
 
@@ -647,6 +649,7 @@ emitGraph permissions options registry resolution drafts planned =
 
                 validate staging =
                     prepareStaging options.platform
+                        permissions.fileSystem
                         permissions.childProcess
                         options
                         rootIdentity
@@ -680,14 +683,22 @@ emitGraph permissions options registry resolution drafts planned =
 
 prepareStaging
     : Node.Platform
+    -> FileSystem.Permission
     -> ChildProcess.Permission
     -> Options
     -> Plan.Identity
     -> Planned
     -> Path
     -> Task Error {}
-prepareStaging platform permission options rootIdentity planned staging =
-    formatStaging platform permission options.formatExecutable rootIdentity planned staging
+prepareStaging platform fileSystem permission options rootIdentity planned staging =
+    formatStaging platform
+        fileSystem
+        permission
+        options.formatExecutable
+        rootIdentity
+        planned
+        staging
+        options.format
         |> Task.andThen
             (\_ ->
                 if options.verify then
@@ -698,19 +709,44 @@ prepareStaging platform permission options rootIdentity planned staging =
             )
 
 
-formatStaging : Node.Platform -> ChildProcess.Permission -> String -> Plan.Identity -> Planned -> Path -> Task Error {}
-formatStaging platform permission formatExecutable rootIdentity planned staging =
+formatStaging
+    : Node.Platform
+    -> FileSystem.Permission
+    -> ChildProcess.Permission
+    -> String
+    -> Plan.Identity
+    -> Planned
+    -> Path
+    -> Bool
+    -> Task Error {}
+formatStaging platform fileSystem permission formatExecutable rootIdentity planned staging formatEnabled =
     planned.packages
         |> Array.foldl
             (\package pending ->
                 pending
                     |> Task.andThen
                         (\_ ->
-                            Format.formatPackage platform
-                                permission
-                                { packageDirectory = packageDirectory rootIdentity staging package
-                                , formatExecutable = formatExecutable
-                                }
+                            let
+                                dir =
+                                    packageDirectory rootIdentity staging package
+                            in
+                            if not formatEnabled then
+                                Task.succeed {}
+
+                            else
+                                Volume.scanPackageDirectory fileSystem dir
+                                    |> Task.andThen
+                                        (\metrics ->
+                                            if Volume.shouldSkipFormat metrics then
+                                                Task.succeed {}
+
+                                            else
+                                                Format.formatPackage platform
+                                                    permission
+                                                    { packageDirectory = dir
+                                                    , formatExecutable = formatExecutable
+                                                    }
+                                        )
                         )
             )
             (Task.succeed {})

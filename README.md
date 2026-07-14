@@ -146,27 +146,46 @@ If `filter` had no mapping, the tool might still emit `List.filter` (or a half-r
 
 ## Ecosystem smoke tests
 
-`npm run test:ecosystem` ports the **200 most popular** qualifying pure Elm
-packages (by reverse-dependency count) whose direct dependencies stay within
-the supported common platform set (`elm/core`, `elm/json`, `elm/time`,
-`elm/random`, `elm/bytes`, `elm/regex`, `elm/url`, `elm/parser`) and checks that
-each run completes with verification.
+**Current phase brief (compact/resume):** [`docs/PHASE-ECOSYSTEM-HARDENING.md`](docs/PHASE-ECOSYSTEM-HARDENING.md)
+covers measurement rules, the unit→canary→residual→full loop, landed host laws, and open items for this phase only.
 
-`npm run test:ecosystem-browser` ports the **browser-platform** packages listed
-in `test/ecosystem/packages-browser.json` (currently 252; no pure overlap)
-whose direct dependencies stay within the browser platform set (common set plus
-`elm/browser`, `elm/html`, `elm/svg`, `elm/virtual-dom`, `elm/http`, `elm/file`),
-with at least one browser-surface dependency, and verifies each with `gren docs`.
-Packages that hit hard refusals (effect managers, kernel/JS, GLSL),
-download/integrity failures, timeouts, or structural gaps (unmapped APIs) are
-skipped in popularity order when the catalog is expanded.
+**Catalogs are candidate lists, not success counts.** The only proof that packages
+port on a given tree is a commit-stamped **full** suite run.
+
+```sh
+npm run ecosystem:status       # what HEAD actually proved (or NO/STALE PROOF)
+npm run dev:loop               # unit tests + 12-package canary (~fast feedback)
+npm run ecosystem:canary       # canary only (parallel, triage, never proof)
+npm run ecosystem:residual     # re-port only latest failures (parallel)
+npm run ecosystem:pure:j       # full pure suite, -j 6 (writes proof)
+npm run ecosystem:browser:j    # full browser suite, -j 6 (writes proof)
+npm run test:ecosystem         # full pure suite serial (writes proof)
+npm run test:ecosystem-browser # full browser suite serial (writes proof)
+```
+
+Suite flags (after `--`): `--limit N`, `--offset N`, `--only a@v,b@v`,
+`-j N` / `--concurrency N`, `--fail-fast`, `--no-verify`, `--no-proof`.
+
+**Iteration rule:** fix one `failReason` class at a time. Canary/residual print a
+histogram and up to 3 representative packages per reason. Only promote to full
+suite when canary is green. Filtered runs never write suite proof.
+
+- `test/ecosystem/packages.json` — pure-platform **candidates**
+- `test/ecosystem/packages-browser.json` — browser-platform **candidates**
+- `test/ecosystem/packages-canary.json` — sub-minute regression surfaces
+- Proof: `.test-cache/ecosystem-proof/LAST_RUN.json` (full runs only)
+- Triage: `.test-cache/ecosystem-proof/TRIAGE.json` (canary/residual/partial)
+
+Do **not** treat catalog sizes, old logs, or `scripts/temp/*` as success counts.
 
 ## Development
 
 ```sh
-npm run test:all               # unit, rule fixtures, e2e, ecosystem suites (network)
-npm run test:ecosystem         # 200 most popular pure packages
-npm run test:ecosystem-browser # 200 most popular browser-platform packages
+npm run dev:loop               # build + unit + canary (default fix loop)
+npm run ecosystem:status       # commit-stamped pure+browser proof only
+npm run ecosystem:residual     # only packages that failed last triage/proof
+npm run ecosystem:pure:j       # full pure proof run, parallel
+npm run test:all               # unit, rule, e2e, full ecosystem (network)
 ```
 
 - `src/` — the Gren CLI (acquire, resolve, transform, format, emit, verify)
@@ -174,8 +193,8 @@ npm run test:ecosystem-browser # 200 most popular browser-platform packages
 - `mappings/builtin.json` — the Elm→Gren package/API catalog
 - `tools/gren-format/` — vendored gilramir/gren-format binary (`scripts/build-gren-format.sh` rebuilds it)
 - `test/` — unit, format, end-to-end, and ecosystem suites
-- `test/ecosystem/packages.json` — 200 most popular qualifying pure packages
-- `test/ecosystem/packages-browser.json` — verified browser-platform packages (252)
+- `test/ecosystem/packages*.json` — candidate suites only (see Ecosystem smoke tests)
+- `scripts/temp/` — disposable experiments; never suite proof
 
 ## License
 

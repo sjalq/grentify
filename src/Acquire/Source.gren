@@ -25,17 +25,17 @@ import Acquire.Cache as Cache
 import Acquire.Hazard as Hazard
 import ChildProcess
 import Dict
-import Elm.Manifest as Manifest exposing (Manifest)
-import Elm.PackageName as PackageName exposing (Name)
-import Elm.Semver as Semver exposing (Version)
+import Elm.Manifest as Manifest exposing ( Manifest )
+import Elm.PackageName as PackageName exposing ( Name )
+import Elm.Semver as Semver exposing ( Version )
 import FileSystem
-import FileSystem.Path as Path exposing (Path)
+import FileSystem.Path as Path exposing ( Path )
 import Json.Encode as Encode
 import Node
-import Port.Error as PortError exposing (Error)
+import Port.Error as PortError exposing ( Error )
 import System.File
 import System.Process
-import Task exposing (Task)
+import Task exposing ( Task )
 
 
 type alias Permissions =
@@ -77,7 +77,10 @@ type alias SourceTree =
     }
 
 
-acquireLocal : FileSystem.Permission -> Path -> Task Error { manifest : Manifest, tree : SourceTree }
+acquireLocal :
+    FileSystem.Permission
+    -> Path
+    -> Task Error { manifest : Manifest, tree : SourceTree }
 acquireLocal permission packageRoot =
     let
         manifestPath =
@@ -90,7 +93,7 @@ acquireLocal permission packageRoot =
                     Err manifestError ->
                         Task.fail <|
                             PortError.create "INVALID_LOCAL_ELM_MANIFEST"
-                                (Manifest.errorToString manifestError)
+                            (Manifest.errorToString manifestError)
 
                     Ok manifest ->
                         listSources permission packageRoot
@@ -99,46 +102,49 @@ acquireLocal permission packageRoot =
                                     { manifest = manifest
                                     , tree =
                                         { packageRoot = packageRoot
-                                        , sourceDirectory = sourceDirectory packageRoot
+                                        , sourceDirectory =
+                                            sourceDirectory packageRoot
                                         , files = files
                                         , provenance =
                                             { strategy = "local-directory"
                                             , coordinate =
-                                                PackageName.toString manifest.name
+                                                PackageName.toString
+                                                    manifest.name
                                                     ++ "@"
-                                                    ++ Semver.versionToString manifest.version
+                                                    ++ Semver.versionToString
+                                                        manifest.version
                                             , manifestUrl = Nothing
                                             , registryEndpointUrl = Nothing
-                                            , sourceUrl = Path.toPosixString packageRoot
+                                            , sourceUrl =
+                                                Path.toPosixString packageRoot
                                             , revision = Nothing
                                             , fromCache = False
                                             }
                                         }
-                                    }
-                                )
-            )
+                                    }))
 
 
 acquireRegistry : Permissions -> Options -> Manifest -> Task Error SourceTree
 acquireRegistry permissions options manifest =
     let
         packageRoot =
-            Cache.sourcePath options.cacheDirectory manifest.name manifest.version
+            Cache.sourcePath options.cacheDirectory manifest.name
+                manifest.version
 
         cached =
             validateRegistryTree permissions.fileSystem manifest packageRoot
                 |> Task.andThen
                     (\tree ->
-                        gitRevision permissions.childProcess options.platform packageRoot
+                        gitRevision permissions.childProcess options.platform
+                            packageRoot
                             |> Task.map Just
                             |> Task.onError (\_ -> Task.succeed Nothing)
                             |> Task.map
                                 (\revision ->
-                                    { tree
-                                        | provenance = registryProvenance manifest True revision
-                                    }
-                                )
-                    )
+                                    { tree | provenance =
+                                        registryProvenance manifest True
+                                            revision
+                                    }))
     in
     System.File.exists permissions.fileSystem packageRoot
         |> Task.andThen
@@ -147,31 +153,42 @@ acquireRegistry permissions options manifest =
                     cached
                         |> Task.onError
                             (\cacheError ->
-                                if options.offline || PortError.code cacheError == "UNSUPPORTED_ELM_SOURCE" then
+                                if
+                                    options.offline
+                                        || PortError.code
+                                            cacheError == "UNSUPPORTED_ELM_SOURCE"
+                                then
                                     Task.fail cacheError
 
                                 else
-                                    cloneRegistrySource permissions options manifest
-                            )
+                                    cloneRegistrySource permissions options
+                                        manifest)
 
                 else if options.offline then
                     Task.fail <|
                         PortError.create "OFFLINE_SOURCE_CACHE_MISS"
-                            ("Missing cached source tree for " ++ coordinate manifest ++ ".")
+                        ("Missing cached source tree for "
+                            ++ coordinate manifest
+                            ++ ".")
 
                 else
-                    cloneRegistrySource permissions options manifest
-            )
+                    cloneRegistrySource permissions options manifest)
 
 
-cloneRegistrySource : Permissions -> Options -> Manifest -> Task Error SourceTree
+cloneRegistrySource :
+    Permissions
+    -> Options
+    -> Manifest
+    -> Task Error SourceTree
 cloneRegistrySource permissions options manifest =
     let
         packageRoot =
-            Cache.sourcePath options.cacheDirectory manifest.name manifest.version
+            Cache.sourcePath options.cacheDirectory manifest.name
+                manifest.version
 
         partialRoot =
-            Cache.sourcePartialPath options.cacheDirectory manifest.name manifest.version
+            Cache.sourcePartialPath options.cacheDirectory manifest.name
+                manifest.version
 
         cloneUrl =
             Cache.githubUrl manifest.name
@@ -185,8 +202,10 @@ cloneRegistrySource permissions options manifest =
 
         clone =
             System.File.ensureDirectory permissions.fileSystem workingDirectory
-                |> Task.andThen (\_ -> removeIfExists permissions.fileSystem partialRoot)
-                |> Task.andThen (\_ -> removeIfExists permissions.fileSystem packageRoot)
+                |> Task.andThen
+                    (\_ -> removeIfExists permissions.fileSystem partialRoot)
+                |> Task.andThen
+                    (\_ -> removeIfExists permissions.fileSystem packageRoot)
                 |> Task.andThen
                     (\_ ->
                         System.Process.run permissions.childProcess
@@ -200,9 +219,12 @@ cloneRegistrySource permissions options manifest =
                                 , "--single-branch"
                                 , "--"
                                 , cloneUrl
-                                , System.File.pathToString options.platform partialRoot
+                                , System.File.pathToString options.platform
+                                    partialRoot
                                 ]
-                            , workingDirectory = System.File.pathToString options.platform workingDirectory
+                            , workingDirectory =
+                                System.File.pathToString options.platform
+                                    workingDirectory
                             , environment = Dict.empty
                             , allowedExitCodes = [ 0 ]
                             , timeoutMilliseconds = 120000
@@ -218,83 +240,91 @@ cloneRegistrySource permissions options manifest =
                                             ++ " tag "
                                             ++ tag
                                             ++ ": "
-                                            ++ PortError.toString processError
-                                        )
-                                )
-                    )
-                |> Task.andThen (\_ -> validateRegistryTree permissions.fileSystem manifest partialRoot)
+                                            ++ PortError.toString
+                                                processError)))
+                |> Task.andThen
+                    (\_ ->
+                        validateRegistryTree permissions.fileSystem manifest
+                            partialRoot)
                 |> Task.andThen
                     (\partialTree ->
-                        gitRevision permissions.childProcess options.platform partialRoot
+                        gitRevision permissions.childProcess options.platform
+                            partialRoot
                             |> Task.andThen
                                 (\revision ->
-                                    writeProvenance permissions.fileSystem partialRoot (registryProvenance manifest False (Just revision))
+                                    writeProvenance permissions.fileSystem
+                                        partialRoot
+                                        (registryProvenance manifest False
+                                            (Just revision))
                                         |> Task.andThen
                                             (\_ ->
-                                                FileSystem.move permissions.fileSystem packageRoot partialRoot
+                                                FileSystem.move
+                                                    permissions.fileSystem
+                                                    packageRoot partialRoot
                                                     |> Task.mapError
                                                         (\fileError ->
-                                                            PortError.create "SOURCE_CACHE_WRITE_FAILED"
+                                                            PortError.create
+                                                                "SOURCE_CACHE_WRITE_FAILED"
                                                                 ("Could not publish source cache for "
-                                                                    ++ coordinate manifest
+                                                                    ++ coordinate
+                                                                        manifest
                                                                     ++ ": "
-                                                                    ++ FileSystem.errorToString fileError
-                                                                )
-                                                        )
-                                            )
+                                                                    ++ FileSystem.errorToString
+                                                                        fileError)))
                                         |> Task.map
                                             (\_ ->
                                                 rebaseTree packageRoot
-                                                    (registryProvenance manifest False (Just revision))
-                                                    partialTree
-                                            )
-                                )
-                    )
+                                                    (registryProvenance manifest
+                                                        False (Just revision))
+                                                    partialTree)))
     in
     clone
         |> Task.onError
             (\cloneError ->
                 removeIfExists permissions.fileSystem partialRoot
                     |> Task.onError (\_ -> Task.succeed {})
-                    |> Task.andThen (\_ -> Task.fail cloneError)
-            )
+                    |> Task.andThen (\_ -> Task.fail cloneError))
 
 
-validateRegistryTree : FileSystem.Permission -> Manifest -> Path -> Task Error SourceTree
+validateRegistryTree :
+    FileSystem.Permission
+    -> Manifest
+    -> Path
+    -> Task Error SourceTree
 validateRegistryTree permission expected packageRoot =
-    System.File.readText permission (Path.append (Path.fromPosixString "elm.json") packageRoot)
+    System.File.readText permission
+        (Path.append (Path.fromPosixString "elm.json") packageRoot)
         |> Task.andThen
             (\source ->
                 when Manifest.decodeString source is
                     Err manifestError ->
                         Task.fail <|
                             PortError.create "INVALID_SOURCE_MANIFEST"
-                                ("The acquired source for "
-                                    ++ coordinate expected
-                                    ++ " has an invalid elm.json: "
-                                    ++ Manifest.errorToString manifestError
-                                )
+                            ("The acquired source for "
+                                ++ coordinate expected
+                                ++ " has an invalid elm.json: "
+                                ++ Manifest.errorToString manifestError)
 
                     Ok actual ->
                         if actual /= expected then
                             Task.fail <|
                                 PortError.create "SOURCE_MANIFEST_MISMATCH"
-                                    ("The acquired Git source manifest does not match the registry manifest for "
-                                        ++ coordinate expected
-                                        ++ "."
-                                    )
+                                ("The acquired Git source manifest does not match the registry manifest for "
+                                    ++ coordinate expected
+                                    ++ ".")
 
                         else
                             listSources permission packageRoot
                                 |> Task.map
                                     (\files ->
                                         { packageRoot = packageRoot
-                                        , sourceDirectory = sourceDirectory packageRoot
+                                        , sourceDirectory =
+                                            sourceDirectory packageRoot
                                         , files = files
-                                        , provenance = registryProvenance expected True Nothing
-                                        }
-                                    )
-            )
+                                        , provenance =
+                                            registryProvenance expected True
+                                                Nothing
+                                        }))
 
 
 listSources : FileSystem.Permission -> Path -> Task Error (Array SourceFile)
@@ -309,23 +339,33 @@ listSources permission packageRoot =
                 let
                     elmPaths =
                         paths
-                            |> Array.keepIf (Path.filenameWithExtension >> String.endsWith ".elm")
-                            |> Array.map (\path -> { path = path, relativePath = relativeTo root path })
+                            |> Array.keepIf
+                                (Path.filenameWithExtension
+                                    >> String.endsWith ".elm")
+                            |> Array.map
+                                (\path ->
+                                    { path = path
+                                    , relativePath = relativeTo root path
+                                    })
                             |> Array.sortBy .relativePath
                 in
                 if Array.isEmpty elmPaths then
                     Task.fail <|
                         PortError.create "NO_ELM_SOURCES"
-                            ("No .elm source files were found below " ++ Path.toPosixString root ++ ".")
+                        ("No .elm source files were found below "
+                            ++ Path.toPosixString root
+                            ++ ".")
 
                 else
                     elmPaths
                         |> Array.map (readAndInspect permission)
-                        |> Task.sequence
-            )
+                        |> Task.sequence)
 
 
-readAndInspect : FileSystem.Permission -> { path : Path, relativePath : String } -> Task Error SourceFile
+readAndInspect :
+    FileSystem.Permission
+    -> { path : Path, relativePath : String }
+    -> Task Error SourceFile
 readAndInspect permission sourceFile =
     System.File.readText permission sourceFile.path
         |> Task.andThen
@@ -346,22 +386,29 @@ readAndInspect permission sourceFile =
                 else
                     Task.fail <|
                         PortError.create "UNSUPPORTED_ELM_SOURCE"
-                            (sourceFile.relativePath
-                                ++ " "
-                                ++ (hazards
-                                        |> Array.map Hazard.errorToString
-                                        |> String.join "; "
-                                   )
-                                ++ "."
-                            )
-            )
+                        (sourceFile.relativePath
+                            ++ " "
+                            ++ (hazards
+                                |> Array.map Hazard.errorToString
+                                |> String.join "; ")
+                            ++ "."))
 
 
-gitRevision : ChildProcess.Permission -> Node.Platform -> Path -> Task Error String
+gitRevision :
+    ChildProcess.Permission
+    -> Node.Platform
+    -> Path
+    -> Task Error String
 gitRevision permission platform packageRoot =
     System.Process.run permission
         { program = "git"
-        , arguments = [ "-C", System.File.pathToString platform packageRoot, "rev-parse", "--verify", "HEAD" ]
+        , arguments =
+            [ "-C"
+            , System.File.pathToString platform packageRoot
+            , "rev-parse"
+            , "--verify"
+            , "HEAD"
+            ]
         , workingDirectory = System.File.pathToString platform packageRoot
         , environment = Dict.empty
         , allowedExitCodes = [ 0 ]
@@ -372,30 +419,48 @@ gitRevision permission platform packageRoot =
         |> Task.mapError
             (\processError ->
                 PortError.create "SOURCE_REVISION_FAILED"
-                    ("Could not determine the acquired Git revision: " ++ PortError.toString processError)
-            )
+                    ("Could not determine the acquired Git revision: "
+                        ++ PortError.toString processError))
 
 
 writeProvenance : FileSystem.Permission -> Path -> Provenance -> Task Error Path
 writeProvenance permission packageRoot provenance =
     System.File.writeText permission
-        (Path.append (Path.fromPosixString ".elm-to-gren-source.json") packageRoot)
-        (Encode.encode 2 (provenanceJson provenance))
+        (Path.append (Path.fromPosixString ".elm-to-gren-source.json")
+            packageRoot) (Encode.encode 2 (provenanceJson provenance))
 
 
 provenanceJson : Provenance -> Encode.Value
 provenanceJson provenance =
     Encode.object
-        [ { key = "strategy", value = Encode.string provenance.strategy }
-        , { key = "coordinate", value = Encode.string provenance.coordinate }
-        , { key = "manifestUrl", value = maybeString provenance.manifestUrl }
-        , { key = "registryEndpointUrl", value = maybeString provenance.registryEndpointUrl }
-        , { key = "sourceUrl", value = Encode.string provenance.sourceUrl }
-        , { key = "revision", value = maybeString provenance.revision }
-        , { key = "fromCache", value = Encode.bool provenance.fromCache }
-        , { key = "archiveEndpointUsed", value = Encode.bool False }
+        [ { key = "strategy"
+          , value = Encode.string provenance.strategy
+          }
+        , { key = "coordinate"
+          , value = Encode.string provenance.coordinate
+          }
+        , { key = "manifestUrl"
+          , value = maybeString provenance.manifestUrl
+          }
+        , { key = "registryEndpointUrl"
+          , value = maybeString provenance.registryEndpointUrl
+          }
+        , { key = "sourceUrl"
+          , value = Encode.string provenance.sourceUrl
+          }
+        , { key = "revision"
+          , value = maybeString provenance.revision
+          }
+        , { key = "fromCache"
+          , value = Encode.bool provenance.fromCache
+          }
+        , { key = "archiveEndpointUsed"
+          , value = Encode.bool False
+          }
         , { key = "fallbackReason"
-          , value = Encode.string "Portable verified archive extraction is not available in gren-lang/node 6; used a shallow exact-tag Git clone."
+          , value =
+              Encode.string
+                  "Portable verified archive extraction is not available in gren-lang/node 6; used a shallow exact-tag Git clone."
           }
         ]
 
@@ -415,7 +480,8 @@ registryProvenance manifest fromCache revision =
     { strategy = "github-exact-tag-shallow-clone"
     , coordinate = coordinate manifest
     , manifestUrl = Just (Cache.manifestUrl manifest.name manifest.version)
-    , registryEndpointUrl = Just (Cache.endpointUrl manifest.name manifest.version)
+    , registryEndpointUrl =
+        Just (Cache.endpointUrl manifest.name manifest.version)
     , sourceUrl = Cache.githubUrl manifest.name
     , revision = revision
     , fromCache = fromCache
@@ -424,7 +490,9 @@ registryProvenance manifest fromCache revision =
 
 coordinate : Manifest -> String
 coordinate manifest =
-    PackageName.toString manifest.name ++ "@" ++ Semver.versionToString manifest.version
+    PackageName.toString manifest.name
+        ++ "@"
+        ++ Semver.versionToString manifest.version
 
 
 sourceDirectory : Path -> Path
@@ -452,8 +520,8 @@ rebaseTree packageRoot provenance tree =
             sourceDirectory packageRoot
 
         rebase file =
-            { file
-                | path = Path.append (Path.fromPosixString file.relativePath) finalSource
+            { file | path =
+                Path.append (Path.fromPosixString file.relativePath) finalSource
             }
     in
     { tree
@@ -478,10 +546,7 @@ removeIfExists permission path =
                                     ("Could not remove "
                                         ++ Path.toPosixString path
                                         ++ ": "
-                                        ++ FileSystem.errorToString fileError
-                                    )
-                            )
+                                        ++ FileSystem.errorToString fileError))
 
                 else
-                    Task.succeed {}
-            )
+                    Task.succeed {})

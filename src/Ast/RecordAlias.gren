@@ -1,7 +1,4 @@
-module Ast.RecordAlias exposing
-    ( apply
-    , collectFromFile
-    )
+module Ast.RecordAlias exposing ( apply, collectFromFile )
 
 {-| Record type-alias constructors.
 
@@ -21,7 +18,7 @@ Also patterns: `Iso g r` → `{ get = g, reverseGet = r }`.
 names so cross-module uses (`Monocle.Iso.Iso`, `Optional.Optional`) resolve.
 -}
 
-import Array exposing (Array)
+import Array exposing ( Array )
 import Ast.Ref as Ref
 import Ast.Types exposing
     ( Declaration(..)
@@ -33,8 +30,8 @@ import Ast.Types exposing
     , TypeAnn(..)
     )
 import Ast.Walk as Walk
-import Dict exposing (Dict)
-import Maybe exposing (Maybe(..))
+import Dict exposing ( Dict )
+import Maybe exposing ( Maybe(..) )
 
 
 apply : Dict String (Array String) -> File -> File
@@ -47,9 +44,9 @@ apply packageAliases file =
         file
 
     else
-        { file
-            | declarations =
-                Array.indexedMap (\i d -> rewriteDeclaration aliases (i * 131) d) file.declarations
+        { file | declarations =
+            Array.indexedMap (\i d -> rewriteDeclaration aliases (i * 131) d)
+                file.declarations
         }
 
 
@@ -65,11 +62,8 @@ collectFromFile file =
             collectLocalAliases file.declarations
     in
     Dict.foldl
-        (\name fields acc ->
-            Dict.set (moduleName ++ "." ++ name) fields acc
-        )
-        Dict.empty
-        local
+        (\name fields acc -> Dict.set (moduleName ++ "." ++ name) fields acc)
+        Dict.empty local
 
 
 collectLocalAliases : Array Declaration -> Dict String (Array String)
@@ -80,20 +74,16 @@ collectLocalAliases declarations =
                 DeclAlias aliasDecl ->
                     when recordFieldNames aliasDecl.typeAnnotation is
                         Just names ->
-                            if Array.isEmpty names then
-                                acc
-
-                            else
-                                Dict.set aliasDecl.name names acc
+                            -- Include empty-record aliases (`type alias Empty = {}`):
+                            -- Elm allows bare `Empty` as a nullary constructor; Gren
+                            -- does not. We rewrite those uses to `{}` (see rewriteExpr).
+                            Dict.set aliasDecl.name names acc
 
                         Nothing ->
                             acc
 
                 _ ->
-                    acc
-        )
-        Dict.empty
-        declarations
+                    acc) Dict.empty declarations
 
 
 {-| Merge package aliases with this file's locals and import *aliases*.
@@ -106,7 +96,10 @@ Keys:
 Never register imported aliases under bare short names: `Internal.Deque`
 (record alias) must not steal local custom-type ctor `Deque` (elm-deque).
 -}
-buildAliasIndex : Dict String (Array String) -> File -> Dict String (Array String)
+buildAliasIndex :
+    Dict String (Array String)
+    -> File
+    -> Dict String (Array String)
 buildAliasIndex packageAliases file =
     let
         local =
@@ -128,12 +121,14 @@ recordFieldNames typeAnn =
             Nothing
 
 
-rewriteDeclaration : Dict String (Array String) -> Int -> Declaration -> Declaration
+rewriteDeclaration :
+    Dict String (Array String)
+    -> Int
+    -> Declaration
+    -> Declaration
 rewriteDeclaration aliases seed declaration =
-    Walk.mapDeclaration
-        (rewriteExpr aliases (seed + 1))
-        (rewritePattern aliases)
-        declaration
+    Walk.mapDeclaration (rewriteExpr aliases (seed + 1))
+        (rewritePattern aliases) declaration
 
 
 rewritePattern : Dict String (Array String) -> Pattern -> Pattern
@@ -168,18 +163,21 @@ rewriteExpr aliases seed expr =
         ExprVar ref ->
             when aliasFields aliases ref is
                 Just fields ->
-                    -- Bare alias ctor: η-expand to a record-building lambda.
-                    -- Seed tags unique binder names when several etas appear.
-                    etaRecord fields [] seed
+                    if Array.isEmpty fields then
+                        -- `type alias Empty = {}` used as value → `{}`
+                        ExprRecord []
+
+                    else
+                        -- Bare alias ctor: η-expand to a record-building lambda.
+                        -- Seed tags unique binder names when several etas appear.
+                        etaRecord fields [] seed
 
                 Nothing ->
                     expr
 
         _ ->
-            Walk.mapExprChildrenWithPatterns
-                (rewriteExpr aliases (seed + 1))
-                (rewritePattern aliases)
-                expr
+            Walk.mapExprChildrenWithPatterns (rewriteExpr aliases (seed + 1))
+                (rewritePattern aliases) expr
 
 
 rewriteApplication : Dict String (Array String) -> Int -> Array Expr -> Expr
@@ -191,7 +189,8 @@ rewriteApplication aliases seed parts =
         Just { first = head, rest = args } ->
             let
                 rewrittenArgs =
-                    Array.indexedMap (\i a -> rewriteExpr aliases (seed + 1 + i) a) args
+                    Array.indexedMap
+                        (\i a -> rewriteExpr aliases (seed + 1 + i) a) args
             in
             when head is
                 ExprVar ref ->
@@ -204,13 +203,26 @@ rewriteApplication aliases seed parts =
                                 have =
                                     Array.length rewrittenArgs
                             in
-                            if have >= need then
+                            if need == 0 then
+                                -- Nullary empty-record alias applied (should not happen)
+                                -- still yields `{}`; leftover args stay applied.
+                                if Array.isEmpty rewrittenArgs then
+                                    ExprRecord []
+
+                                else
+                                    ExprApplication
+                                        (Array.pushFirst (ExprRecord [])
+                                            rewrittenArgs)
+
+                            else if have >= need then
                                 let
                                     used =
                                         Array.slice 0 need rewrittenArgs
 
                                     extra =
-                                        Array.slice need (Array.length rewrittenArgs) rewrittenArgs
+                                        Array.slice need
+                                            (Array.length rewrittenArgs)
+                                            rewrittenArgs
 
                                     record =
                                         ExprRecord (zipFieldValues fields used)
@@ -220,18 +232,21 @@ rewriteApplication aliases seed parts =
 
                                 else
                                     -- Over-applied: record applied to leftovers (rare).
-                                    ExprApplication (Array.pushFirst record extra)
+                                    ExprApplication
+                                        (Array.pushFirst record extra)
 
                             else
                                 etaRecord fields rewrittenArgs seed
 
                         Nothing ->
                             ExprApplication
-                                (Array.pushFirst (rewriteExpr aliases seed head) rewrittenArgs)
+                                (Array.pushFirst (rewriteExpr aliases seed head)
+                                    rewrittenArgs)
 
                 _ ->
                     ExprApplication
-                        (Array.pushFirst (rewriteExpr aliases seed head) rewrittenArgs)
+                        (Array.pushFirst (rewriteExpr aliases seed head)
+                            rewrittenArgs)
 
 
 aliasFields : Dict String (Array String) -> NamedRef -> Maybe (Array String)
@@ -259,12 +274,12 @@ etaRecord fields supplied seed =
             Array.length fields - Array.length supplied
 
         argNames =
-            Array.initialize missing
-                0
+            Array.initialize missing 0
                 (\i -> "ra_" ++ String.fromInt seed ++ "_" ++ String.fromInt i)
 
         restVars =
-            Array.map (\n -> ExprVar { moduleName = Nothing, name = n }) argNames
+            Array.map (\n -> ExprVar { moduleName = Nothing, name = n })
+                argNames
 
         -- Gren Array.append(a,b) prepends b before a — build supplied ++ rest via fold.
         allArgs =
@@ -285,15 +300,13 @@ etaRecord fields supplied seed =
 
 zipFieldValues : Array String -> Array Expr -> Array Field
 zipFieldValues fields values =
-    Array.map2
-        (\name value -> { name = name, value = value })
-        fields
-        values
+    Array.map2 (\name value -> { name = name, value = value }) fields values
 
 
-zipFields : Array String -> Array Pattern -> Array { name : String, pattern : Pattern }
+zipFields :
+    Array String
+    -> Array Pattern
+    -> Array { name : String, pattern : Pattern }
 zipFields fields patterns =
-    Array.map2
-        (\name pattern -> { name = name, pattern = pattern })
-        fields
+    Array.map2 (\name pattern -> { name = name, pattern = pattern }) fields
         patterns

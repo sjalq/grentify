@@ -295,13 +295,13 @@ encodePattern lookup (Node range pattern) =
         IntPattern int ->
             Encode.object
                 [ ( "kind", Encode.string "int" )
-                , ( "value", Encode.int int )
+                , ( "value", encodeIntValue int )
                 ]
 
         HexPattern int ->
             Encode.object
                 [ ( "kind", Encode.string "hex" )
-                , ( "value", Encode.int int )
+                , ( "value", encodeIntValue int )
                 ]
 
         FloatPattern float ->
@@ -430,13 +430,15 @@ encodeExpression lookup (Node range expression) =
         Integer int ->
             Encode.object
                 [ ( "kind", Encode.string "int" )
-                , ( "value", Encode.int int )
+                -- String form: Json.Encode.int is JS-safe only; eetf smallBigMax
+                -- and similar big literals would otherwise encode as null.
+                , ( "value", encodeIntValue int )
                 ]
 
         Hex int ->
             Encode.object
                 [ ( "kind", Encode.string "hex" )
-                , ( "value", Encode.int int )
+                , ( "value", encodeIntValue int )
                 ]
 
         Floatable float ->
@@ -603,6 +605,15 @@ encodeMaybeString value =
 
         Nothing ->
             Encode.null
+
+
+{-| Encode integers as decimal strings. `Json.Encode.int` is limited to the
+JS-safe range and emits `null` for larger Elm ints (e.g. eetf `smallBigMax`).
+Host decode accepts both number and string forms.
+-}
+encodeIntValue : Int -> Encode.Value
+encodeIntValue n =
+    Encode.string (String.fromInt n)
 
 
 resolveModule : ModuleNameLookupTable -> Range -> ModuleName -> Maybe String

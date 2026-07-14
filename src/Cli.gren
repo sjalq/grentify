@@ -31,6 +31,7 @@ type alias Options =
     , mappingFiles : Array String
     , offline : Bool
     , verify : Bool
+    , format : Bool
     , json : Bool
     , namespaceModules : Bool
     , vendor : Bool
@@ -53,6 +54,7 @@ type alias ParseState =
     , mappingFiles : Array String
     , offline : Bool
     , verify : Bool
+    , format : Bool
     , json : Bool
     , namespaceModules : Bool
     , vendor : Bool
@@ -103,6 +105,7 @@ parse defaults rawArguments =
             , mappingFiles = []
             , offline = False
             , verify = True
+            , format = True
             , json = False
             , namespaceModules = selection.vendor
             , vendor = selection.vendor
@@ -167,6 +170,9 @@ parseArguments state arguments =
 
                 "--no-verify" ->
                     parseArguments { state | verify = False } rest
+
+                "--no-format" ->
+                    parseArguments { state | format = False } rest
 
                 "--json" ->
                     parseArguments { state | json = True } rest
@@ -316,6 +322,7 @@ finalize state =
                     , mappingFiles = state.mappingFiles
                     , offline = state.offline
                     , verify = state.verify
+                    , format = state.format
                     , json = state.json
                     , namespaceModules = state.namespaceModules
                     , vendor = state.vendor
@@ -355,6 +362,7 @@ Options:
                              (syntax still ports; no List→Array renames)
       --offline              Use cached registry data only
       --no-verify            Skip the final Gren compiler check
+      --no-format            Skip gren-format (also auto-skipped for volume catalogs)
       --json                 Print the final report as JSON
   -h, --help                 Show this help
   -v, --version              Show the tool version

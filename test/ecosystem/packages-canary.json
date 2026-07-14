@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "role": "candidate-suite",
+  "suiteId": "canary",
+  "notProof": "Fast regression set only. Not suite proof. Use npm run ecosystem:status after full suites.",
+  "methodology": "hand-picked coverage of common transform/verify surfaces",
+  "selection": "Small set for sub-minute loops: pure extras, bytes/parser-ish, cmd/response, browser surface.",
+  "target": 14,
+  "packages": [
+    { "name": "elm-community/list-extra", "version": "8.7.0", "surface": "list/cons+array" },
+    { "name": "rtfeldman/elm-hex", "version": "1.0.0", "surface": "tiny pure" },
+    { "name": "elm-community/maybe-extra", "version": "5.3.0", "surface": "maybe" },
+    { "name": "NoRedInk/elm-json-decode-pipeline", "version": "1.0.1", "surface": "json pipeline" },
+    { "name": "justinmimbs/date", "version": "4.1.0", "surface": "time/date" },
+    { "name": "miniBill/elm-codec", "version": "2.3.1", "surface": "multi-arg ctors" },
+    { "name": "etaque/elm-response", "version": "3.1.0", "surface": "cmd/tuple→record" },
+    { "name": "bburdette/toop", "version": "1.2.1", "surface": "multi-ctor types" },
+    { "name": "rtfeldman/elm-iso8601-date-strings", "version": "1.1.4", "surface": "parser" },
+    { "name": "jweir/elm-iso8601", "version": "7.0.1", "surface": "let+if sibling binds / format glue" },
+    { "name": "avh4/elm-color", "version": "1.0.0", "surface": "fixed-list when arms (hang class)" },
+    { "name": "krisajenkins/remotedata", "version": "6.1.0", "surface": "browser remote", "platform": "browser" },
+    { "name": "elm-community/html-extra", "version": "3.4.0", "surface": "html", "platform": "browser" },
+    { "name": "debois/elm-dom", "version": "1.3.0", "surface": "dom", "platform": "browser" }
+  ]
+}

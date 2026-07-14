@@ -1,4 +1,4 @@
-module Ast.Reserved exposing (apply, rewriteName)
+module Ast.Reserved exposing ( apply, rewriteName )
 
 {-| Rename identifiers that are keywords in Gren but ordinary names in Elm.
 
@@ -11,7 +11,7 @@ separate namespace from values, and must match across modules (Internals vs
 callers) — occupancy-based field renames would desync payloads.
 -}
 
-import Array exposing (Array)
+import Array exposing ( Array )
 import Ast.Types exposing
     ( Declaration(..)
     , Exposing(..)
@@ -28,8 +28,8 @@ import Ast.Types exposing
     , TypeAnn(..)
     )
 import Ast.Walk as Walk
-import Dict exposing (Dict)
-import Maybe exposing (Maybe(..))
+import Dict exposing ( Dict )
+import Maybe exposing ( Maybe(..) )
 import String
 
 
@@ -46,7 +46,8 @@ apply file =
     { file
         | moduleDefinition = rewriteModuleDef renames file.moduleDefinition
         , imports = Array.map (rewriteImport renames) file.imports
-        , declarations = Array.map (rewriteDeclaration renames) file.declarations
+        , declarations =
+              Array.map (rewriteDeclaration renames) file.declarations
         , comments = Array.map (rewriteDocsComment renames) file.comments
     }
 
@@ -126,10 +127,7 @@ buildRenameMap occupied =
                 }
 
             else
-                state
-        )
-        { map = Dict.empty, taken = occupied }
-        reservedWords
+                state) { map = Dict.empty, taken = occupied } reservedWords
         |> .map
 
 
@@ -146,7 +144,6 @@ pickFree name taken =
 
     else
         candidate
-
 
 -- COLLECT --------------------------------------------------------------------
 
@@ -248,10 +245,8 @@ collectDeclaration declaration acc =
             Array.foldl
                 (\ctor inner ->
                     occupy ctor.name inner
-                        |> (\a -> Array.foldl collectType a ctor.arguments)
-                )
-                withType
-                custom.constructors
+                        |> (\a -> Array.foldl collectType a ctor.arguments))
+                withType custom.constructors
 
         DeclPort signature ->
             occupy signature.name acc
@@ -320,16 +315,14 @@ collectPattern pattern acc =
             Array.foldl
                 (\field inner ->
                     occupy field.name inner
-                        |> collectPattern field.pattern
-                )
-                acc
-                fields
+                        |> collectPattern field.pattern) acc fields
 
         _ ->
             Walk.mapPatternChildren identity pattern
                 |> (\_ -> acc)
-                |> (\a ->
-                        -- structural children
+                |>
+                    (\a ->
+                    -- structural children
                         when pattern is
                             PatTuple items ->
                                 Array.foldl collectPattern a items
@@ -342,8 +335,7 @@ collectPattern pattern acc =
                                     |> collectPattern tail
 
                             _ ->
-                                a
-                   )
+                                a)
 
 
 collectExpr : Expr -> Dict String {} -> Dict String {}
@@ -356,10 +348,7 @@ collectExpr expr acc =
             Array.foldl
                 (\field inner ->
                     occupy field.name inner
-                        |> collectExpr field.value
-                )
-                acc
-                fields
+                        |> collectExpr field.value) acc fields
 
         ExprAccess { record = record, field = field } ->
             collectExpr record acc
@@ -370,44 +359,44 @@ collectExpr expr acc =
 
         ExprUpdate { name = name, fields = fields } ->
             occupy name acc
-                |> (\a ->
+                |>
+                    (\a ->
                         Array.foldl
                             (\field inner ->
                                 occupy field.name inner
-                                    |> collectExpr field.value
-                            )
-                            a
-                            fields
-                   )
+                                    |> collectExpr field.value) a fields)
 
         _ ->
             Walk.foldExprChildren collectExpr acc expr
-                |> (\a ->
+                |>
+                    (\a ->
                         when expr is
-                            ExprLambda { arguments = arguments, expression = body } ->
+                            ExprLambda
+                                { arguments = arguments, expression = body } ->
                                 Array.foldl collectPattern a arguments
                                     |> collectExpr body
 
                             ExprCase { expression = scrutinee, cases = arms } ->
                                 collectExpr scrutinee a
-                                    |> (\inner ->
+                                    |>
+                                        (\inner ->
                                             Array.foldl
                                                 (\arm acc2 ->
-                                                    collectPattern arm.pattern acc2
-                                                        |> collectExpr arm.body
-                                                )
-                                                inner
-                                                arms
-                                       )
+                                                    collectPattern arm.pattern
+                                                        acc2
+                                                        |> collectExpr arm.body)
+                                                inner arms)
 
-                            ExprLet { declarations = declarations, expression = body } ->
+                            ExprLet
+                                { declarations = declarations
+                                , expression = body
+                                } ->
                                 Array.foldl collectLetDecl a declarations
                                     |> collectExpr body
 
                             _ ->
                                 -- foldExprChildren already walked child exprs for other forms
-                                a
-                   )
+                                a)
 
 
 collectLetDecl : LetDecl -> Dict String {} -> Dict String {}
@@ -427,15 +416,12 @@ identity : a -> a
 identity x =
     x
 
-
 -- REWRITE --------------------------------------------------------------------
 
 
 rewriteModuleDef : RenameMap -> ModuleDef -> ModuleDef
 rewriteModuleDef renames moduleDef =
-    { moduleDef
-        | exposing_ = rewriteExposing renames moduleDef.exposing_
-    }
+    { moduleDef | exposing_ = rewriteExposing renames moduleDef.exposing_ }
 
 
 rewriteImport : RenameMap -> Import -> Import
@@ -479,8 +465,10 @@ rewriteDeclaration renames declaration =
             DeclFunction
                 { fn
                     | name = rewriteWith renames fn.name
-                    , signature = Maybe.map (rewriteSignature renames) fn.signature
-                    , arguments = Array.map (rewritePattern renames) fn.arguments
+                    , signature =
+                          Maybe.map (rewriteSignature renames) fn.signature
+                    , arguments =
+                          Array.map (rewritePattern renames) fn.arguments
                     , expression = rewriteExpr renames fn.expression
                 }
 
@@ -488,8 +476,10 @@ rewriteDeclaration renames declaration =
             DeclAlias
                 { aliasDecl
                     | name = rewriteWith renames aliasDecl.name
-                    , generics = Array.map (rewriteWith renames) aliasDecl.generics
-                    , typeAnnotation = rewriteType renames aliasDecl.typeAnnotation
+                    , generics =
+                          Array.map (rewriteWith renames) aliasDecl.generics
+                    , typeAnnotation =
+                          rewriteType renames aliasDecl.typeAnnotation
                 }
 
         DeclCustomType custom ->
@@ -498,13 +488,13 @@ rewriteDeclaration renames declaration =
                     | name = rewriteWith renames custom.name
                     , generics = Array.map (rewriteWith renames) custom.generics
                     , constructors =
-                        Array.map
-                            (\ctor ->
-                                { name = rewriteWith renames ctor.name
-                                , arguments = Array.map (rewriteType renames) ctor.arguments
-                                }
-                            )
-                            custom.constructors
+                          Array.map
+                              (\ctor ->
+                                  { name = rewriteWith renames ctor.name
+                                  , arguments =
+                                      Array.map (rewriteType renames)
+                                          ctor.arguments
+                                  }) custom.constructors
                 }
 
         DeclPort signature ->
@@ -595,10 +585,7 @@ rewritePattern renames pattern =
                     (\field ->
                         { name = rewriteField field.name
                         , pattern = rewritePattern renames field.pattern
-                        }
-                    )
-                    fields
-                )
+                        }) fields)
 
         _ ->
             Walk.mapPatternChildren (rewritePattern renames) pattern
@@ -616,10 +603,7 @@ rewriteExpr renames expr =
                     (\field ->
                         { name = rewriteField field.name
                         , value = rewriteExpr renames field.value
-                        }
-                    )
-                    fields
-                )
+                        }) fields)
 
         ExprAccess { record = record, field = field } ->
             ExprAccess
@@ -638,13 +622,12 @@ rewriteExpr renames expr =
                         (\field ->
                             { name = rewriteField field.name
                             , value = rewriteExpr renames field.value
-                            }
-                        )
-                        fields
+                            }) fields
                 }
 
         _ ->
-            Walk.mapExprChildrenWithPatterns (rewriteExpr renames) (rewritePattern renames) expr
+            Walk.mapExprChildrenWithPatterns (rewriteExpr renames)
+                (rewritePattern renames) expr
 
 
 rewriteDocsComment : RenameMap -> String -> String
@@ -684,12 +667,15 @@ rewriteDocsTokens renames line =
                     rewritten =
                         rewriteWith renames bare
                 in
-                if String.endsWith "," token && rewritten /= bare then
+                -- Always reattach a trailing comma when the source token had
+                -- one. Gren docs requires `@docs a, b, c`; dropping commas
+                -- when the name is unchanged makes nearly every package fail
+                -- verification with DOCS MISTAKE.
+                if String.endsWith "," token then
                     rewritten ++ ","
 
                 else
-                    rewritten
-            )
+                    rewritten)
         |> String.join " "
 
 
@@ -700,12 +686,14 @@ rewriteLetDecl renames declaration =
             LetFunction
                 { fn
                     | name = rewriteWith renames fn.name
-                    , arguments = Array.map (rewritePattern renames) fn.arguments
+                    , arguments =
+                          Array.map (rewritePattern renames) fn.arguments
                     , expression = rewriteExpr renames fn.expression
                 }
 
         LetDestructure _ ->
-            Walk.mapLetDecl (rewriteExpr renames) (rewritePattern renames) declaration
+            Walk.mapLetDecl (rewriteExpr renames) (rewritePattern renames)
+                declaration
 
 
 rewriteRef : RenameMap -> NamedRef -> NamedRef

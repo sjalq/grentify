@@ -14,9 +14,9 @@ The registry index is cached separately because it is mutable. Per-version
 manifests and cloned source trees live below coordinate-specific directories.
 -}
 
-import Elm.PackageName as PackageName exposing (Name)
-import Elm.Semver as Semver exposing (Version)
-import FileSystem.Path as Path exposing (Path)
+import Elm.PackageName as PackageName exposing ( Name )
+import Elm.Semver as Semver exposing ( Version )
+import FileSystem.Path as Path exposing ( Path )
 
 
 allPackagesPath : Path -> Path

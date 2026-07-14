@@ -17,8 +17,8 @@ Local paths are deliberately resolved by `Acquire.Provider` before this parser
 is used, so a missing path cannot silently turn into a different package.
 -}
 
-import Elm.PackageName as PackageName exposing (Name)
-import Elm.Semver as Semver exposing (Version)
+import Elm.PackageName as PackageName exposing ( Name )
+import Elm.Semver as Semver exposing ( Version )
 
 
 type Coordinate
@@ -48,14 +48,14 @@ parse source =
 
         build nameSource selected =
             PackageName.parse nameSource
-                |> Result.mapError (PackageName.errorToString >> InvalidPackageName)
+                |> Result.mapError
+                    (PackageName.errorToString >> InvalidPackageName)
                 |> Result.map
                     (\name ->
                         Coordinate
                             { packageName = name
                             , selector = selected
-                            }
-                    )
+                            })
     in
     when pieces is
         [ nameSource ] ->
@@ -95,8 +95,7 @@ toString coordinate =
                     "latest"
 
                 Exact version ->
-                    Semver.versionToString version
-           )
+                    Semver.versionToString version)
 
 
 errorToString : Error -> String
@@ -106,10 +105,16 @@ errorToString error =
             message
 
         EmptySelector source ->
-            "Invalid Elm package coordinate '" ++ source ++ "': expected 'latest' or an exact semantic version after @."
+            "Invalid Elm package coordinate '"
+                ++ source
+                ++ "': expected 'latest' or an exact semantic version after @."
 
         InvalidSelector source ->
-            "Invalid Elm package coordinate '" ++ source ++ "': expected 'latest' or an exact x.y.z version after @."
+            "Invalid Elm package coordinate '"
+                ++ source
+                ++ "': expected 'latest' or an exact x.y.z version after @."
 
         TooManySelectors source ->
-            "Invalid Elm package coordinate '" ++ source ++ "': expected at most one @ selector."
+            "Invalid Elm package coordinate '"
+                ++ source
+                ++ "': expected at most one @ selector."

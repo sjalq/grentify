@@ -9,5 +9,22 @@ review/elm-stuff/
 *.log
 .DS_Store
 
-# Demo Gren app (local only; not part of the port tool)
+# Demo Gren apps (local only; not part of the port tool)
 example-project/
+example-project-syntax-review/
+
+# Local caches / packages under tracked demo apps
+example-project-review/.elm-to-gren/
+example-project-review/gren_packages/
+example-project-review/.gren/
+example-project-review/index.html
+examples/**/.elm-to-gren/
+examples/**/gren_packages/
+examples/**/.gren/
+examples/**/index.html
+
+# Generated multi-tab site output (npm run site:build)
+site/
+
+# Scratch
+scripts/temp/

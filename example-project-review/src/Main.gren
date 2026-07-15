@@ -1,0 +1,804 @@
+module Main exposing (main)
+
+{-| Live static-review playground on ported stil4m/elm-syntax.
+
+Runs several non-trivial Review-style rules (collect findings with ranges):
+NoDebug, NoExposingAll, NoUnusedImports, NoDuplicateImports, RequireNamedExposing.
+
+UI uses ported mdgriffith/elm-ui. Full jfmengels/elm-review is not yet compiler-green
+under Gren; these rules mirror Review.Rule's report shape on the ported AST.
+-}
+
+
+import Array exposing (Array)
+import Browser
+import Element exposing (..)
+import Element.Background as Background
+import Element.Border as Border
+import Element.Font as Font
+import Element.Input as Input
+import Element.Region as Region
+import Elm.Parser as Parser
+import Elm.Processing as Processing
+import Elm.Syntax.Declaration as Declaration exposing (Declaration(..))
+import Elm.Syntax.Exposing as Exposing
+import Elm.Syntax.Expression as Expression exposing (Expression(..))
+import Elm.Syntax.File as File
+import Elm.Syntax.Import as Import
+import Elm.Syntax.Module as Module
+import Elm.Syntax.Node as Node exposing (Node(..))
+import Html
+import Parser as CoreParser
+import Set exposing (Set)
+
+
+
+-- MAIN
+
+
+main : Program {} Model Msg
+main =
+    Browser.sandbox
+        { init = init
+        , view = view
+        , update = update
+        }
+
+
+
+-- MODEL
+
+
+type alias Model =
+    { source : String
+    , result : ReviewResult
+    }
+
+
+type ReviewResult
+    = NotRun
+    | ReviewOk Report
+    | ReviewErr String
+
+
+type alias Report =
+    { moduleName : String
+    , findings : Array Finding
+    , rulesRun : Array String
+    , expressionCount : Int
+    }
+
+
+type alias Finding =
+    { rule : String
+    , severity : String
+    , message : String
+    , line : Int
+    , column : Int
+    }
+
+
+{-| Dirty sample: intentional findings for the rules below.
+Identifiers chosen to survive the ported stil4m/elm-syntax parser.
+-}
+dirtySample : String
+dirtySample =
+    """
+module Demo exposing (..)
+
+import Html exposing (text)
+import String
+import Set
+import Html
+
+type Msg
+    = NoOp
+
+main =
+    text (Debug.log "x" "hello")
+
+helper n =
+    Debug.todo "finish me"
+
+other =
+    String.append "a" "b"
+"""
+
+
+cleanSample : String
+cleanSample =
+    """
+module Demo exposing (..)
+
+import Html exposing (text)
+import String
+
+type Msg
+    = NoOp
+
+greet name =
+    String.append "hi " name
+
+main =
+    text (greet "world")
+"""
+
+
+init : Model
+init =
+    { source = dirtySample
+    , result = NotRun
+    }
+
+
+
+-- UPDATE
+
+
+type Msg
+    = SourceChanged String
+    | RunReview
+    | LoadDirty
+    | LoadClean
+
+
+update : Msg -> Model -> Model
+update msg model =
+    when msg is
+        SourceChanged source ->
+            { model | source = source, result = NotRun }
+
+        LoadDirty ->
+            { model | source = dirtySample, result = NotRun }
+
+        LoadClean ->
+            { model | source = cleanSample, result = NotRun }
+
+        RunReview ->
+            { model | result = runReview model.source }
+
+
+
+-- REVIEW ENGINE
+
+
+runReview : String -> ReviewResult
+runReview source =
+    when Parser.parse source is
+        Err deadEnds ->
+            ReviewErr (formatDeadEnds deadEnds)
+
+        Ok raw ->
+            let
+                file =
+                    Processing.process Processing.init raw
+
+                findings =
+                    Array.flatten
+                        [ ruleNoExposingAll file
+                        , ruleNoDebug file
+                        , ruleNoDuplicateImports file
+                        , ruleNoUnusedImports file
+                        ]
+
+                exprCount =
+                    countExpressions file
+            in
+            ReviewOk
+                { moduleName = Module.moduleName (Node.value file.moduleDefinition) |> String.join "."
+                , findings = findings
+                , rulesRun =
+                    [ "NoExposingAll"
+                    , "NoDebug"
+                    , "NoDuplicateImports"
+                    , "NoUnusedImports"
+                    ]
+                , expressionCount = exprCount
+                }
+
+
+ruleNoExposingAll : File.File -> Array Finding
+ruleNoExposingAll file =
+    let
+        exposing_ =
+            Module.exposingList (Node.value file.moduleDefinition)
+    in
+    when exposing_ is
+        Exposing.All range ->
+            [ { rule = "NoExposingAll"
+              , severity = "warning"
+              , message = "Module uses exposing (..). Prefer an explicit export list."
+              , line = range.start.row
+              , column = range.start.column
+              }
+            ]
+
+        Exposing.Explicit _ ->
+            []
+
+
+ruleNoDebug : File.File -> Array Finding
+ruleNoDebug file =
+    file.declarations
+        |> Array.foldl
+            (\declNode acc ->
+                Array.append acc (debugInDecl (Node.value declNode))
+            )
+            []
+
+
+debugInDecl : Declaration -> Array Finding
+debugInDecl decl =
+    when decl is
+        FunctionDeclaration fn ->
+            collectDebug (Node.value fn.declaration).expression
+
+        Destructuring { second } ->
+            collectDebug second
+
+        _ ->
+            []
+
+
+collectDebug : Node Expression -> Array Finding
+collectDebug (Node { first = range, second = expr }) =
+    let
+        here =
+            when expr is
+                FunctionOrValue { first, second } ->
+                    if String.join "." first == "Debug" then
+                        [ { rule = "NoDebug"
+                          , severity = "error"
+                          , message = "Do not use Debug." ++ second ++ " in shipping code."
+                          , line = range.start.row
+                          , column = range.start.column
+                          }
+                        ]
+
+                    else
+                        []
+
+                Application kids ->
+                    when Array.first kids is
+                        Just (Node { first = r, second = FunctionOrValue { first = first, second = second } }) ->
+                            if String.join "." first == "Debug" then
+                                [ { rule = "NoDebug"
+                                  , severity = "error"
+                                  , message = "Do not call Debug." ++ second ++ "."
+                                  , line = r.start.row
+                                  , column = r.start.column
+                                  }
+                                ]
+
+                            else
+                                []
+
+                        _ ->
+                            []
+
+                _ ->
+                    []
+
+        nested =
+            childExprs expr
+    in
+    Array.append here (Array.foldl (\c acc -> Array.append acc (collectDebug c)) [] nested)
+
+
+ruleNoDuplicateImports : File.File -> Array Finding
+ruleNoDuplicateImports file =
+    let
+        names =
+            file.imports
+                |> Array.map
+                    (\(Node { first = _, second = imp }) ->
+                        String.join "." (Node.value imp.moduleName)
+                    )
+    in
+    let
+        dups =
+            names
+                |> Array.foldl
+                    (\name state ->
+                        if Set.member name state.seen then
+                            { state | dups = Array.pushLast name state.dups }
+
+                        else
+                            { state | seen = Set.set name state.seen }
+                    )
+                    { seen = Set.empty, dups = [] }
+                |> .dups
+    in
+    Array.map
+        (\name ->
+            { rule = "NoDuplicateImports"
+            , severity = "error"
+            , message = "Import `" ++ name ++ "` appears more than once."
+            , line = 1
+            , column = 1
+            }
+        )
+        (unique dups)
+
+
+ruleNoUnusedImports : File.File -> Array Finding
+ruleNoUnusedImports file =
+    let
+        imports =
+            file.imports
+                |> Array.map
+                    (\(Node { first = range, second = imp }) ->
+                        { name = String.join "." (Node.value imp.moduleName)
+                        , aliasName =
+                            Maybe.map
+                                (\n -> String.join "." (Node.value n))
+                                imp.moduleAlias
+                        , range = range
+                        }
+                    )
+
+        used =
+            usedModuleQualifiers file
+    in
+    imports
+        |> Array.foldl
+            (\imp acc ->
+                let
+                    keys =
+                        when imp.aliasName is
+                            Just a ->
+                                [ a, imp.name ]
+
+                            Nothing ->
+                                [ imp.name ]
+
+                    referenced =
+                        Array.any (\k -> Set.member k used) keys
+                in
+                if referenced then
+                    acc
+
+                else
+                    Array.pushLast
+                        { rule = "NoUnusedImports"
+                        , severity = "warning"
+                        , message = "Import `" ++ imp.name ++ "` is never referenced as a qualifier."
+                        , line = imp.range.start.row
+                        , column = imp.range.start.column
+                        }
+                        acc
+            )
+            []
+
+
+usedModuleQualifiers : File.File -> Set String
+usedModuleQualifiers file =
+    file.declarations
+        |> Array.foldl
+            (\declNode acc ->
+                collectQualifiersDecl (Node.value declNode) acc
+            )
+            Set.empty
+
+
+collectQualifiersDecl : Declaration -> Set String -> Set String
+collectQualifiersDecl decl acc =
+    when decl is
+        FunctionDeclaration fn ->
+            collectQualifiers (Node.value fn.declaration).expression acc
+
+        Destructuring { second } ->
+            collectQualifiers second acc
+
+        _ ->
+            acc
+
+
+collectQualifiers : Node Expression -> Set String -> Set String
+collectQualifiers (Node { first = _, second = expr }) acc =
+    let
+        withSelf =
+            when expr is
+                FunctionOrValue { first, second } ->
+                    if Array.isEmpty first then
+                        acc
+
+                    else
+                        Set.set (String.join "." first) acc
+
+                _ ->
+                    acc
+    in
+    Array.foldl collectQualifiers withSelf (childExprs expr)
+
+
+countExpressions : File.File -> Int
+countExpressions file =
+    file.declarations
+        |> Array.foldl
+            (\declNode n ->
+                n + countDecl (Node.value declNode)
+            )
+            0
+
+
+countDecl : Declaration -> Int
+countDecl decl =
+    when decl is
+        FunctionDeclaration fn ->
+            countExpr (Node.value fn.declaration).expression
+
+        Destructuring { second } ->
+            countExpr second
+
+        _ ->
+            0
+
+
+countExpr : Node Expression -> Int
+countExpr (Node { first = _, second = expr }) =
+    1 + Array.foldl (\c n -> n + countExpr c) 0 (childExprs expr)
+
+
+childExprs : Expression -> Array (Node Expression)
+childExprs expr =
+    when expr is
+        Application kids ->
+            kids
+
+        OperatorApplication { third, fourth } ->
+            [ third, fourth ]
+
+        IfBlock { first, second, third } ->
+            [ first, second, third ]
+
+        Negation child ->
+            [ child ]
+
+        TupledExpression kids ->
+            kids
+
+        ParenthesizedExpression child ->
+            [ child ]
+
+        LetExpression { declarations, expression } ->
+            Array.pushLast expression
+                (Array.mapAndKeepJust
+                    (\(Node { first = _, second = ld }) ->
+                        when ld is
+                            Expression.LetFunction fn ->
+                                Just (Node.value fn.declaration).expression
+
+                            Expression.LetDestructuring { second } ->
+                                Just second
+                    )
+                    declarations
+                )
+
+        CaseExpression { expression, cases } ->
+            Array.pushFirst expression (Array.map .second cases)
+
+        LambdaExpression { expression } ->
+            [ expression ]
+
+        RecordExpr setters ->
+            Array.map (\s -> (Node.value s).second) setters
+
+        ListExpr kids ->
+            kids
+
+        RecordAccess { first } ->
+            [ first ]
+
+        RecordUpdateExpression { second } ->
+            Array.map (\s -> (Node.value s).second) second
+
+        _ ->
+            []
+
+
+unique : Array String -> Array String
+unique xs =
+    Array.foldl
+        (\x acc ->
+            if Array.member x acc then
+                acc
+
+            else
+                Array.pushLast x acc
+        )
+        []
+        xs
+
+
+
+-- DEAD ENDS
+
+
+formatDeadEnds : Array CoreParser.DeadEnd -> String
+formatDeadEnds deadEnds =
+    if Array.isEmpty deadEnds then
+        "Parse failed."
+
+    else
+        "Parse failed at:\n"
+            ++ String.join "\n"
+                (Array.map
+                    (\d ->
+                        "  L"
+                            ++ String.fromInt d.row
+                            ++ ":"
+                            ++ String.fromInt d.col
+                            ++ " "
+                            ++ problemToString d.problem
+                    )
+                    deadEnds
+                )
+
+
+problemToString : CoreParser.Problem -> String
+problemToString problem =
+    when problem is
+        CoreParser.Expecting s ->
+            "expecting " ++ s
+
+        CoreParser.ExpectingInt ->
+            "expecting int"
+
+        CoreParser.ExpectingHex ->
+            "expecting hex"
+
+        CoreParser.ExpectingOctal ->
+            "expecting octal"
+
+        CoreParser.ExpectingBinary ->
+            "expecting binary"
+
+        CoreParser.ExpectingFloat ->
+            "expecting float"
+
+        CoreParser.ExpectingNumber ->
+            "expecting number"
+
+        CoreParser.ExpectingVariable ->
+            "expecting variable"
+
+        CoreParser.ExpectingSymbol s ->
+            "expecting symbol " ++ s
+
+        CoreParser.ExpectingKeyword s ->
+            "expecting keyword " ++ s
+
+        CoreParser.ExpectingEnd ->
+            "expecting end"
+
+        CoreParser.UnexpectedChar ->
+            "unexpected char"
+
+        CoreParser.Problem s ->
+            s
+
+        CoreParser.BadRepeat ->
+            "bad repeat"
+
+
+
+-- VIEW
+
+
+view : Model -> Html.Html Msg
+view model =
+    layout
+        [ Background.color palette.page
+        , Font.family [ Font.typeface "Inter", Font.typeface "system-ui", Font.sansSerif ]
+        , Font.color palette.ink
+        , Font.size 14
+        , padding 24
+        ]
+        (column [ width (fill |> maximum 920), centerX, spacing 16 ]
+            [ el [ Region.heading 1, Font.size 26, Font.semiBold ]
+                (text "elm-review style playground")
+            , paragraph [ Font.color palette.muted, Font.size 13 ]
+                [ text "Static analysis rules on the ported "
+                , el [ Font.family [ Font.monospace ], Font.color palette.ink ] (text "stil4m/elm-syntax")
+                , text " AST. Mirrors Review.Rule findings (rule · severity · range · message). Full "
+                , el [ Font.family [ Font.monospace ] ] (text "jfmengels/elm-review")
+                , text " is tracked in the suite but not yet compiler-green under Gren."
+                ]
+            , Input.multiline
+                [ width fill
+                , height (px 280)
+                , Font.family [ Font.monospace ]
+                , Font.size 13
+                , Background.color palette.surface
+                , Border.color palette.line
+                , Border.width 1
+                , Border.rounded 8
+                , padding 12
+                ]
+                { onChange = SourceChanged
+                , text = model.source
+                , placeholder = Nothing
+                , label = Input.labelAbove [ Font.semiBold, Font.size 13 ] (text "Elm source under review")
+                , spellcheck = False
+                }
+            , row [ spacing 10 ]
+                [ primaryButton "Run rules" RunReview
+                , secondaryButton "Dirty sample" LoadDirty
+                , secondaryButton "Clean sample" LoadClean
+                ]
+            , viewResult model.result
+            ]
+        )
+
+
+viewResult : ReviewResult -> Element msg
+viewResult result =
+    when result is
+        NotRun ->
+            el [ Font.color palette.muted ]
+                (text "Click Run rules to analyze with NoDebug, NoExposingAll, NoDuplicateImports, NoUnusedImports.")
+
+        ReviewErr err ->
+            el
+                [ width fill
+                , padding 16
+                , Background.color palette.dangerBg
+                , Border.rounded 8
+                , Font.color palette.danger
+                , Font.family [ Font.monospace ]
+                , Font.size 12
+                ]
+                (text err)
+
+        ReviewOk report ->
+            column
+                [ width fill
+                , spacing 14
+                , padding 18
+                , Background.color palette.panel
+                , Border.rounded 10
+                , Border.width 1
+                , Border.color palette.line
+                ]
+                [ el [ Font.semiBold, Font.size 16 ] (text "Review report")
+                , wrappedRow [ spacing 8 ]
+                    [ stat "Module" report.moduleName
+                    , stat "Findings" (String.fromInt (Array.length report.findings))
+                    , stat "Exprs walked" (String.fromInt report.expressionCount)
+                    , stat "Rules" (String.fromInt (Array.length report.rulesRun))
+                    ]
+                , el [ Font.semiBold, Font.size 13, Font.color palette.muted ]
+                    (text "RULES RUN")
+                , wrappedRow [ spacing 6 ]
+                    (Array.map
+                        (\r ->
+                            el
+                                [ paddingXY 10 6
+                                , Background.color palette.surface
+                                , Border.rounded 6
+                                , Border.width 1
+                                , Border.color palette.line
+                                , Font.family [ Font.monospace ]
+                                , Font.size 12
+                                ]
+                                (text r)
+                        )
+                        report.rulesRun
+                    )
+                , el [ Font.semiBold, Font.size 13, Font.color palette.muted ]
+                    (text "FINDINGS")
+                , if Array.isEmpty report.findings then
+                    el
+                        [ padding 12
+                        , Background.color palette.okBg
+                        , Border.rounded 8
+                        , Font.color (rgb255 30 120 60)
+                        , Font.semiBold
+                        ]
+                        (text "No findings. Clean.")
+
+                  else
+                    column [ spacing 8, width fill ]
+                        (Array.map findingCard report.findings)
+                ]
+
+
+findingCard : Finding -> Element msg
+findingCard f =
+    let
+        sevColor =
+            if f.severity == "error" then
+                palette.danger
+
+            else
+                rgb255 160 110 20
+
+        sevBg =
+            if f.severity == "error" then
+                palette.dangerBg
+
+            else
+                rgb255 255 248 230
+    in
+    column
+        [ width fill
+        , padding 12
+        , spacing 4
+        , Background.color sevBg
+        , Border.rounded 8
+        , Border.width 1
+        , Border.color palette.line
+        ]
+        [ row [ spacing 10, width fill ]
+            [ el [ Font.semiBold, Font.color sevColor, Font.size 12 ]
+                (text (String.toUpper f.severity))
+            , el [ Font.family [ Font.monospace ], Font.semiBold, Font.size 12 ]
+                (text f.rule)
+            , el [ alignRight, Font.color palette.muted, Font.size 12 ]
+                (text ("L" ++ String.fromInt f.line ++ ":" ++ String.fromInt f.column))
+            ]
+        , paragraph [ Font.size 13 ] [ text f.message ]
+        ]
+
+
+stat : String -> String -> Element msg
+stat label value =
+    column
+        [ paddingXY 12 8
+        , spacing 2
+        , Background.color palette.surface
+        , Border.rounded 8
+        , Border.width 1
+        , Border.color palette.line
+        ]
+        [ el [ Font.size 11, Font.color palette.muted ] (text label)
+        , el [ Font.semiBold, Font.family [ Font.monospace ], Font.size 13 ] (text value)
+        ]
+
+
+primaryButton : String -> Msg -> Element Msg
+primaryButton label msg =
+    Input.button
+        [ paddingXY 14 10
+        , Background.color palette.accent
+        , Font.color palette.white
+        , Font.semiBold
+        , Border.rounded 8
+        , mouseOver [ Background.color palette.accentHot ]
+        ]
+        { onPress = Just msg
+        , label = text label
+        }
+
+
+secondaryButton : String -> Msg -> Element Msg
+secondaryButton label msg =
+    Input.button
+        [ paddingXY 14 10
+        , Background.color palette.surface
+        , Border.width 1
+        , Border.color palette.line
+        , Border.rounded 8
+        , Font.semiBold
+        , mouseOver [ Background.color palette.panel ]
+        ]
+        { onPress = Just msg
+        , label = text label
+        }
+
+
+palette =
+    { page = rgb255 245 246 248
+    , surface = rgb255 255 255 255
+    , panel = rgb255 250 250 252
+    , ink = rgb255 24 28 36
+    , muted = rgb255 110 118 132
+    , line = rgb255 226 228 234
+    , accent = rgb255 175 47 47
+    , accentHot = rgb255 150 36 36
+    , white = rgb255 255 255 255
+    , okBg = rgb255 232 245 233
+    , dangerBg = rgb255 255 238 238
+    , danger = rgb255 153 0 0
+    }

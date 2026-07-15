@@ -4,7 +4,7 @@
   "notProof": "This file is a CANDIDATE list only. Package count here is not a success count. The only proof of successful ports is .test-cache/ecosystem-proof/LAST_RUN.json produced by npm run test:ecosystem / test:ecosystem-browser on the current git commit. Query with: npm run ecosystem:status",
   "methodology": "reverse-dependency-popularity",
   "selection": "Most popular qualifying packages by reverse-dependency count. When the catalog was assembled, failures (kernel/ports/GLSL/timeouts/etc.) were skipped in popularity order so the list could grow; that historical selection is NOT a claim that HEAD still ports them. Re-run the suite after transform changes.",
-  "target": 200,
+  "target": 202,
   "platformSet": [
     "elm/bytes",
     "elm/core",
@@ -817,6 +817,14 @@
     {
       "name": "mpizenberg/elm-placeholder-pkg",
       "version": "1.0.0"
+    },
+    {
+      "name": "stil4m/elm-syntax",
+      "version": "7.3.9"
+    },
+    {
+      "name": "jfmengels/elm-review",
+      "version": "2.16.6"
     }
   ]
 }

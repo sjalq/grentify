@@ -47,7 +47,9 @@
     "test:integration": "npm run test:e2e",
     "test:all": "npm run check && npm test && npm run test:rule && npm run test:format && npm run test:e2e && npm run test:ecosystem && npm run test:ecosystem-browser",
     "prepack": "npm run test:all && npm run build",
-    "start": "npm run build --silent && node bin/elm-to-gren.cjs"
+    "start": "npm run build --silent && node bin/elm-to-gren.cjs",
+    "site:build": "node scripts/build-site.cjs",
+    "site:deploy": "node scripts/build-site.cjs && CLOUDFLARE_ACCOUNT_ID=0321775f3f75e93080c81c71a405c1ae npx wrangler pages deploy site --project-name=grentify --branch=main --commit-dirty=true"
   },
   "engines": {
     "node": ">=22"

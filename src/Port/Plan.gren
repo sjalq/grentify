@@ -119,6 +119,7 @@ buildManifest options =
         (addDependency options)
         (Ok Dict.empty)
         options.source.dependencies
+        |> Result.andThen (hoistTransitiveLocals options)
         |> Result.map
             (\dependencies ->
                 { kind =
@@ -148,6 +149,43 @@ buildManifest options =
                         options.source.sourceDirectories
                 }
             )
+
+
+{-| Gren rejects nested `local:` deps unless the root also declares the same
+local package. For the root package only, surface every generated sibling
+(even if only transitive in the Elm graph) so nested local paths resolve
+compatibly (e.g. elm-review → elm-syntax → structured-writer).
+-}
+hoistTransitiveLocals
+    : { source : Manifest
+      , identity : Identity
+      , registry : Registry
+      , rootElmName : String
+      , localDependencies : Dict String Identity
+      }
+    -> Dict String Dependency
+    -> Result Error (Dict String Dependency)
+hoistTransitiveLocals options dependencies =
+    if options.identity.elmName /= options.rootElmName then
+        Ok dependencies
+
+    else
+        Dict.foldl
+            (\_ local accumulated ->
+                accumulated
+                    |> Result.andThen
+                        (\deps ->
+                            if local.grenName == options.identity.grenName then
+                                Ok deps
+
+                            else
+                                setDependency local.grenName
+                                    (LocalPath (localPath options local))
+                                    deps
+                        )
+            )
+            (Ok dependencies)
+            options.localDependencies
 
 
 addDependency

@@ -1489,6 +1489,12 @@ collectPattern ((Node range pattern) as patternNode) context =
                                     ( "Failure", 2 ) ->
                                         addNamedPayloadEdits [ "message", "value" ] members withChildren
 
+                                    -- stil4m/elm-syntax: Node Range a. Often unresolved
+                                    -- when only the dependency interface is available
+                                    -- (e.g. porting jfmengels/elm-review).
+                                    ( "Node", 2 ) ->
+                                        addPayloadEdits Types.CustomConstructor "=" members withChildren
+
                                     _ ->
                                         addDiagnostic
                                             { code = "UNMAPPED_SYMBOL"
@@ -1637,6 +1643,20 @@ namedPlatformPayloadFields moduleParts name =
         "Failure" ->
             if moduleName == "Json.Decode" || moduleName == "Decode" then
                 Just [ "message", "value" ]
+
+            else
+                Nothing
+
+        -- stil4m/elm-syntax multi-arg ctor (Range, value) → Gren record payload.
+        "Node" ->
+            if
+                moduleName
+                    == "Elm.Syntax.Node"
+                    || moduleName
+                    == "Node"
+                    || String.isEmpty moduleName
+            then
+                Just [ "first", "second" ]
 
             else
                 Nothing

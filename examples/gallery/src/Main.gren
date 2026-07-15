@@ -1,0 +1,320 @@
+module Main exposing (main)
+
+{-| Multi-tab gallery for elm-to-gren browser demos.
+
+Chrome is built with the ported mdgriffith/elm-ui (`Element`). Each tab embeds
+a live demo and lists the packages that demo uses (explainer strip, same idea
+as the TodoMVC package panel).
+-}
+
+
+import Array exposing (Array)
+import Browser
+import Element exposing (..)
+import Element.Background as Background
+import Element.Border as Border
+import Element.Font as Font
+import Element.Input as Input
+import Element.Region as Region
+import Html
+import Html.Attributes as HA
+
+
+
+-- MAIN
+
+
+main : Program {} Model Msg
+main =
+    Browser.sandbox
+        { init = init
+        , view = view
+        , update = update
+        }
+
+
+
+-- MODEL
+
+
+type alias Model =
+    { tab : Tab
+    }
+
+
+type Tab
+    = Todo
+    | Syntax
+    | Review
+
+
+type alias Package =
+    { name : String
+    , role : String
+    }
+
+
+init : Model
+init =
+    { tab = Todo
+    }
+
+
+
+-- UPDATE
+
+
+type Msg
+    = SelectTab Tab
+
+
+update : Msg -> Model -> Model
+update msg model =
+    when msg is
+        SelectTab tab ->
+            { model | tab = tab }
+
+
+
+-- VIEW
+
+
+view : Model -> Html.Html Msg
+view model =
+    layout
+        [ Background.color palette.page
+        , Font.family
+            [ Font.typeface "Inter"
+            , Font.typeface "system-ui"
+            , Font.sansSerif
+            ]
+        , Font.color palette.ink
+        , Font.size 15
+        ]
+        (column
+            [ width fill
+            , height fill
+            , spacing 0
+            ]
+            [ header
+            , tabBar model.tab
+            , packagePanel model.tab
+            , demoFrame model.tab
+            ]
+        )
+
+
+header : Element msg
+header =
+    row
+        [ width fill
+        , paddingXY 28 18
+        , Background.color palette.ink
+        , Font.color palette.white
+        , spacing 16
+        ]
+        [ column [ spacing 4 ]
+            [ el
+                [ Region.heading 1
+                , Font.size 22
+                , Font.semiBold
+                ]
+                (text "Grentify examples")
+            , el
+                [ Font.size 13
+                , Font.color palette.mutedOnDark
+                ]
+                (text "Elm packages → compiler-validated Gren demos · chrome via ported elm-ui")
+            ]
+        , el [ alignRight, Font.size 12, Font.color palette.mutedOnDark ]
+            (text "mdgriffith/elm-ui 1.1.8 (ported)")
+        ]
+
+
+tabBar : Tab -> Element Msg
+tabBar active =
+    row
+        [ width fill
+        , paddingXY 20 0
+        , Background.color palette.surface
+        , Border.widthEach { top = 0, bottom = 1, left = 0, right = 0 }
+        , Border.color palette.line
+        , spacing 8
+        ]
+        [ tabButton active Todo "TodoMVC"
+        , tabButton active Syntax "elm-syntax"
+        , tabButton active Review "elm-review"
+        ]
+
+
+tabButton : Tab -> Tab -> String -> Element Msg
+tabButton active target label =
+    let
+        isOn =
+            active == target
+    in
+    Input.button
+        [ paddingXY 16 14
+        , Font.size 14
+        , Font.semiBold
+        , Border.widthEach { top = 0, bottom = 3, left = 0, right = 0 }
+        , Border.color
+            (if isOn then
+                palette.accent
+
+             else
+                palette.transparent
+            )
+        , Font.color
+            (if isOn then
+                palette.ink
+
+             else
+                palette.muted
+            )
+        , mouseOver [ Font.color palette.ink ]
+        ]
+        { onPress = Just (SelectTab target)
+        , label = text label
+        }
+
+
+packagePanel : Tab -> Element msg
+packagePanel tab =
+    column
+        [ width fill
+        , paddingXY 28 16
+        , spacing 10
+        , Background.color palette.panel
+        , Border.widthEach { top = 0, bottom = 1, left = 0, right = 0 }
+        , Border.color palette.line
+        ]
+        [ el [ Font.semiBold, Font.size 13, Font.color palette.muted ]
+            (text "PACKAGES IN THIS DEMO")
+        , el [ Font.size 13, Font.color palette.inkSoft ]
+            (text (panelBlurb tab))
+        , wrappedRow [ spacing 8, width fill ]
+            (Array.map packageChip (packagesFor tab))
+        ]
+
+
+panelBlurb : Tab -> String
+panelBlurb tab =
+    when tab is
+        Todo ->
+            "Classic TodoMVC on Gren, extended to exercise hairier elm-to-gren ports (storage, codecs, icons, dates)."
+
+        Syntax ->
+            "Live stil4m/elm-syntax: paste Elm, parse, walk expressions, inventory decls + call sites. UI via ported elm-ui."
+
+        Review ->
+            "Review-style static analysis on the ported elm-syntax AST (NoDebug, NoExposingAll, unused/duplicate imports). Full jfmengels/elm-review not yet compiler-green under Gren."
+
+
+packagesFor : Tab -> Array Package
+packagesFor tab =
+    when tab is
+        Todo ->
+            [ { name = "elm-community/list-extra", role = "filterNot, count, last" }
+            , { name = "elm-community/maybe-extra", role = "unwrap" }
+            , { name = "NoRedInk/elm-json-decode-pipeline", role = "entry decoder" }
+            , { name = "miniBill/elm-codec", role = "storage encode/decode" }
+            , { name = "krisajenkins/remotedata", role = "load state" }
+            , { name = "etaque/elm-response", role = "update Response pairing" }
+            , { name = "justinmimbs/date", role = "footer today" }
+            , { name = "rtfeldman/elm-iso8601-date-strings", role = "footer clock" }
+            , { name = "avh4/elm-color → aramiscd/gren-color", role = "accent CSS color" }
+            , { name = "elm-community/html-extra", role = "viewIf, onEnter" }
+            , { name = "feathericons/elm-feather", role = "trash/check icons" }
+            , { name = "sashaafm/eetf", role = "ETF encode residual" }
+            , { name = "gren-lang/browser + core", role = "TEA host" }
+            ]
+
+        Syntax ->
+            [ { name = "stil4m/elm-syntax@7.3.9", role = "Elm.Parser / Processing AST" }
+            , { name = "stil4m/structured-writer", role = "transitive writer" }
+            , { name = "rtfeldman/elm-hex", role = "transitive hex" }
+            , { name = "gren-lang/parser", role = "parser primitives" }
+            , { name = "mdgriffith/elm-ui (ported)", role = "layout / input chrome" }
+            , { name = "gren-lang/browser + core", role = "sandbox host" }
+            ]
+
+        Review ->
+            [ { name = "stil4m/elm-syntax@7.3.9", role = "AST under review" }
+            , { name = "stil4m/structured-writer", role = "transitive" }
+            , { name = "rtfeldman/elm-hex", role = "transitive" }
+            , { name = "gren-lang/parser", role = "parse pipeline" }
+            , { name = "mdgriffith/elm-ui (ported)", role = "findings UI" }
+            , { name = "jfmengels/elm-review", role = "suite target · not vendored yet" }
+            , { name = "gren-lang/browser + core", role = "sandbox host" }
+            ]
+
+
+packageChip : Package -> Element msg
+packageChip pkg =
+    column
+        [ paddingXY 12 8
+        , spacing 2
+        , Background.color palette.surface
+        , Border.rounded 8
+        , Border.width 1
+        , Border.color palette.line
+        ]
+        [ el [ Font.size 12, Font.semiBold, Font.family [ Font.monospace ] ]
+            (text pkg.name)
+        , el [ Font.size 11, Font.color palette.muted ]
+            (text pkg.role)
+        ]
+
+
+demoFrame : Tab -> Element msg
+demoFrame tab =
+    let
+        src =
+            when tab is
+                Todo ->
+                    "todo/index.html"
+
+                Syntax ->
+                    "syntax/index.html"
+
+                Review ->
+                    "review/index.html"
+    in
+    el
+        [ width fill
+        , height (px 780)
+        , padding 0
+        ]
+        (html
+            (Html.iframe
+                [ HA.src src
+                , HA.title "demo"
+                , HA.style "width" "100%"
+                , HA.style "height" "100%"
+                , HA.style "border" "0"
+                , HA.style "display" "block"
+                , HA.attribute "loading" "lazy"
+                ]
+                []
+            )
+        )
+
+
+
+-- palette
+
+
+palette =
+    { page = rgb255 245 246 248
+    , surface = rgb255 255 255 255
+    , panel = rgb255 250 250 252
+    , ink = rgb255 24 28 36
+    , inkSoft = rgb255 55 62 74
+    , muted = rgb255 110 118 132
+    , mutedOnDark = rgb255 180 188 200
+    , line = rgb255 226 228 234
+    , accent = rgb255 175 47 47
+    , white = rgb255 255 255 255
+    , transparent = rgba 0 0 0 0
+    }

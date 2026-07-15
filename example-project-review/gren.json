@@ -1,0 +1,22 @@
+{
+    "type": "application",
+    "platform": "browser",
+    "source-directories": [
+        "src"
+    ],
+    "gren-version": "0.6.6",
+    "dependencies": {
+        "direct": {
+            "gren-lang/browser": "6.0.2",
+            "gren-lang/core": "7.4.2",
+            "gren-lang/parser": "6.2.1",
+            "mdgriffith/elm-ui": "local:.elm-to-gren/packages/mdgriffith_elm-ui__1_1_8",
+            "stil4m/elm-syntax": "local:.elm-to-gren/packages/stil4m_elm-syntax__7_3_9",
+            "stil4m/structured-writer": "local:.elm-to-gren/packages/stil4m_structured-writer__1_0_3",
+            "rtfeldman/elm-hex": "local:.elm-to-gren/packages/rtfeldman_elm-hex__1_0_0"
+        },
+        "indirect": {
+            "gren-lang/url": "6.0.0"
+        }
+    }
+}

@@ -27,9 +27,9 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "node -e \"const fs=require('node:fs');fs.rmSync('dist',{recursive:true,force:true});fs.mkdirSync('dist',{recursive:true})\" && gren make Main --output=dist/elm-to-gren.js",
+    "build": "node -e \"require('node:fs').mkdirSync('dist',{recursive:true})\" && gren make Main --output=dist/elm-to-gren.js.tmp && node -e \"require('node:fs').renameSync('dist/elm-to-gren.js.tmp','dist/elm-to-gren.js')\"",
     "check": "gren make Main --output=/dev/null",
-    "test": "node -e \"const fs=require('node:fs');fs.rmSync('dist',{recursive:true,force:true});fs.mkdirSync('dist',{recursive:true})\" && gren make TestMain --output=dist/tests.js && node test/run-tests.cjs",
+    "test": "node -e \"const fs=require('node:fs');fs.rmSync('dist-test',{recursive:true,force:true});fs.mkdirSync('dist-test',{recursive:true})\" && gren make TestMain --output=dist-test/tests.js && node test/run-tests.cjs",
     "test:rule": "cd review && elm make src/ReviewConfig.elm --output=/dev/null && node tests/extractor-fixtures.mjs",
     "test:rule:fast": "cd review && node tests/extractor-fixtures.mjs",
     "test:e2e": "node -e \"const fs=require('node:fs');fs.mkdirSync('dist',{recursive:true})\" && gren make E2EMain --output=dist/e2e-tests.js && node test/run-e2e.cjs",

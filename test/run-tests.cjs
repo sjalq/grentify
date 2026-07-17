@@ -1,1 +1,1 @@
-require("../dist/tests.js").Gren.TestMain.init();
+require("../dist-test/tests.js").Gren.TestMain.init();

@@ -332,7 +332,7 @@ no compiler in the loop.
 
 ### W3 + W5a — Suite integrity, then close the curated suites
 
-- [ ] W3.1 [M1] D21: stop the destructive `dist/` wipe. (a) `npm test` compiles to
+- [x] W3.1 [M1] D21: stop the destructive `dist/` wipe. (a) `npm test` compiles to
       `dist-test/`, never touching `dist/elm-to-gren.js`; (b) `npm run build` becomes
       atomic: compile to a temp path, rename over the target, no `rmSync`; (c) record
       the measured warm walls in §STATUS. (Speed is already fine — 0.75s warm test,
@@ -476,7 +476,7 @@ DONE = M5.G and M6.G pass on the same clean commit.
 
 ## STATUS
 
-- Active milestone: **M1**. Next task: **W3.1** (in flight with a subagent), then M1.G.
+- Active milestone: **M1**. Next task: **M1.G**.
 - 2026-07-17 tier-0 wall measured: 0.70s warm (`npm test`, 154 checks incl. 240
   property samples); bare runner 0.16s.
 - 2026-07-17: Plan created from full-project audit (§6), adversarially reviewed
@@ -500,3 +500,7 @@ DONE = M5.G and M6.G pass on the same clean commit.
   post diverges) and D4 fixture (Batch [], pre=0, post Debug.todo crash) both
   CONFIRMED red by passing disagreement assertions; knownMiscompiles class =
   PatNamed arm carrying PatCons/non-empty PatList. Tier 0 green (154 checks, 0.70s).
+- 2026-07-17 W3.1: atomic build (mkdir + compile to .tmp + rename, no rmSync), tests
+  to dist-test/. Warm walls: build 0.53s, test 0.74s. Survival race verified: port
+  in flight survives concurrent `npm run build`. (Implemented by delegate, validated
+  + applied here.)

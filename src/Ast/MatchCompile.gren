@@ -2631,6 +2631,24 @@ tryCtorEmbeddedCase sole seed caseBlock =
 
     else
         let
+            -- Ctors whose every arm is a single direct-list column collapse into
+            -- one totalized `Array.popFirst` peel (all peers merged in
+            -- first-match order); every other ctor keeps the per-arm rewrite.
+            collapseNames =
+                collapsibleCtorNames caseBlock.cases
+
+            residualCases =
+                Array.keepIf
+                    (\arm -> not (ctorArmCollapsed collapseNames arm))
+                    caseBlock.cases
+
+            collapsedArms =
+                Array.mapAndKeepJust
+                    (\name ->
+                        collapseCtorGroup sole seed caseBlock.expression
+                            (firstCatchAll caseBlock.cases) name caseBlock.cases)
+                    collapseNames
+
             -- Precompute so cons arms are dropped whether they appear before or
             -- after the empty peer (`Ctor []` merges empty+cons peels).
             exactEmptyCtors =
@@ -2640,7 +2658,7 @@ tryCtorEmbeddedCase sole seed caseBlock =
                             markExactEmptyCtor arm acc
 
                         else
-                            acc) Dict.empty caseBlock.cases
+                            acc) Dict.empty residualCases
 
             step =
                 Array.indexedFoldl
@@ -2656,25 +2674,327 @@ tryCtorEmbeddedCase sole seed caseBlock =
                                 else
                                     when
                                         rewriteCtorArm sole (seed + i * 31)
-                                            caseBlock.cases arm
+                                            residualCases arm
                                     is
                                         Nothing ->
                                             Err {}
 
                                         Just rewritten ->
                                             Ok (Array.pushLast rewritten arms))
-                    (Ok []) caseBlock.cases
+                    (Ok []) residualCases
         in
-        when step is
-            Err _ ->
+        if Array.length collapsedArms /= Array.length collapseNames then
+            -- A flagged group failed to build: bail rather than emit a partial.
+            Nothing
+
+        else
+            when step is
+                Err _ ->
+                    Nothing
+
+                Ok residualArms ->
+                    Just
+                        (ExprCase
+                            { expression = caseBlock.expression
+                            , cases =
+                                Array.flatten [ collapsedArms, residualArms ]
+                            })
+
+
+{-| Ctor names every arm of which is `Ctor … <one direct-list column> …` with
+all other columns irrefutable. Such a ctor collapses into a single peeled arm so
+all its list peers merge under one `Array.popFirst` dispatch with first-match
+order. Nested-ctor / multi-list / literal-column groups are excluded and keep the
+per-arm rewrite path.
+-}
+collapsibleCtorNames : Array CaseArm -> Array String
+collapsibleCtorNames arms =
+    arms
+        |> Array.mapAndKeepJust ctorArmName
+        |> distinctNames
+        |> Array.keepIf (\name -> ctorGroupCollapsible name arms)
+
+
+ctorArmName : CaseArm -> Maybe String
+ctorArmName arm =
+    when arm.pattern is
+        PatNamed { ref = ref } ->
+            if isReservedMap ref.name then
                 Nothing
 
-            Ok arms ->
-                Just
-                    (ExprCase
-                        { expression = caseBlock.expression
-                        , cases = arms
-                        })
+            else
+                Just ref.name
+
+        _ ->
+            Nothing
+
+
+ctorArmRef : CaseArm -> Maybe NamedRef
+ctorArmRef arm =
+    when arm.pattern is
+        PatNamed { ref = ref } ->
+            Just ref
+
+        _ ->
+            Nothing
+
+
+ctorArmCollapsed : Array String -> CaseArm -> Bool
+ctorArmCollapsed names arm =
+    when ctorArmName arm is
+        Just name ->
+            Array.member name names
+
+        Nothing ->
+            False
+
+
+distinctNames : Array String -> Array String
+distinctNames names =
+    Array.foldl
+        (\name acc ->
+            if Array.member name acc then
+                acc
+
+            else
+                Array.pushLast name acc) [] names
+
+
+ctorGroupCollapsible : String -> Array CaseArm -> Bool
+ctorGroupCollapsible name arms =
+    let
+        group =
+            Array.keepIf (\arm -> ctorArmName arm == Just name) arms
+    in
+    not (Array.isEmpty group)
+        && Array.all cleanCtorListArm group
+        && sameListPlacement group
+
+
+{-| One list column (direct `PatList`/`PatCons`/`PatAs` of those), all other
+columns irrefutable — the shape the collapse can peel.
+-}
+cleanCtorListArm : CaseArm -> Bool
+cleanCtorListArm arm =
+    when arm.pattern is
+        PatNamed { arguments = args } ->
+            (Array.length (Array.keepIf isListShape args) == 1)
+                && Array.all
+                    (\a -> isListShape a || isIrrefutablePat a)
+                    args
+
+        _ ->
+            False
+
+
+isIrrefutablePat : Pattern -> Bool
+isIrrefutablePat pattern =
+    when pattern is
+        PatVar _ ->
+            True
+
+        PatAll ->
+            True
+
+        _ ->
+            False
+
+
+{-| Every arm of the group shares the same arity and list-column index, so one
+outer pattern binds the list slot for all of them.
+-}
+sameListPlacement : Array CaseArm -> Bool
+sameListPlacement group =
+    let
+        placements =
+            Array.mapAndKeepJust listColumnIndex group
+    in
+    when Array.first placements is
+        Nothing ->
+            False
+
+        Just firstP ->
+            (Array.length placements == Array.length group)
+                && Array.all (\p -> p == firstP) placements
+
+
+listColumnIndex : CaseArm -> Maybe { arity : Int, index : Int }
+listColumnIndex arm =
+    when arm.pattern is
+        PatNamed { arguments = args } ->
+            when firstListColumn args is
+                Just index ->
+                    Just { arity = Array.length args, index = index }
+
+                Nothing ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+firstListColumn : Array Pattern -> Maybe Int
+firstListColumn args =
+    Array.indexedFoldl
+        (\i arg acc ->
+            when acc is
+                Just _ ->
+                    acc
+
+                Nothing ->
+                    if isListShape arg then
+                        Just i
+
+                    else
+                        Nothing) Nothing args
+
+
+{-| Collapse all arms of one ctor into `Ctor … clVar … -> <list peel>`, reusing
+the plain list-case totalizer so every peer merges with first-match order. A peel
+that runs out of arms falls through to the case's irrefutable arm (never a
+reachable `Debug.todo`); the whole scrutinee rebinds a named catch-all.
+-}
+collapseCtorGroup :
+    SoleCtors
+    -> Int
+    -> Expr
+    -> Maybe { name : Maybe String, body : Expr }
+    -> String
+    -> Array CaseArm
+    -> Maybe CaseArm
+collapseCtorGroup sole seed scrutinee catchAll ctorName arms =
+    let
+        indexed =
+            arms
+                |> Array.indexedMap (\i arm -> { index = i, arm = arm })
+                |> Array.keepIf (\e -> ctorArmName e.arm == Just ctorName)
+    in
+    when Array.first indexed is
+        Nothing ->
+            Nothing
+
+        Just firstEntry ->
+            when listColumnIndex firstEntry.arm is
+                Nothing ->
+                    Nothing
+
+                Just placement ->
+                    when ctorArmRef firstEntry.arm is
+                        Nothing ->
+                            Nothing
+
+                        Just ref ->
+                            let
+                                gseed =
+                                    seed + firstEntry.index * 1013 + 500
+
+                                listVar =
+                                    "cel_" ++ String.fromInt gseed
+
+                                colVar j =
+                                    "cec_"
+                                        ++ String.fromInt gseed
+                                        ++ "_"
+                                        ++ String.fromInt j
+
+                                outerArgs =
+                                    Array.initialize placement.arity 0
+                                        (\j ->
+                                            if j == placement.index then
+                                                PatVar listVar
+
+                                            else if columnBinds j indexed then
+                                                PatVar (colVar j)
+
+                                            else
+                                                PatAll)
+
+                                unwrapped =
+                                    Array.map
+                                        (\e ->
+                                            unwrapCtorListArm e.arm
+                                                placement.index colVar) indexed
+
+                                -- Non-exhaustive peel falls through to the case's
+                                -- irrefutable arm; a named catch-all rebinds the
+                                -- whole scrutinee (D4).
+                                fallthrough =
+                                    when catchAll is
+                                        Just entry ->
+                                            when entry.name is
+                                                Just n ->
+                                                    [ { pattern = PatAll
+                                                      , body =
+                                                            wrapLet n scrutinee
+                                                                entry.body
+                                                      }
+                                                    ]
+
+                                                Nothing ->
+                                                    [ { pattern = PatAll
+                                                      , body = entry.body
+                                                      }
+                                                    ]
+
+                                        Nothing ->
+                                            []
+                            in
+                            Just
+                                { pattern =
+                                    PatNamed { ref = ref, arguments = outerArgs }
+                                , body =
+                                    compileListCase sole gseed (var listVar)
+                                        (Array.flatten [ unwrapped, fallthrough ])
+                                }
+
+
+columnBinds : Int -> Array { index : Int, arm : CaseArm } -> Bool
+columnBinds j indexed =
+    Array.any
+        (\e ->
+            when e.arm.pattern is
+                PatNamed { arguments = args } ->
+                    when Array.get j args is
+                        Just (PatVar _) ->
+                            True
+
+                        _ ->
+                            False
+
+                _ ->
+                    False) indexed
+
+
+{-| Drop the ctor wrapper to the bare list pattern; rename the arm's irrefutable
+non-list column binders onto the shared outer column vars.
+-}
+unwrapCtorListArm : CaseArm -> Int -> (Int -> String) -> CaseArm
+unwrapCtorListArm arm listCol colVar =
+    when arm.pattern is
+        PatNamed { arguments = args } ->
+            let
+                subst =
+                    Array.indexedFoldl
+                        (\j arg acc ->
+                            if j == listCol then
+                                acc
+
+                            else
+                                when arg is
+                                    PatVar name ->
+                                        Dict.set name (colVar j) acc
+
+                                    _ ->
+                                        acc) Dict.empty args
+            in
+            { pattern =
+                Array.get listCol args
+                    |> Maybe.withDefault PatAll
+            , body = renameExpr subst arm.body
+            }
+
+        _ ->
+            { pattern = PatAll, body = arm.body }
 
 
 isExactEmptyCtorArm : CaseArm -> Bool

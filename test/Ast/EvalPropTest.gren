@@ -1,6 +1,6 @@
 module Ast.EvalPropTest exposing ( tests )
 
-{-| W1.2: transform-equivalence property for MatchCompile.
+{-| W1.2/W2.1/W2.2: transform-equivalence property for MatchCompile.
 
 Property: for generated, production-reachable case expressions
 (CtorLaw-lowered), `eval(case) == eval(MatchCompile(case))` — same value, or
@@ -8,12 +8,11 @@ both crash. Stuck runs are discarded. Arm bodies are
 `[marker, boundVar…]` lists so wrong-arm selection, dropped arms, and binder
 mixups all surface as value differences.
 
-knownMiscompiles (expected RED until W2.1/W2.2 fix D3/D4): the class of cases
-with a ctor-embedded list pattern (a `PatNamed` arm carrying `PatCons` or a
-non-empty `PatList` argument). Generator failures inside that class are
-counted, not failed; two deterministic fixtures assert the class actually
-disagrees today. W2.1/W2.2 flip those fixtures to agreement and delete the
-class exclusion here — that is their done-condition.
+The ctor-embedded list class (a `PatNamed` arm carrying `PatCons` or a
+non-empty `PatList` argument) is held to the same equivalence as every other
+case: W2.1 merged all cons peers (D3) and W2.2 routed non-exhaustive peels to
+the case's irrefutable arm (D4). Two deterministic fixtures pin D3/D4 as
+permanent regression checks.
 -}
 
 import Array exposing ( Array )
@@ -57,22 +56,15 @@ tests =
                 )
                 outcomes
 
-        knownRed =
-            Array.length
-                (Array.keepIf
-                    (\o -> o == KnownMiscompileRed)
-                    outcomes
-                )
-
         decided =
             Array.length
                 (Array.keepIf
-                    (\o -> o == Agreed || o == KnownMiscompileRed)
+                    (\o -> o == Agreed)
                     outcomes
                 )
                 + Array.length failures
     in
-    [ [ { name = "MatchCompile equivalence (outside knownMiscompiles class)"
+    [ [ { name = "MatchCompile equivalence (eval before == eval after)"
         , passed = Array.isEmpty failures
         , details =
             when Array.first failures is
@@ -80,8 +72,7 @@ tests =
                     detail
 
                 Nothing ->
-                    "knownMiscompiles-class reds observed: "
-                        ++ String.fromInt knownRed
+                    "all decided samples agree"
         }
       , { name = "generator coverage: most samples decide (not stuck)"
         , passed = decided * 2 >= sampleCount
@@ -92,7 +83,7 @@ tests =
                 ++ String.fromInt sampleCount
         }
       ]
-    , knownMiscompileFixtureChecks
+    , regressionFixtureChecks
     ]
         |> Array.flatten
 
@@ -109,7 +100,6 @@ sampleCount =
 type SeedOutcome
     = Agreed
     | Discarded
-    | KnownMiscompileRed
     | Failed String
 
 
@@ -124,11 +114,7 @@ runSeed index =
     in
     when verdict is
         Failed detail ->
-            if caseInKnownClass generated.arms then
-                KnownMiscompileRed
-
-            else
-                Failed ("seed " ++ String.fromInt index ++ ": " ++ detail)
+            Failed ("seed " ++ String.fromInt index ++ ": " ++ detail)
 
         other ->
             other
@@ -192,68 +178,26 @@ targetOutcome file =
 
 
 
--- KNOWN-MISCOMPILE CLASS ------------------------------------------------------
-
-
-caseInKnownClass : Array CaseArm -> Bool
-caseInKnownClass arms =
-    Array.any
-        (\arm ->
-            when arm.pattern is
-                PatNamed named ->
-                    Array.any patternHasListShape named.arguments
-
-                _ ->
-                    False
-        )
-        arms
-
-
-patternHasListShape : Pattern -> Bool
-patternHasListShape pattern =
-    when pattern is
-        PatCons _ ->
-            True
-
-        PatList items ->
-            not (Array.isEmpty items)
-
-        PatAs inner ->
-            patternHasListShape inner.pattern
-
-        _ ->
-            False
-
-
-
 -- DETERMINISTIC D3 / D4 FIXTURES ---------------------------------------------
 
 
-knownMiscompileFixtureChecks : Array Check
-knownMiscompileFixtureChecks =
-    [ { name = "knownMiscompiles: D3 multi-peer ctor-cons disagrees (red until W2.1)"
-      , passed = fixtureDisagrees d3Fixture
-      , details = "expected pre/post divergence on Batch [7,8]"
+regressionFixtureChecks : Array Check
+regressionFixtureChecks =
+    [ { name = "regression: D3 multi-peer ctor-cons agrees (Batch [7,8] == 315)"
+      , passed = fixtureAgreesInt d3Fixture 315
+      , details = "pre == post == 315 on Batch [7,8]"
       }
-    , { name = "knownMiscompiles: D4 ctor-cons under _ crashes post (red until W2.2)"
-      , passed = fixtureIntroducesCrash d4Fixture
-      , details = "expected Done pre vs Crashed post on Batch []"
+    , { name = "regression: D4 ctor-cons under _ agrees (Batch [] == 0)"
+      , passed = fixtureAgreesInt d4Fixture 0
+      , details = "pre == post == 0 on Batch []"
       }
     ]
 
 
-fixtureDisagrees : File -> Bool
-fixtureDisagrees file =
-    when compareFile file is
-        Failed _ ->
-            True
-
-        _ ->
-            False
-
-
-fixtureIntroducesCrash : File -> Bool
-fixtureIntroducesCrash file =
+{-| Both sides evaluate to the same `Done (VInt expected)` value.
+-}
+fixtureAgreesInt : File -> Int -> Bool
+fixtureAgreesInt file expected =
     let
         before =
             CtorLaw.apply (CtorLaw.collectFromFile file) file
@@ -262,8 +206,9 @@ fixtureIntroducesCrash file =
             MatchCompile.compile Dict.empty before
     in
     when { pre = targetOutcome before, post = targetOutcome after } is
-        { pre = Just (Done _), post = Just (Crashed _) } ->
-            True
+        { pre = Just (Done a), post = Just (Done b) } ->
+            (Eval.valueEq a b == Just True)
+                && (Eval.valueEq a (VInt expected) == Just True)
 
         _ ->
             False

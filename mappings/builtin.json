@@ -476,13 +476,38 @@
       "grenVersion": "5.0.0",
       "platform": "common",
       "modules": [
-        { "source": "Test", "target": "Test", "values": {}, "types": {} },
+        { "source": "Test", "target": "Test", "values": {}, "types": { "Test": "Test" } },
         { "source": "Test.Runner", "target": "Test.Runner", "values": {}, "types": {} },
-        { "source": "Test.Runner.Failure", "target": "Test.Runner.Failure", "values": {}, "types": {} },
+        {
+          "source": "Test.Runner.Failure",
+          "target": "Test.Runner.Failure",
+          "values": {
+            "EmptyList": "EmptyArray",
+            "ListDiff": "ArrayDiff"
+          },
+          "types": { "Reason": "Reason", "InvalidReason": "InvalidReason" }
+        },
         { "source": "Test.Runner.String", "target": "Test.Runner.String", "values": {}, "types": {} },
-        { "source": "Test.Distribution", "target": "Test.Distribution", "values": {}, "types": {} },
-        { "source": "Expect", "target": "Expect", "values": {}, "types": {} },
-        { "source": "Fuzz", "target": "Fuzz", "values": {}, "types": {} }
+        { "source": "Test.Distribution", "target": "Test.Distribution", "values": {}, "types": { "ExpectedDistribution": "ExpectedDistribution" } },
+        {
+          "source": "Expect",
+          "target": "Expect",
+          "values": {
+            "equalLists": "equalArrays"
+          },
+          "types": { "Expectation": "Expectation", "FloatingPointTolerance": "FloatingPointTolerance" }
+        },
+        {
+          "source": "Fuzz",
+          "target": "Fuzz",
+          "values": {
+            "list": "array",
+            "listOfLength": "arrayOfLength",
+            "listOfLengthBetween": "arrayOfLengthBetween",
+            "shuffledList": "shuffledArray"
+          },
+          "types": { "Fuzzer": "Fuzzer" }
+        }
       ]
     },
     {

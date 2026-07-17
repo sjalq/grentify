@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "kind": "gren-analogue",
+      "elmPackage": "elm-explorations/test",
+      "grenPackage": "gren-lang/test",
+      "grenVersion": "5.0.0",
+      "platform": "common",
+      "modules": [
+        {
+          "source": "Test",
+          "target": "Test",
+          "values": {},
+          "types": {
+            "Test": "Test"
+          },
+          "notes": {
+            "signatureChanges": {
+              "test": "() -> Expectation becomes {} -> Expectation (unit type change)",
+              "describe": "List Test becomes Array Test (handled by core List->Array)",
+              "concat": "List Test becomes Array Test (handled by core List->Array)",
+              "reportDistribution": "List ( String, a -> Bool ) becomes Array { label : String, fn : a -> Bool } (tuple-to-record, needs compat)",
+              "expectDistribution": "List ( ExpectedDistribution, String, a -> Bool ) becomes Array { expectedDistribution : ExpectedDistribution, label : String, fn : a -> Bool } (triple-to-record, needs compat)"
+            }
+          }
+        },
+        {
+          "source": "Expect",
+          "target": "Expect",
+          "values": {
+            "equalLists": "equalArrays"
+          },
+          "types": {
+            "Expectation": "Expectation",
+            "FloatingPointTolerance": "FloatingPointTolerance"
+          },
+          "notes": {
+            "signatureChanges": {
+              "all": "List (subject -> Expectation) becomes Array (subject -> Expectation) (handled by core List->Array)",
+              "AbsoluteOrRelative": "AbsoluteOrRelative Float Float becomes AbsoluteOrRelative { absolute : Float, relative : Float } (tuple-to-record in type constructor)"
+            }
+          }
+        },
+        {
+          "source": "Fuzz",
+          "target": "Fuzz",
+          "values": {
+            "list": "array",
+            "listOfLength": "arrayOfLength",
+            "listOfLengthBetween": "arrayOfLengthBetween",
+            "shuffledList": "shuffledArray"
+          },
+          "types": {
+            "Fuzzer": "Fuzzer"
+          },
+          "notes": {
+            "signatureChanges": {
+              "pair": "returns { first : a, second : b } instead of ( a, b )",
+              "triple": "returns { first : a, second : b, third : c } instead of ( a, b, c )",
+              "frequency": "List ( Float, Fuzzer a ) becomes Array { weight : Float, fuzzer : Fuzzer a } (needs compat)",
+              "frequencyValues": "List ( Float, a ) becomes Array { weight : Float, value : a } (needs compat)",
+              "oneOf": "List (Fuzzer a) becomes Array (Fuzzer a) (handled by core List->Array)",
+              "oneOfValues": "List a becomes Array a (handled by core List->Array)",
+              "lazy": "(() -> Fuzzer a) becomes ({} -> Fuzzer a) (unit type change)",
+              "unit": "Fuzzer () becomes Fuzzer {} (unit type change)",
+              "labelExamples": "multiple tuple/list changes (needs compat)",
+              "sequence": "List -> List becomes Array -> Array (handled by core)",
+              "traverse": "List -> List becomes Array -> Array (handled by core)",
+              "examples": "returns Array instead of List (handled by core)"
+            },
+            "removed": {
+              "filterMap": "not exposed in gren-lang/test; use Fuzz.filter instead"
+            }
+          }
+        },
+        {
+          "source": "Test.Runner",
+          "target": "Test.Runner",
+          "values": {},
+          "types": {
+            "Runner": "Runner",
+            "SeededRunners": "SeededRunners",
+            "Simplifiable": "Simplifiable",
+            "DistributionReport": "DistributionReport"
+          },
+          "notes": {
+            "signatureChanges": {
+              "Runner": "record fields change: run uses {} not (), labels uses Array not List"
+            }
+          }
+        },
+        {
+          "source": "Test.Runner.Failure",
+          "target": "Test.Runner.Failure",
+          "values": {
+            "EmptyList": "EmptyArray"
+          },
+          "types": {
+            "Reason": "Reason",
+            "InvalidReason": "InvalidReason"
+          },
+          "notes": {
+            "typeConstructorRenames": {
+              "ListDiff": "ArrayDiff",
+              "EmptyList": "EmptyArray"
+            }
+          }
+        },
+        {
+          "source": "Test.Runner.String",
+          "target": "Test.Runner.String",
+          "values": {},
+          "types": {
+            "Summary": "Summary"
+          }
+        },
+        {
+          "source": "Test.Distribution",
+          "target": "Test.Distribution",
+          "values": {},
+          "types": {
+            "ExpectedDistribution": "ExpectedDistribution",
+            "DistributionReport": "DistributionReport"
+          }
+        }
+      ]
+    }
+  ]
+}

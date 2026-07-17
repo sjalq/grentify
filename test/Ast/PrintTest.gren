@@ -14,6 +14,7 @@ import Ast.Types exposing
     , ModuleKind(..)
     , Pattern(..)
     )
+import Math
 import String
 
 
@@ -34,6 +35,14 @@ tests =
     , multiDeclLetIfKeepsSiblingBinds
     , fixedListPatternPrintsAsArray
     , binopLetRhsBreaksAfterOperator
+    -- Hex leaves: print as decimal of the Int value (not "0x" ++ decimal digits).
+    , hexExprPrintsAsDecimalOfValue
+    , hexPatPrintsAsDecimalOfValue
+    , hexAndIntPrintIdentical
+    , hexPrintRoundTripsViaToInt
+    , hexNeverEmitsFakeHexCodec
+    , hexCharExtraAsciiCanary
+    , hexPropertySuite
     ]
 
 
@@ -428,6 +437,328 @@ fixedListPatternPrintsAsArray =
         ("printed:\n" ++ printed)
 
 
+-- Hex literal printing ------------------------------------------------------
+--
+-- AST holds Int values for both ExprHex/PatHex and ExprInt/PatInt. The only
+-- correct printer for a bare Int is decimal (String.fromInt). Emitting
+-- ("0x" ++ String.fromInt n) is a fake hex codec: 0x61 (value 97) becomes
+-- "0x97", which Gren reads as 151. That class of bug silently corrupts every
+-- unicode/char table ported from Elm hex literals (e.g. stil4m Char.Extra).
+
+
+{-| Unit canary: known Elm hex code points print as their true decimal value.
+-}
+hexCharExtraAsciiCanary : TestResult
+hexCharExtraAsciiCanary =
+    let
+        -- Original Elm: 0x61..0x7A (a-z), 0x41..0x5A (A-Z), 0x30..0x39 (0-9)
+        samples =
+            [ { value = 0x61, label = "a" }
+            , { value = 0x7A, label = "z" }
+            , { value = 0x41, label = "A" }
+            , { value = 0x5A, label = "Z" }
+            , { value = 0x30, label = "0" }
+            , { value = 0x39, label = "9" }
+            , { value = 0x5F, label = "_" }
+            ]
+
+        failures =
+            samples
+                |> Array.keepIf
+                    (\s ->
+                        not (exprHexOk s.value)
+                            || not (patHexOk s.value)
+                    )
+    in
+    outcome
+        "hex Char.Extra ASCII canary prints true decimal"
+        (Array.isEmpty failures)
+        ("failed samples: "
+            ++ String.join ", "
+                (Array.map
+                    (\s ->
+                        s.label
+                            ++ "="
+                            ++ String.fromInt s.value
+                            ++ " expr="
+                            ++ printExprBinding "n" (ExprHex s.value)
+                    )
+                    failures
+                )
+        )
+
+
+{-| ExprHex n must print the same digits as String.fromInt n (no 0x prefix).
+-}
+hexExprPrintsAsDecimalOfValue : TestResult
+hexExprPrintsAsDecimalOfValue =
+    let
+        value =
+            0x61
+
+        printed =
+            printExprBinding "n" (ExprHex value)
+
+        ok =
+            exprHexOk value
+    in
+    outcome
+        "ExprHex prints as decimal of value"
+        ok
+        ("printed:\n" ++ printed)
+
+
+{-| PatHex n must print the same digits as String.fromInt n.
+-}
+hexPatPrintsAsDecimalOfValue : TestResult
+hexPatPrintsAsDecimalOfValue =
+    let
+        value =
+            0x7A
+
+        printed =
+            printPatBinding "n" (PatHex value)
+
+        ok =
+            patHexOk value
+    in
+    outcome
+        "PatHex prints as decimal of value"
+        ok
+        ("printed:\n" ++ printed)
+
+
+{-| Hex and Int leaves with the same Int are observationally identical in print.
+-}
+hexAndIntPrintIdentical : TestResult
+hexAndIntPrintIdentical =
+    let
+        value =
+            255
+
+        hexPrinted =
+            printExprBinding "n" (ExprHex value)
+
+        intPrinted =
+            printExprBinding "n" (ExprInt value)
+
+        ok =
+            hexPrinted == intPrinted
+    in
+    outcome
+        "ExprHex and ExprInt print identically for same value"
+        ok
+        ("hex:\n" ++ hexPrinted ++ "\nint:\n" ++ intPrinted)
+
+
+{-| Printed hex leaf must round-trip through String.toInt to the same Int.
+Uses the known Print layout `name =\n    <body>`.
+-}
+hexPrintRoundTripsViaToInt : TestResult
+hexPrintRoundTripsViaToInt =
+    let
+        value =
+            0x0344
+
+        printed =
+            printExprBinding "n" (ExprHex value)
+
+        ok =
+            when extractExprBody printed is
+                Just body ->
+                    when String.toInt body is
+                        Just n ->
+                            n == value
+
+                        Nothing ->
+                            False
+
+                Nothing ->
+                    False
+    in
+    outcome
+        "hex print round-trips via String.toInt"
+        ok
+        ("printed:\n" ++ printed)
+
+
+{-| The broken codec is exactly ("0x" ++ String.fromInt n). For any n whose
+decimal digits are valid hex, that form parses as a *different* Int under Gren.
+Property: we never emit that form for ExprHex/PatHex.
+-}
+hexNeverEmitsFakeHexCodec : TestResult
+hexNeverEmitsFakeHexCodec =
+    let
+        -- Values whose decimal spelling is valid hex digits (the danger zone).
+        danger =
+            [ 10, 11, 15, 61, 97, 122, 255, 836, 8559 ]
+
+        failures =
+            danger
+                |> Array.keepIf
+                    (\n ->
+                        let
+                            fake =
+                                "0x" ++ String.fromInt n
+                        in
+                        String.contains fake (printExprBinding "n" (ExprHex n))
+                            || String.contains fake (printPatBinding "n" (PatHex n))
+                    )
+    in
+    outcome
+        "hex never emits fake 0x++decimal codec"
+        (Array.isEmpty failures)
+        ("emitted fake form for: "
+            ++ String.join ", " (Array.map String.fromInt failures)
+        )
+
+
+{-| Property suite over a deterministic integer domain.
+
+Properties (∀ n in sample):
+  P1. print(ExprHex n) body == String.fromInt n
+  P2. print(PatHex n) pattern == String.fromInt n
+  P3. print(ExprHex n) == print(ExprInt n)
+  P4. print(PatHex n) == print(PatInt n)
+  P5. String.toInt (print ExprHex n body) == Just n
+  P6. print does not contain ("0x" ++ String.fromInt n)
+-}
+hexPropertySuite : TestResult
+hexPropertySuite =
+    let
+        charBand =
+            Array.initialize 256 0 (\i -> i)
+
+        lcgSamples =
+            lcgTake 2000 0x9E3779B9
+
+        edges =
+            [ 0
+            , 1
+            , -1
+            , 9
+            , 10
+            , 15
+            , 16
+            , 255
+            , 256
+            , -97
+            , 0x61
+            , 0x7A
+            , 0x41
+            , 0x5A
+            , 0x30
+            , 0x39
+            , 0x0344
+            , 0x216F
+            , 999999
+            , -999999
+            ]
+
+        domain =
+            Array.append charBand (Array.append edges lcgSamples)
+
+        firstFailure =
+            Array.foldl
+                (\n acc ->
+                    when acc is
+                        Just _ ->
+                            acc
+
+                        Nothing ->
+                            hexPropertyFailure n
+                )
+                Nothing
+                domain
+    in
+    when firstFailure is
+        Nothing ->
+            outcome
+                "hex property suite (exhaustive 0..255 + LCG + edges)"
+                True
+                ("checked " ++ String.fromInt (Array.length domain) ++ " values")
+
+        Just detail ->
+            outcome
+                "hex property suite (exhaustive 0..255 + LCG + edges)"
+                False
+                detail
+
+
+hexPropertyFailure : Int -> Maybe String
+hexPropertyFailure n =
+    let
+        exprHex =
+            printExprBinding "n" (ExprHex n)
+
+        exprInt =
+            printExprBinding "n" (ExprInt n)
+
+        patHex =
+            printPatBinding "n" (PatHex n)
+
+        patInt =
+            printPatBinding "n" (PatInt n)
+
+        expect =
+            String.fromInt n
+
+        fake =
+            "0x" ++ expect
+
+        p1 =
+            exprHexOk n
+
+        p2 =
+            patHexOk n
+
+        p3 =
+            exprHex == exprInt
+
+        p4 =
+            patHex == patInt
+
+        p5 =
+            when extractExprBody exprHex is
+                Just body ->
+                    when String.toInt body is
+                        Just got ->
+                            got == n
+
+                        Nothing ->
+                            False
+
+                Nothing ->
+                    False
+
+        p6 =
+            not (String.contains fake exprHex)
+                && not (String.contains fake patHex)
+    in
+    if p1 && p2 && p3 && p4 && p5 && p6 then
+        Nothing
+
+    else
+        Just
+            ("n="
+                ++ expect
+                ++ " exprHex=\n"
+                ++ exprHex
+                ++ "\np1="
+                ++ boolStr p1
+                ++ " p2="
+                ++ boolStr p2
+                ++ " p3="
+                ++ boolStr p3
+                ++ " p4="
+                ++ boolStr p4
+                ++ " p5="
+                ++ boolStr p5
+                ++ " p6="
+                ++ boolStr p6
+            )
+
+
 -- helpers -------------------------------------------------------------------
 
 
@@ -451,3 +782,128 @@ outcome name passed details =
     , passed = passed
     , details = details
     }
+
+
+printExprBinding : String -> Expr -> String
+printExprBinding name expression =
+    Print.print
+        (emptyFile
+            [ DeclFunction
+                { name = name
+                , documentation = Nothing
+                , signature = Nothing
+                , arguments = []
+                , expression = expression
+                }
+            ]
+        )
+
+
+printPatBinding : String -> Pattern -> String
+printPatBinding name pattern =
+    Print.print
+        (emptyFile
+            [ DeclFunction
+                { name = "pick"
+                , documentation = Nothing
+                , signature = Nothing
+                , arguments = [ PatVar "v" ]
+                , expression =
+                    ExprCase
+                        { expression = ExprVar { moduleName = Nothing, name = "v" }
+                        , cases =
+                            [ { pattern = pattern
+                              , body = ExprVar { moduleName = Nothing, name = name }
+                              }
+                            ]
+                        }
+                }
+            ]
+        )
+
+
+{-| Print layout for a nullary binding is `name =\n    <body>`.
+-}
+exprHexOk : Int -> Bool
+exprHexOk n =
+    let
+        printed =
+            printExprBinding "n" (ExprHex n)
+
+        expect =
+            String.fromInt n
+    in
+    String.contains ("n =\n    " ++ expect) printed
+        && not (String.contains ("0x" ++ expect) printed)
+
+
+{-| Pattern arm layout includes `<pat> ->` after `when … is`.
+-}
+patHexOk : Int -> Bool
+patHexOk n =
+    let
+        printed =
+            printPatBinding "n" (PatHex n)
+
+        expect =
+            String.fromInt n
+    in
+    String.contains (expect ++ " ->") printed
+        && not (String.contains ("0x" ++ expect) printed)
+
+
+{-| Body text after `n =\n    ` (single-line leaf).
+-}
+extractExprBody : String -> Maybe String
+extractExprBody printed =
+    let
+        marker =
+            "n =\n    "
+
+        parts =
+            String.split marker printed
+    in
+    when Array.get 1 parts is
+        Just rest ->
+            when Array.get 0 (String.split "\n" rest) is
+                Just line ->
+                    Just (String.trim line)
+
+                Nothing ->
+                    Nothing
+
+        Nothing ->
+            Nothing
+
+
+{-| Deterministic LCG samples (mix positive/negative via bit pattern).
+
+Builds the stream iteratively so we never recurse `count` deep.
+-}
+lcgTake : Int -> Int -> Array Int
+lcgTake count seed0 =
+    Array.foldl
+        (\_ state ->
+            let
+                next =
+                    Math.modBy 2147483647 (state.seed * 1103515245 + 12345)
+
+                centered =
+                    Math.modBy 2000001 next - 1000000
+            in
+            { seed = next
+            , samples = Array.pushLast centered state.samples
+            }
+        )
+        { seed = seed0, samples = [] }
+        (Array.initialize count 0 (\i -> i))
+        |> .samples
+
+
+boolStr : Bool -> String
+boolStr b =
+    if b then
+        "T"
+
+    else
+        "F"

@@ -35,15 +35,33 @@ run(path.join(root, "examples", "gallery"), [
   "Main",
   "--output=" + path.join(site, "index.html"),
 ]);
+const todoHtml = path.join(site, "todo", "index.html");
 run(path.join(root, "example-project"), [
   "make",
   "Main",
-  "--output=" + path.join(site, "todo", "index.html"),
+  "--output=" + todoHtml,
 ]);
 fs.copyFileSync(
   path.join(root, "example-project", "style.css"),
   path.join(site, "todo", "style.css"),
 );
+// TodoMVC FOUC: app shell starts with visibility:hidden until CSS applies
+// `.todomvc-wrapper { visibility: visible !important }`. Relative href
+// "style.css" resolves to /style.css (404) when the URL is /todo with no
+// trailing slash, so inject a root-absolute stylesheet in <head>.
+{
+  let html = fs.readFileSync(todoHtml, "utf8");
+  const inject =
+    '<link rel="stylesheet" href="/todo/style.css">\n' +
+    "  <style>.todomvc-wrapper { visibility: visible !important; }</style>";
+  if (!html.includes('href="/todo/style.css"')) {
+    html = html.replace(
+      "<style>body { padding: 0; margin: 0; }</style>",
+      "<style>body { padding: 0; margin: 0; }</style>\n  " + inject,
+    );
+    fs.writeFileSync(todoHtml, html);
+  }
+}
 run(path.join(root, "example-project-syntax-review"), [
   "make",
   "Main",

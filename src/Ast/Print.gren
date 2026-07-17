@@ -481,8 +481,11 @@ printPattern locals prec pattern =
         PatInt value ->
             String.fromInt value
 
+        -- Hex and decimal are the same Int in Elm/Gren. Emitting
+        -- ("0x" ++ String.fromInt n) is a fake codec (0x61 → "0x97" → 151).
+        -- Always print the Int value in decimal.
         PatHex value ->
-            "0x" ++ String.fromInt value
+            String.fromInt value
 
         PatFloat value ->
             String.fromFloat value
@@ -717,8 +720,9 @@ printExpr locals prec expr =
         ExprInt value ->
             String.fromInt value
 
+        -- See PatHex: decimal-only. AST holds the Int value, not a spelling.
         ExprHex value ->
-            "0x" ++ String.fromInt value
+            String.fromInt value
 
         ExprFloat value ->
             String.fromFloat value

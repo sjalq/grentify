@@ -49,7 +49,7 @@
     "prepack": "npm run test:all && npm run build",
     "start": "npm run build --silent && node bin/elm-to-gren.cjs",
     "site:build": "node scripts/build-site.cjs",
-    "site:deploy": "node scripts/build-site.cjs && CLOUDFLARE_ACCOUNT_ID=0321775f3f75e93080c81c71a405c1ae npx wrangler pages deploy site --project-name=grentify --branch=main --commit-dirty=true"
+    "site:deploy": "node scripts/build-site.cjs && CLOUDFLARE_ACCOUNT_ID=ba519ec59f507a523b157bc1bbcbde5f npx wrangler pages deploy site --project-name=grentify --branch=main --commit-dirty=true"
   },
   "engines": {
     "node": ">=22"

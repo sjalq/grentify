@@ -243,7 +243,7 @@ no compiler in the loop.
       value form on BOTH sides, so a correct transform is value-identity (this is what
       makes W1.3 sound). Include an inline smoke test per supported constructor.
       Header states this law. Prove: tier 0.
-- [ ] W1.2 [M1] `test/Ast/EvalTest.gren`: seeded generators (reuse the PrintTest PRNG
+- [x] W1.2 [M1] `test/Ast/EvalTest.gren`: seeded generators (reuse the PrintTest PRNG
       pattern) for ADT shapes, list/cons/ctor/record/literal patterns, and scrutinee
       values. Generators emit **post-CtorLaw-shaped ASTs** (single-payload ctors, no
       alias ctors) or run the real `CtorLaw ∘ RecordAlias` prefix on raw shapes, so
@@ -476,7 +476,9 @@ DONE = M5.G and M6.G pass on the same clean commit.
 
 ## STATUS
 
-- Active milestone: **M1**. Next task: **W1.2**.
+- Active milestone: **M1**. Next task: **W3.1** (in flight with a subagent), then M1.G.
+- 2026-07-17 tier-0 wall measured: 0.70s warm (`npm test`, 154 checks incl. 240
+  property samples); bare runner 0.16s.
 - 2026-07-17: Plan created from full-project audit (§6), adversarially reviewed
   (3 lenses), revised. Measured walls: npm test warm 0.75s; build warm 0.6s; canary
   19.5s -j4; pure suite ~10 min -j6 (201/202); browser ~14 min -j6 (246/252).
@@ -493,3 +495,8 @@ DONE = M5.G and M6.G pass on the same clean commit.
   tier 0 green (102 checks).
 - 2026-07-17 W1.1: Ast.Eval landed (declaration-aware, fuel-bounded, crash≠stuck≠value)
   with 48 smoke checks; tier 0 green (150 checks).
+- 2026-07-17 W1.2: EvalPropTest landed (240 seeded cases, real CtorLaw prefix,
+  eval∘MatchCompile equivalence). Proof-of-red: D3 fixture (Batch [7,8], pre=315,
+  post diverges) and D4 fixture (Batch [], pre=0, post Debug.todo crash) both
+  CONFIRMED red by passing disagreement assertions; knownMiscompiles class =
+  PatNamed arm carrying PatCons/non-empty PatList. Tier 0 green (154 checks, 0.70s).

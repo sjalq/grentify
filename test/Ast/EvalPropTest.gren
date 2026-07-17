@@ -1,0 +1,806 @@
+module Ast.EvalPropTest exposing ( tests )
+
+{-| W1.2: transform-equivalence property for MatchCompile.
+
+Property: for generated, production-reachable case expressions
+(CtorLaw-lowered), `eval(case) == eval(MatchCompile(case))` — same value, or
+both crash. Stuck runs are discarded. Arm bodies are
+`[marker, boundVar…]` lists so wrong-arm selection, dropped arms, and binder
+mixups all surface as value differences.
+
+knownMiscompiles (expected RED until W2.1/W2.2 fix D3/D4): the class of cases
+with a ctor-embedded list pattern (a `PatNamed` arm carrying `PatCons` or a
+non-empty `PatList` argument). Generator failures inside that class are
+counted, not failed; two deterministic fixtures assert the class actually
+disagrees today. W2.1/W2.2 flip those fixtures to agreement and delete the
+class exclusion here — that is their done-condition.
+-}
+
+import Array exposing ( Array )
+import Ast.CtorLaw as CtorLaw
+import Ast.Eval as Eval exposing ( Outcome(..), Value(..) )
+import Ast.MatchCompile as MatchCompile
+import Ast.Types exposing
+    ( CaseArm
+    , Declaration(..)
+    , Expr(..)
+    , File
+    , Pattern(..)
+    )
+import Dict
+import Math
+import Maybe exposing ( Maybe(..) )
+
+
+type alias Check =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array Check
+tests =
+    let
+        outcomes =
+            Array.map runSeed (Array.range 0 (sampleCount - 1))
+
+        failures =
+            Array.mapAndKeepJust
+                (\o ->
+                    when o is
+                        Failed detail ->
+                            Just detail
+
+                        _ ->
+                            Nothing
+                )
+                outcomes
+
+        knownRed =
+            Array.length
+                (Array.keepIf
+                    (\o -> o == KnownMiscompileRed)
+                    outcomes
+                )
+
+        decided =
+            Array.length
+                (Array.keepIf
+                    (\o -> o == Agreed || o == KnownMiscompileRed)
+                    outcomes
+                )
+                + Array.length failures
+    in
+    [ [ { name = "MatchCompile equivalence (outside knownMiscompiles class)"
+        , passed = Array.isEmpty failures
+        , details =
+            when Array.first failures is
+                Just detail ->
+                    detail
+
+                Nothing ->
+                    "knownMiscompiles-class reds observed: "
+                        ++ String.fromInt knownRed
+        }
+      , { name = "generator coverage: most samples decide (not stuck)"
+        , passed = decided * 2 >= sampleCount
+        , details =
+            "decided "
+                ++ String.fromInt decided
+                ++ " of "
+                ++ String.fromInt sampleCount
+        }
+      ]
+    , knownMiscompileFixtureChecks
+    ]
+        |> Array.flatten
+
+
+sampleCount : Int
+sampleCount =
+    240
+
+
+
+-- PROPERTY RUNNER -------------------------------------------------------------
+
+
+type SeedOutcome
+    = Agreed
+    | Discarded
+    | KnownMiscompileRed
+    | Failed String
+
+
+runSeed : Int -> SeedOutcome
+runSeed index =
+    let
+        generated =
+            generateCase (mix index)
+
+        verdict =
+            compareFile (buildFile generated)
+    in
+    when verdict is
+        Failed detail ->
+            if caseInKnownClass generated.arms then
+                KnownMiscompileRed
+
+            else
+                Failed ("seed " ++ String.fromInt index ++ ": " ++ detail)
+
+        other ->
+            other
+
+
+{-| Lower with the real CtorLaw prefix, then compare eval before/after
+MatchCompile under each file's own declaration tables.
+-}
+compareFile : File -> SeedOutcome
+compareFile rawFile =
+    let
+        before =
+            CtorLaw.apply (CtorLaw.collectFromFile rawFile) rawFile
+
+        after =
+            MatchCompile.compile Dict.empty before
+    in
+    when { pre = targetOutcome before, post = targetOutcome after } is
+        { pre = Just (Done a), post = Just (Done b) } ->
+            when Eval.valueEq a b is
+                Just True ->
+                    Agreed
+
+                Just False ->
+                    Failed "value mismatch"
+
+                Nothing ->
+                    Discarded
+
+        { pre = Just (Crashed _), post = Just (Crashed _) } ->
+            Agreed
+
+        { pre = Just (Done _), post = Just (Crashed message) } ->
+            Failed ("transform introduced crash: " ++ message)
+
+        { pre = Just (Crashed _), post = Just (Done _) } ->
+            Failed "transform removed crash"
+
+        _ ->
+            Discarded
+
+
+targetOutcome : File -> Maybe Outcome
+targetOutcome file =
+    file.declarations
+        |> Array.mapAndKeepJust
+            (\declaration ->
+                when declaration is
+                    DeclFunction fn ->
+                        if fn.name == "target" then
+                            Just fn.expression
+
+                        else
+                            Nothing
+
+                    _ ->
+                        Nothing
+            )
+        |> Array.first
+        |> Maybe.map (Eval.run (Eval.contextFromFile file) 20000)
+
+
+
+-- KNOWN-MISCOMPILE CLASS ------------------------------------------------------
+
+
+caseInKnownClass : Array CaseArm -> Bool
+caseInKnownClass arms =
+    Array.any
+        (\arm ->
+            when arm.pattern is
+                PatNamed named ->
+                    Array.any patternHasListShape named.arguments
+
+                _ ->
+                    False
+        )
+        arms
+
+
+patternHasListShape : Pattern -> Bool
+patternHasListShape pattern =
+    when pattern is
+        PatCons _ ->
+            True
+
+        PatList items ->
+            not (Array.isEmpty items)
+
+        PatAs inner ->
+            patternHasListShape inner.pattern
+
+        _ ->
+            False
+
+
+
+-- DETERMINISTIC D3 / D4 FIXTURES ---------------------------------------------
+
+
+knownMiscompileFixtureChecks : Array Check
+knownMiscompileFixtureChecks =
+    [ { name = "knownMiscompiles: D3 multi-peer ctor-cons disagrees (red until W2.1)"
+      , passed = fixtureDisagrees d3Fixture
+      , details = "expected pre/post divergence on Batch [7,8]"
+      }
+    , { name = "knownMiscompiles: D4 ctor-cons under _ crashes post (red until W2.2)"
+      , passed = fixtureIntroducesCrash d4Fixture
+      , details = "expected Done pre vs Crashed post on Batch []"
+      }
+    ]
+
+
+fixtureDisagrees : File -> Bool
+fixtureDisagrees file =
+    when compareFile file is
+        Failed _ ->
+            True
+
+        _ ->
+            False
+
+
+fixtureIntroducesCrash : File -> Bool
+fixtureIntroducesCrash file =
+    let
+        before =
+            CtorLaw.apply (CtorLaw.collectFromFile file) file
+
+        after =
+            MatchCompile.compile Dict.empty before
+    in
+    when { pre = targetOutcome before, post = targetOutcome after } is
+        { pre = Just (Done _), post = Just (Crashed _) } ->
+            True
+
+        _ ->
+            False
+
+
+{-| type Msg = Batch (List Int) | Other
+`Batch [] -> 1; Batch [x] -> 20+x; Batch (x::y::_) -> 300+x+y; Other -> 4`
+on `Batch [7,8]`: Elm answers 315.
+-}
+d3Fixture : File
+d3Fixture =
+    fixtureAround
+        (ExprApplication [ bare "Batch", ExprList [ ExprInt 7, ExprInt 8 ] ])
+        [ { pattern = batchPat (PatList [])
+          , body = ExprInt 1
+          }
+        , { pattern = batchPat (PatList [ PatVar "x" ])
+          , body = plus (ExprInt 20) (bare "x")
+          }
+        , { pattern =
+                batchPat
+                    (PatCons
+                        { head = PatVar "x"
+                        , tail = PatCons { head = PatVar "y", tail = PatAll }
+                        }
+                    )
+          , body = plus (ExprInt 300) (plus (bare "x") (bare "y"))
+          }
+        , { pattern = otherPat
+          , body = ExprInt 4
+          }
+        ]
+
+
+{-| `Batch (x::xs) -> 100+x; _ -> 0` on `Batch []`: Elm answers 0.
+-}
+d4Fixture : File
+d4Fixture =
+    fixtureAround
+        (ExprApplication [ bare "Batch", ExprList [] ])
+        [ { pattern =
+                batchPat
+                    (PatCons { head = PatVar "x", tail = PatVar "xs" })
+          , body = plus (ExprInt 100) (bare "x")
+          }
+        , { pattern = PatAll
+          , body = ExprInt 0
+          }
+        ]
+
+
+batchPat : Pattern -> Pattern
+batchPat inner =
+    PatNamed
+        { ref = { moduleName = Nothing, name = "Batch" }
+        , arguments = [ inner ]
+        }
+
+
+otherPat : Pattern
+otherPat =
+    PatNamed
+        { ref = { moduleName = Nothing, name = "Other" }
+        , arguments = []
+        }
+
+
+fixtureAround : Expr -> Array CaseArm -> File
+fixtureAround scrutinee arms =
+    buildFileWith
+        [ DeclCustomType
+            { name = "Msg"
+            , documentation = Nothing
+            , generics = []
+            , constructors =
+                [ { name = "Batch"
+                  , arguments =
+                        [ Ast.Types.TypeTyped
+                            { ref = { moduleName = Just "List", name = "List" }
+                            , arguments = [ Ast.Types.TypeGeneric "a" ]
+                            }
+                        ]
+                  }
+                , { name = "Other", arguments = [] }
+                ]
+            }
+        ]
+        (ExprCase { expression = scrutinee, cases = arms })
+
+
+
+-- GENERATOR -------------------------------------------------------------------
+
+
+type alias Gen =
+    { seed : Int }
+
+
+type ScrutineeKind
+    = OnList
+    | OnCtor
+
+
+type alias GeneratedCase =
+    { kind : ScrutineeKind
+    , scrutinee : Expr
+    , arms : Array CaseArm
+    }
+
+
+mix : Int -> Gen
+mix index =
+    { seed = stepSeed (stepSeed (index * 2654435761 + 0x9E3779B9)) }
+
+
+stepSeed : Int -> Int
+stepSeed seed =
+    Math.modBy 2147483647 (seed * 1103515245 + 12345)
+
+
+next : Gen -> { gen : Gen, value : Int }
+next gen =
+    let
+        seed =
+            stepSeed gen.seed
+    in
+    { gen = { seed = seed }, value = seed }
+
+
+range : Int -> Int -> Gen -> { gen : Gen, value : Int }
+range low high gen =
+    let
+        stepped =
+            next gen
+
+        span =
+            high - low + 1
+    in
+    { gen = stepped.gen
+    , value = low + Math.modBy span stepped.value
+    }
+
+
+generateCase : Gen -> GeneratedCase
+generateCase gen0 =
+    let
+        kindPick =
+            range 0 1 gen0
+
+        kind =
+            if kindPick.value == 0 then
+                OnList
+
+            else
+                OnCtor
+
+        scrutineePick =
+            genScrutinee kind kindPick.gen
+
+        armCountPick =
+            range 1 3 scrutineePick.gen
+
+        armsPick =
+            genArms kind armCountPick.value 0 armCountPick.gen []
+    in
+    { kind = kind
+    , scrutinee = scrutineePick.value
+    , arms = armsPick.value
+    }
+
+
+genScrutinee : ScrutineeKind -> Gen -> { gen : Gen, value : Expr }
+genScrutinee kind gen0 =
+    when kind is
+        OnList ->
+            genIntList gen0
+
+        OnCtor ->
+            let
+                ctorPick =
+                    range 0 2 gen0
+            in
+            when ctorPick.value is
+                0 ->
+                    { gen = ctorPick.gen, value = ExprVar { moduleName = Nothing, name = "C0" } }
+
+                1 ->
+                    let
+                        payload =
+                            genIntList ctorPick.gen
+                    in
+                    { gen = payload.gen
+                    , value =
+                        ExprApplication [ bare "C1", payload.value ]
+                    }
+
+                _ ->
+                    let
+                        intPick =
+                            range 0 9 ctorPick.gen
+
+                        payload =
+                            genIntList intPick.gen
+                    in
+                    { gen = payload.gen
+                    , value =
+                        ExprApplication
+                            [ bare "C2"
+                            , ExprInt intPick.value
+                            , payload.value
+                            ]
+                    }
+
+
+genIntList : Gen -> { gen : Gen, value : Expr }
+genIntList gen0 =
+    let
+        lengthPick =
+            range 0 4 gen0
+
+        collected =
+            Array.foldl
+                (\_ acc ->
+                    let
+                        itemPick =
+                            range 0 9 acc.gen
+                    in
+                    { gen = itemPick.gen
+                    , items = Array.pushLast (ExprInt itemPick.value) acc.items
+                    }
+                )
+                { gen = lengthPick.gen, items = [] }
+                (Array.repeat lengthPick.value {})
+    in
+    { gen = collected.gen, value = ExprList collected.items }
+
+
+genArms :
+    ScrutineeKind
+    -> Int
+    -> Int
+    -> Gen
+    -> Array CaseArm
+    -> { gen : Gen, value : Array CaseArm }
+genArms kind remaining index gen0 acc =
+    if remaining <= 0 then
+        let
+            finalPick =
+                range 0 1 gen0
+
+            finalPattern =
+                if finalPick.value == 0 then
+                    PatAll
+
+                else
+                    PatVar "zfinal"
+
+            body =
+                armBody (1000 + index) finalPattern
+        in
+        { gen = finalPick.gen
+        , value =
+            Array.pushLast { pattern = finalPattern, body = body } acc
+        }
+
+    else
+        let
+            patternPick =
+                genPattern kind index gen0
+
+            body =
+                armBody (1000 + index) patternPick.value
+        in
+        genArms kind
+            (remaining - 1)
+            (index + 1)
+            patternPick.gen
+            (Array.pushLast
+                { pattern = patternPick.value, body = body }
+                acc
+            )
+
+
+genPattern : ScrutineeKind -> Int -> Gen -> { gen : Gen, value : Pattern }
+genPattern kind armIndex gen0 =
+    when kind is
+        OnList ->
+            genListPattern armIndex gen0
+
+        OnCtor ->
+            genCtorPattern armIndex gen0
+
+
+genListPattern : Int -> Gen -> { gen : Gen, value : Pattern }
+genListPattern armIndex gen0 =
+    let
+        shapePick =
+            range 0 2 gen0
+
+        prefix =
+            "a" ++ String.fromInt armIndex ++ "_"
+    in
+    when shapePick.value is
+        0 ->
+            let
+                lengthPick =
+                    range 0 2 shapePick.gen
+
+                items =
+                    Array.indexedMap
+                        (\i _ -> PatVar (prefix ++ String.fromInt i))
+                        (Array.repeat lengthPick.value {})
+            in
+            { gen = lengthPick.gen, value = PatList items }
+
+        1 ->
+            genConsChain prefix shapePick.gen
+
+        _ ->
+            let
+                chain =
+                    genConsChain prefix shapePick.gen
+            in
+            { gen = chain.gen
+            , value =
+                PatAs { pattern = chain.value, name = prefix ++ "whole" }
+            }
+
+
+genConsChain : String -> Gen -> { gen : Gen, value : Pattern }
+genConsChain prefix gen0 =
+    let
+        depthPick =
+            range 1 3 gen0
+
+        tailPick =
+            range 0 1 depthPick.gen
+
+        tail =
+            if tailPick.value == 0 then
+                PatVar (prefix ++ "rest")
+
+            else
+                PatAll
+
+        chain =
+            Array.foldl
+                (\i acc ->
+                    { gen = acc.gen
+                    , pattern =
+                        PatCons
+                            { head = PatVar (prefix ++ "h" ++ String.fromInt i)
+                            , tail = acc.pattern
+                            }
+                    }
+                )
+                { gen = tailPick.gen, pattern = tail }
+                (Array.range 0 (depthPick.value - 1))
+    in
+    { gen = chain.gen, value = chain.pattern }
+
+
+genCtorPattern : Int -> Gen -> { gen : Gen, value : Pattern }
+genCtorPattern armIndex gen0 =
+    let
+        ctorPick =
+            range 0 2 gen0
+
+        prefix =
+            "c" ++ String.fromInt armIndex ++ "_"
+    in
+    when ctorPick.value is
+        0 ->
+            { gen = ctorPick.gen
+            , value =
+                PatNamed
+                    { ref = { moduleName = Nothing, name = "C0" }
+                    , arguments = []
+                    }
+            }
+
+        1 ->
+            let
+                inner =
+                    genListPattern armIndex ctorPick.gen
+            in
+            { gen = inner.gen
+            , value =
+                PatNamed
+                    { ref = { moduleName = Nothing, name = "C1" }
+                    , arguments = [ inner.value ]
+                    }
+            }
+
+        _ ->
+            let
+                intSlotPick =
+                    range 0 1 ctorPick.gen
+
+                intSlot =
+                    if intSlotPick.value == 0 then
+                        PatVar (prefix ++ "n")
+
+                    else
+                        PatAll
+
+                inner =
+                    genListPattern armIndex intSlotPick.gen
+            in
+            { gen = inner.gen
+            , value =
+                PatNamed
+                    { ref = { moduleName = Nothing, name = "C2" }
+                    , arguments = [ intSlot, inner.value ]
+                    }
+            }
+
+
+{-| `[marker, boundVar…]` — catches wrong arm, dropped arm, and binder mixups.
+-}
+armBody : Int -> Pattern -> Expr
+armBody marker pattern =
+    ExprList
+        (Array.pushFirst (ExprInt marker)
+            (Array.map bare (collectVars pattern))
+        )
+
+
+collectVars : Pattern -> Array String
+collectVars pattern =
+    when pattern is
+        PatVar name ->
+            [ name ]
+
+        PatAs inner ->
+            Array.pushLast inner.name (collectVars inner.pattern)
+
+        PatCons cons ->
+            concatNames (collectVars cons.head) (collectVars cons.tail)
+
+        PatList items ->
+            Array.flatten (Array.map collectVars items)
+
+        PatNamed named ->
+            Array.flatten (Array.map collectVars named.arguments)
+
+        PatRecordBind binds ->
+            Array.flatten
+                (Array.map (\bind -> collectVars bind.pattern) binds)
+
+        PatTuple items ->
+            Array.flatten (Array.map collectVars items)
+
+        _ ->
+            []
+
+
+{-| a-then-b order without relying on Gren's argument-flipped Array.append (D2).
+-}
+concatNames : Array String -> Array String -> Array String
+concatNames a b =
+    Array.foldl (\x acc -> Array.pushLast x acc) a b
+
+
+
+-- FILE ASSEMBLY ---------------------------------------------------------------
+
+
+buildFile : GeneratedCase -> File
+buildFile generated =
+    let
+        typeDecls =
+            when generated.kind is
+                OnList ->
+                    []
+
+                OnCtor ->
+                    [ DeclCustomType
+                        { name = "T"
+                        , documentation = Nothing
+                        , generics = []
+                        , constructors =
+                            [ { name = "C0", arguments = [] }
+                            , { name = "C1"
+                              , arguments = [ Ast.Types.TypeGeneric "l" ]
+                              }
+                            , { name = "C2"
+                              , arguments =
+                                    [ Ast.Types.TypeGeneric "n"
+                                    , Ast.Types.TypeGeneric "l"
+                                    ]
+                              }
+                            ]
+                        }
+                    ]
+    in
+    buildFileWith typeDecls
+        (ExprCase
+            { expression = generated.scrutinee
+            , cases = generated.arms
+            }
+        )
+
+
+buildFileWith : Array Declaration -> Expr -> File
+buildFileWith typeDecls targetBody =
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = Ast.Types.NormalModule
+        , moduleName = "Gen"
+        , exposing_ = Ast.Types.ExposeAll
+        }
+    , comments = []
+    , imports = []
+    , declarations =
+        Array.pushLast
+            (DeclFunction
+                { name = "target"
+                , documentation = Nothing
+                , signature = Nothing
+                , arguments = []
+                , expression = targetBody
+                }
+            )
+            typeDecls
+    }
+
+
+
+-- SMALL HELPERS ---------------------------------------------------------------
+
+
+bare : String -> Expr
+bare name =
+    ExprVar { moduleName = Nothing, name = name }
+
+
+plus : Expr -> Expr -> Expr
+plus left right =
+    ExprBinop { operator = "+", left = left, right = right }

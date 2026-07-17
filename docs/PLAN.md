@@ -292,7 +292,7 @@ no compiler in the loop.
       gate reconciliation check: a suite failure is acceptable at a gate iff a
       matching ledger EXEMPT entry with evidence exists. Prove: tier 0 (status unit
       tests on fixture ledgers).
-- [ ] W3.6 [M2] Fix vacuous tier-2 proofs: add `--package name@version` direct-port
+- [x] W3.6 [M2] Fix vacuous tier-2 proofs: add `--package name@version` direct-port
       mode to `run-residual.cjs` (ports from catalog/snapshot, ignoring failure
       lists); `--only`/`--reason` matching nothing exits non-zero. Prove: tier 0
       (runner unit) + one tier-2 direct port.
@@ -476,13 +476,17 @@ DONE = M5.G and M6.G pass on the same clean commit.
 
 ## STATUS
 
-- Active milestone: **M2**. Next task: harvest **W3.6** (done in worktree), then W2.x, W5.2.
+- Active milestone: **M2**. Next task: **W2.1** (delegated, in flight) then W2.2, W2.3.
 - 2026-07-17 M1.G PASSED: tier 0 = 154 checks 0.70s; tier 1 = canary 14/14 30.5s +
   rule 4.1s + format 2.2s (~37s total); knownMiscompiles registered and red (D3/D4
   fixtures assert divergence).
 - 2026-07-17 W1.3: TransformLawTest landed — 120 RecordAlias + 120 CtorLaw seeded
   samples (saturated/partial/piped ctor uses, field access), eval∘transform == eval
   including a became-stuck guard; coverage floors pass. Tier 0 green (158 checks).
+- 2026-07-17 W3.6: run-residual gains --package direct-port mode (catalog-resolved,
+  correct platform, ignores failure lists); vacuous --only/--reason filters now exit
+  non-zero; unknown package exits non-zero; runs stay triage-only. (Delegate-implemented,
+  validated here: vacuous filter EXIT=1, maybe-extra direct port EXIT=0.)
 - 2026-07-17 tier-0 wall measured: 0.70s warm (`npm test`, 154 checks incl. 240
   property samples); bare runner 0.16s.
 - 2026-07-17: Plan created from full-project audit (§6), adversarially reviewed

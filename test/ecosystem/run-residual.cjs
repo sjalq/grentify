@@ -1,13 +1,27 @@
 #!/usr/bin/env node
 /**
- * Re-port only packages that failed in the latest TRIAGE or LAST_RUN proof.
- * Default concurrency 6. Never writes suite proof.
+ * Re-port packages for triage. Default concurrency 6. Never writes suite proof.
+ *
+ * Two selection modes:
+ *   1. Failure-list mode (default): re-port packages that failed in the latest
+ *      TRIAGE.json / LAST_RUN.json. Requires those machine-local lists to exist.
+ *   2. Direct catalog mode (--package): port the named package(s) straight from
+ *      the candidate catalogs regardless of any failure list, so a fresh machine
+ *      can prove a single package without a prior suite run.
  *
  * Usage:
  *   npm run ecosystem:residual
  *   npm run ecosystem:residual -- --suite pure
  *   npm run ecosystem:residual -- -j 8 --fail-fast
  *   npm run ecosystem:residual -- --reason type-mismatch
+ *   npm run ecosystem:residual -- --only elm-community/maybe-extra@5.3.0
+ *   npm run ecosystem:residual -- --package elm-community/maybe-extra@5.3.0
+ *   npm run ecosystem:residual -- --package a/b@1.0.0 --package c/d@2.0.0
+ *
+ * Exit codes:
+ *   0  all selected packages recovered (or nothing to do with no filter)
+ *   1  a package still failed, a --package name is in neither catalog, or a
+ *      --only/--reason/--suite filter matched nothing (vacuous run != proof)
  */
 const fs = require("node:fs");
 const path = require("node:path");
@@ -36,34 +50,74 @@ if (!process.argv.includes("--concurrency") && !process.argv.includes("-j")) {
 let suiteFilter = null;
 let reasonFilter = null;
 let onlyFilter = null;
+const packageArgs = [];
 const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
   if (argv[i] === "--suite") suiteFilter = argv[++i];
   if (argv[i] === "--reason") reasonFilter = argv[++i];
   if (argv[i] === "--only") onlyFilter = String(argv[++i] || "");
+  if (argv[i] === "--package") packageArgs.push(String(argv[++i] || ""));
 }
 
-let failures = collectFailures(suiteFilter, reasonFilter);
-if (onlyFilter) {
-  const want = new Set(
-    onlyFilter
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
-  failures = failures.filter(
-    (f) =>
-      want.has(f.package) ||
-      [...want].some(
-        (w) => f.package === w || f.package.startsWith(w + "@") || w.startsWith(f.package),
-      ),
-  );
-}
-if (failures.length === 0) {
-  console.log(
-    "No residual failures found in TRIAGE.json or LAST_RUN.json. Run canary/suite first.",
-  );
-  process.exit(0);
+let failures;
+let sourceLabel;
+let selectKind;
+if (packageArgs.length > 0) {
+  // Direct catalog mode: port the named package(s) straight from the candidate
+  // catalogs, independent of any machine-local failure list.
+  const { items, missing } = resolveCatalogPackages(packageArgs);
+  if (missing.length > 0) {
+    console.error(
+      `[ecosystem:residual] not in any candidate catalog: ${missing.join(", ")}`,
+    );
+    console.error(
+      `  candidates come from test/ecosystem/packages.json and test/ecosystem/packages-browser.json`,
+    );
+    process.exit(1);
+  }
+  failures = items;
+  sourceLabel = "catalog-direct";
+  selectKind = "package";
+} else {
+  failures = collectFailures(suiteFilter, reasonFilter);
+  if (onlyFilter) {
+    const want = new Set(
+      onlyFilter
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    );
+    failures = failures.filter(
+      (f) =>
+        want.has(f.package) ||
+        [...want].some(
+          (w) => f.package === w || f.package.startsWith(w + "@") || w.startsWith(f.package),
+        ),
+    );
+  }
+  const filtered = onlyFilter || reasonFilter || suiteFilter;
+  if (failures.length === 0) {
+    if (filtered) {
+      // A filter was supplied but matched nothing. Exiting 0 here would let a
+      // vacuous run masquerade as proof, so fail loudly instead.
+      const parts = [
+        onlyFilter ? `--only ${onlyFilter}` : null,
+        reasonFilter ? `--reason ${reasonFilter}` : null,
+        suiteFilter ? `--suite ${suiteFilter}` : null,
+      ].filter(Boolean);
+      console.error(
+        `[ecosystem:residual] vacuous filter (${parts.join(" ")}): no residual failure matched. ` +
+          `Nothing was ported. Use --package name@version to port a catalog package directly.`,
+      );
+      process.exit(1);
+    }
+    console.log(
+      "No residual failures found in TRIAGE.json or LAST_RUN.json. Run canary/suite first.",
+    );
+    process.exit(0);
+  }
+  sourceLabel = "TRIAGE+LAST_RUN";
+  selectKind = "failures";
 }
 
 const stamp = gitStamp(root);
@@ -78,7 +132,7 @@ fs.rmSync(outRoot, { recursive: true, force: true });
 fs.mkdirSync(outRoot, { recursive: true });
 
 console.log(
-  `[ecosystem:residual] commit=${stamp.short} failures=${failures.length} -j${args.concurrency}` +
+  `[ecosystem:residual] commit=${stamp.short} select=${selectKind} packages=${failures.length} -j${args.concurrency}` +
     (reasonFilter ? ` reason=${reasonFilter}` : "") +
     (suiteFilter ? ` suite=${suiteFilter}` : ""),
 );
@@ -164,8 +218,8 @@ mapPool(failures, args.concurrency, async (item, index) => {
       suiteId: "residual",
       role: "triage-result",
       mode: "residual",
-      select: "failures",
-      catalog: "TRIAGE+LAST_RUN",
+      select: selectKind,
+      catalog: sourceLabel,
       catalogPackageCount: failures.length,
       git: stamp,
       startedAt,
@@ -195,6 +249,55 @@ mapPool(failures, args.concurrency, async (item, index) => {
     console.error(err);
     process.exit(1);
   });
+
+// Resolve `--package name@version` specs against the candidate catalogs.
+// Pure catalog wins over browser when a name appears in both. A spec that
+// matches no catalog entry is reported in `missing` (caller exits non-zero).
+function resolveCatalogPackages(specs) {
+  const pure = readCatalogSafe(path.join(__dirname, "packages.json"));
+  const browser = readCatalogSafe(path.join(__dirname, "packages-browser.json"));
+  const items = [];
+  const missing = [];
+  const seen = new Set();
+  for (const raw of specs) {
+    const spec = String(raw).trim();
+    if (!spec) continue;
+    const at = spec.lastIndexOf("@");
+    const name = at > 0 ? spec.slice(0, at) : spec;
+    const version = at > 0 ? spec.slice(at + 1) : null;
+    const pureEntry = findCatalogEntry(pure, name, version);
+    const browserEntry = pureEntry ? null : findCatalogEntry(browser, name, version);
+    const entry = pureEntry || browserEntry;
+    if (!entry) {
+      missing.push(spec);
+      continue;
+    }
+    const label = `${entry.name}@${entry.version}`;
+    if (seen.has(label)) continue;
+    seen.add(label);
+    items.push({
+      package: label,
+      reason: "requested",
+      suite: browserEntry ? "browser" : "pure",
+      platform: browserEntry ? "browser" : undefined,
+    });
+  }
+  return { items, missing };
+}
+
+function findCatalogEntry(catalog, name, version) {
+  return (catalog.packages || []).find(
+    (p) => p.name === name && (version == null || p.version === version),
+  );
+}
+
+function readCatalogSafe(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return { packages: [] };
+  }
+}
 
 function collectFailures(suiteFilter, reasonFilter) {
   const seen = new Map();

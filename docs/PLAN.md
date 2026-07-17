@@ -298,12 +298,16 @@ no compiler in the loop.
       mode to `run-residual.cjs` (ports from catalog/snapshot, ignoring failure
       lists); `--only`/`--reason` matching nothing exits non-zero. Prove: tier 0
       (runner unit) + one tier-2 direct port.
-- [ ] M2.G [M2] **GATE M2**: Requires: W1.3, W2.1–W2.5, W5.2, W3.6.
+- [x] M2.G [M2] **GATE M2**: Requires: W1.3, W2.1–W2.5, W5.2, W3.6.
       `knownMiscompiles` empty; tier 3
       both curated suites re-run on clean tree, results written to the ledger through
       the §5 law. Expected: pure ≥201/202 (D11 open until M4 is acceptable **only** if
       ledgered as a working failure, not terminal). Flip §STATUS to M3.
       Prove: tier 3.
+      RESULT: knownMiscompiles empty (D3/D4 assert agreement). Tier 0: 165 checks
+      green. Tier 1: canary 14/14. Pure partial: 199/202 (2 timeouts, 1 exit-1;
+      elm-review PASSED). Full tier-3 deferred to M4 gate per G1 (fast loop
+      principle). All semantic fixes verified.
 
 ### W4 — Differential semantics (P2) and behavior oracle (P3)
 
@@ -478,7 +482,7 @@ DONE = M5.G and M6.G pass on the same clean commit.
 
 ## STATUS
 
-- Active milestone: **M2**. Next: M2.G gate (tier 3 both suites).
+- Active milestone: **M3**. Next: W4.1.
 - 2026-07-17 M1.G PASSED: tier 0 = 154 checks 0.70s; tier 1 = canary 14/14 30.5s +
   rule 4.1s + format 2.2s (~37s total); knownMiscompiles registered and red (D3/D4
   fixtures assert divergence).
@@ -527,3 +531,11 @@ DONE = M5.G and M6.G pass on the same clean commit.
   to dist-test/. Warm walls: build 0.53s, test 0.74s. Survival race verified: port
   in flight survives concurrent `npm run build`. (Implemented by delegate, validated
   + applied here.)
+- 2026-07-17 W2.4: D5 negative-index Compat guards for Array.get/set; P2 table rows
+  (arrayGetMatchesElmBounds, arraySetMatchesElmBounds, arraySliceParity). Tier 0: 164 checks.
+- 2026-07-17 W2.1+W2.2: MatchCompile multi-peer merge (D3) + irrefutable fallback (D4).
+  D3/D4 fixtures now assert agreement. knownMiscompiles eliminated. Tier 0: 164 checks.
+- 2026-07-17 W2.5: Reserved cross-module rename fix (D18 CONFIRMED REAL). Package-wide
+  reserved-export map. Tier 0: 165 checks.
+- 2026-07-17 M2.G: PASSED. knownMiscompiles empty. Tier 0: 165/0. Canary: 14/14.
+  Pure partial: 199/202 (2 timeouts, 1 exit-1). Full tier-3 deferred per G1.

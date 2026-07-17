@@ -258,7 +258,7 @@ no compiler in the loop.
       (`eval ∘ transform == eval` under the declaration-aware value normalization from
       W1.1). D20 closes when MatchCompile, CtorLaw, RecordAlias are all under the
       property. Prove: tier 0.
-- [ ] M1.G [M1] **GATE M1**: Requires: W0.1, W3.1, W1.1, W1.2. Tier 0 green ≤10s and
+- [x] M1.G [M1] **GATE M1**: Requires: W0.1, W3.1, W1.1, W1.2. Tier 0 green ≤10s and
       tier 1 green ≤90s, walls recorded in §STATUS; `knownMiscompiles` non-empty and
       failing as registered. Flip §STATUS to M2. Prove: tier 0 + tier 1.
 
@@ -476,7 +476,10 @@ DONE = M5.G and M6.G pass on the same clean commit.
 
 ## STATUS
 
-- Active milestone: **M1**. Next task: **M1.G**.
+- Active milestone: **M2**. Next task: **W1.3** (W2.1/W2.2, W3.6, W5.2 delegated, in flight).
+- 2026-07-17 M1.G PASSED: tier 0 = 154 checks 0.70s; tier 1 = canary 14/14 30.5s +
+  rule 4.1s + format 2.2s (~37s total); knownMiscompiles registered and red (D3/D4
+  fixtures assert divergence).
 - 2026-07-17 tier-0 wall measured: 0.70s warm (`npm test`, 154 checks incl. 240
   property samples); bare runner 0.16s.
 - 2026-07-17: Plan created from full-project audit (§6), adversarially reviewed

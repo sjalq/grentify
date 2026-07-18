@@ -1,6 +1,7 @@
 module TestMain exposing (main)
 
 import Array exposing (Array)
+import Ast.BareResolveTest
 import Ast.CtorLawTest
 import Ast.EvalPropTest
 import Ast.EvalTest
@@ -80,6 +81,7 @@ allChecks =
     , Transform.PipelineTest.tests
     , Transform.SourceEditTest.tests
     , Resolve.SolverTest.tests
+    , Ast.BareResolveTest.tests
     , Ast.CtorLawTest.tests
     , Ast.EvalPropTest.tests
     , Ast.EvalTest.tests

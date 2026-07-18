@@ -1,0 +1,237 @@
+module Ast.BareResolveTest exposing (tests)
+
+{-| D23 regression: elm-review's lookup table leaks a lambda-param shadow
+outward past the lambda when the body holds a `let`, extracting an imported
+bare name as local. BareResolve must repair exactly that — and must NOT touch
+genuinely local bindings, non-exposed names, or exposing(..) imports.
+-}
+
+import Array exposing (Array)
+import Ast.BareResolve as BareResolve
+import Ast.Types as T exposing (Expr(..), LetDecl(..), Pattern(..))
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+fuzzImport : T.Import
+fuzzImport =
+    { moduleName = "Fuzz"
+    , alias = Nothing
+    , exposing_ = Just (T.ExposeExplicit [ T.ExposeFunction "list", T.ExposeFunction "int" ])
+    }
+
+
+openImport : T.Import
+openImport =
+    { moduleName = "List.Extra"
+    , alias = Nothing
+    , exposing_ = Just T.ExposeAll
+    }
+
+
+fileWith : Array T.Import -> Array T.Declaration -> T.File
+fileWith imports declarations =
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = T.NormalModule
+        , moduleName = "Repro"
+        , exposing_ = T.ExposeAll
+        }
+    , comments = []
+    , imports = imports
+    , declarations = declarations
+    }
+
+
+declWith : Expr -> T.Declaration
+declWith expression =
+    T.DeclFunction
+        { name = "site"
+        , documentation = Nothing
+        , signature = Nothing
+        , arguments = []
+        , expression = expression
+        }
+
+
+bare : String -> Expr
+bare name =
+    ExprVar { moduleName = Nothing, name = name }
+
+
+qualified : String -> String -> Expr
+qualified moduleName name =
+    ExprVar { moduleName = Just moduleName, name = name }
+
+
+{-| The exact D23 shape: fuzz (list int) "…" <| \list -> let kept = list in kept
+with the fuzzer-position `list` extracted as bare (the lie under repair).
+-}
+d23Shape : Expr
+d23Shape =
+    ExprBinop
+        { operator = "<|"
+        , left =
+            ExprApplication
+                [ qualified "Test" "fuzz"
+                , ExprApplication [ bare "list", qualified "Fuzz" "int" ]
+                , ExprString "desc"
+                ]
+        , right =
+            ExprLambda
+                { arguments = [ PatVar "list" ]
+                , expression =
+                    ExprLet
+                        { declarations = [ LetFunction { name = "kept", arguments = [], expression = bare "list" } ]
+                        , expression = bare "kept"
+                        }
+                }
+        }
+
+
+resolvedDecl : T.File -> Maybe Expr
+resolvedDecl file =
+    BareResolve.apply file
+        |> .declarations
+        |> Array.first
+        |> Maybe.andThen
+            (\declaration ->
+                when declaration is
+                    T.DeclFunction function ->
+                        Just function.expression
+
+                    _ ->
+                        Nothing
+            )
+
+
+tests : Array TestResult
+tests =
+    [ repairsLeakedFuzzerName
+    , keepsLambdaBodyLocal
+    , keepsNonExposedBare
+    , keepsTopLevelShadow
+    , ignoresExposeAllImports
+    ]
+
+
+repairsLeakedFuzzerName : TestResult
+repairsLeakedFuzzerName =
+    let
+        result =
+            resolvedDecl (fileWith [ fuzzImport ] [ declWith d23Shape ])
+
+        fuzzerFixed =
+            when result is
+                Just (ExprBinop binop) ->
+                    when binop.left is
+                        ExprApplication parts ->
+                            Array.get 1 parts
+                                == Just (ExprApplication [ qualified "Fuzz" "list", qualified "Fuzz" "int" ])
+
+                        _ ->
+                            False
+
+                _ ->
+                    False
+    in
+    { name = "D23: leaked fuzzer-position `list` is requalified to Fuzz.list"
+    , passed = fuzzerFixed
+    , details = "fuzz (list int) … <| \\list -> let … — the arg-position bare var gets Fuzz back"
+    }
+
+
+keepsLambdaBodyLocal : TestResult
+keepsLambdaBodyLocal =
+    let
+        result =
+            resolvedDecl (fileWith [ fuzzImport ] [ declWith d23Shape ])
+
+        bodyStillLocal =
+            when result is
+                Just (ExprBinop binop) ->
+                    when binop.right is
+                        ExprLambda lambda ->
+                            when lambda.expression is
+                                ExprLet letBlock ->
+                                    Array.first letBlock.declarations
+                                        == Just (LetFunction { name = "kept", arguments = [], expression = bare "list" })
+
+                                _ ->
+                                    False
+
+                        _ ->
+                            False
+
+                _ ->
+                    False
+    in
+    { name = "D23: `list` inside the \\list lambda body stays local"
+    , passed = bodyStillLocal
+    , details = "lambda-bound use sites are never requalified"
+    }
+
+
+keepsNonExposedBare : TestResult
+keepsNonExposedBare =
+    let
+        result =
+            resolvedDecl (fileWith [ fuzzImport ] [ declWith (bare "somethingElse") ])
+    in
+    { name = "non-exposed bare names pass through unchanged"
+    , passed = result == Just (bare "somethingElse")
+    , details = "no import exposes it; nothing to repair"
+    }
+
+
+keepsTopLevelShadow : TestResult
+keepsTopLevelShadow =
+    let
+        shadowingFile =
+            fileWith
+                [ fuzzImport ]
+                [ T.DeclFunction
+                    { name = "list"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression = ExprInt 1
+                    }
+                , declWith (bare "list")
+                ]
+
+        result =
+            BareResolve.apply shadowingFile
+                |> .declarations
+                |> Array.get 1
+                |> Maybe.andThen
+                    (\declaration ->
+                        when declaration is
+                            T.DeclFunction function ->
+                                Just function.expression
+
+                            _ ->
+                                Nothing
+                    )
+    in
+    { name = "top-level declaration shadows the import; bare use stays bare"
+    , passed = result == Just (bare "list")
+    , details = "module-level `list` wins over `import Fuzz exposing (list)`"
+    }
+
+
+ignoresExposeAllImports : TestResult
+ignoresExposeAllImports =
+    let
+        result =
+            resolvedDecl (fileWith [ openImport ] [ declWith (bare "frequencies") ])
+    in
+    { name = "exposing (..) imports are not repaired (member lists unknown)"
+    , passed = result == Just (bare "frequencies")
+    , details = "documented residual: only explicit exposing lists participate"
+    }

@@ -29,6 +29,7 @@ import Ast.MatchCompile as AstMatchCompile
 import Ast.NameSub as AstNameSub
 import Ast.Print as AstPrint
 import Ast.RecordAlias as AstRecordAlias
+import Ast.BareResolve as AstBareResolve
 import Ast.Reserved as AstReserved
 import Ast.Types exposing (File)
 import Char
@@ -488,6 +489,7 @@ collectPackageReservedExports registry recordAliases ctorArities soleCtors modul
                             let
                                 lowered =
                                     file
+                                        |> AstBareResolve.apply
                                         |> AstNameSub.apply registry
                                         |> AstRecordAlias.apply recordAliases
                                         |> AstCtorLaw.apply ctorArities
@@ -522,7 +524,7 @@ foldNamedAsts registry modules collect acc =
 
                         Ok file ->
                             Dict.foldl Dict.set inner
-                                (collect (AstNameSub.apply registry file))
+                                (collect (AstNameSub.apply registry (AstBareResolve.apply file)))
         )
         acc
         modules
@@ -588,6 +590,7 @@ transformModuleViaAst registry packageRecordAliases packageCtorArities packageSo
             let
                 lowered =
                     file
+                        |> AstBareResolve.apply
                         |> AstNameSub.apply registry
                         |> AstRecordAlias.apply packageRecordAliases
                         |> AstCtorLaw.apply packageCtorArities

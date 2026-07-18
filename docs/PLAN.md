@@ -399,9 +399,30 @@ no compiler in the loop.
       Batch mechanic landed: test/ecosystem/run-behavior-batch.cjs
       (npm run ecosystem:behavior) — resumable (per-package append + startup
       compaction, last-wins per package+commit), exit-0 survey tool, JSONL log
-      at test/ecosystem/behavior-log.jsonl. Canary drain in progress; failure
-      classes triage into named tasks. Ledger write happens on a clean-tree
-      rerun at M3.G per the §5 law.
+      at test/ecosystem/behavior-log.jsonl. Ledger write happens on a
+      clean-tree rerun at M3.G per the §5 law.
+      CANARY-14 SWEEP DONE (2026-07-18, log is truth — console interleaves
+      under -j): tested 3 (maybe-extra 30/30, jweir/elm-iso8601 288/288,
+      elm-color — its port-failed entry is the D13 version-probe flake),
+      no-tests 4 (elm-response, toop, html-extra, elm-dom: no tests/ in
+      archive), unportable 7 in classes:
+      - [ ] W4.4a harness deps: merge the emitted package's gren.json deps
+            into the harness gren.json (iso8601-date-strings needs
+            gren-lang/parser). Prove: tier 2 on that package -> tested.
+      - [ ] W4.4b platform guard: browser-platform packages get verdict
+            "browser-only" without a doomed node compile (remotedata's
+            RemoteData.gren imports Http). Prove: tier 2 on remotedata.
+      - [ ] W4.4c runner statuses: "no-behavior" -> "no-tests";
+            classify Elm-0.18-relic suites (bare toString: elm-hex CONFIRMED
+            broken upstream — original tests never compiled under 0.19) as
+            "tests-broken-upstream". Prove: tier 0 (runner) + rerun log.
+      - [ ] W4.4d specimen triage: elm-codec + json-decode-pipeline NAMING
+            errors — root-cause each (may be new mapping gaps or more
+            0.18 relics). Prove: recorded root cause per package here.
+      - D24 (list-extra, date TYPE MISMATCH) tracked in §6; needs the
+        typed sortWith rewrite task, not a W4.4 bite.
+      - [ ] W4.4e extend the curated list beyond canary toward >= 25 tested
+            (pick packages with real 0.19 test suites, common platform).
 - [ ] M3.G [M3] **GATE M3**: Requires: W4.1–W4.4. ≥25 behavior-verified ledger
       entries; P2 table complete
       per W4.1's check; tier 1 green. Flip §STATUS to M4. Prove: tier 0 + tier 1.

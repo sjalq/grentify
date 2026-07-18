@@ -396,6 +396,12 @@ no compiler in the loop.
 - [ ] W4.4 [M3] `tier 4 batch` Grow the behavior set to ≥25 curated packages (start
       with the canary 14). Results into ledger through the §5 law.
       Prove: harvest iterations show ≥25 ledger entries `behavior: "tested"`.
+      Batch mechanic landed: test/ecosystem/run-behavior-batch.cjs
+      (npm run ecosystem:behavior) — resumable (per-package append + startup
+      compaction, last-wins per package+commit), exit-0 survey tool, JSONL log
+      at test/ecosystem/behavior-log.jsonl. Canary drain in progress; failure
+      classes triage into named tasks. Ledger write happens on a clean-tree
+      rerun at M3.G per the §5 law.
 - [ ] M3.G [M3] **GATE M3**: Requires: W4.1–W4.4. ≥25 behavior-verified ledger
       entries; P2 table complete
       per W4.1's check; tier 1 green. Flip §STATUS to M4. Prove: tier 0 + tier 1.
@@ -546,7 +552,10 @@ DONE = M5.G and M6.G pass on the same clean commit.
 
 ## STATUS
 
-- Active milestone: **M3**. Next: W4.3 (wire P3 --with-tests), then W4.4, M3.G.
+- Active milestone: **M3**. Next: W4.4 batch drain + failure-class triage, then M3.G.
+- 2026-07-18 W4.3 COMPLETE: `port <pkg> --with-tests` = ported package +
+  generated harness + executed suite + verdict in report. First
+  behavior-verified port: maybe-extra 30/30.
 - 2026-07-18 W4.1: P2 table complete — 21 seeded rows, 19 tagged mappings, tier-0
   completeness checker. D22 discovered by the initialize row and fixed. Tier 0:
   180 checks + checker in ~3s warm; canary 14/14.

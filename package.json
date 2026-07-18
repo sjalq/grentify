@@ -45,6 +45,7 @@
     "test:apps": "npm run build --silent && node test/apps/run-apps.cjs",
     "test:format": "npm run build --silent && node test/format/run-format.cjs && node test/format/collapse-record-patterns.test.cjs",
     "test:ledger": "node test/ecosystem/lib/ledger.test.cjs",
+    "ecosystem:behavior": "npm run build --silent && node test/ecosystem/run-behavior-batch.cjs",
     "test:integration": "npm run test:e2e",
     "test:all": "npm run check && npm test && npm run test:rule && npm run test:format && npm run test:e2e && npm run test:ecosystem && npm run test:ecosystem-browser",
     "prepack": "npm run test:all && npm run build",

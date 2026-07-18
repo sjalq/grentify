@@ -208,6 +208,10 @@ Coverage and pipeline:
   before compiling (package.json), and every `ecosystem:*` script runs build first — a
   build in one terminal deletes `dist/elm-to-gren.js` under a running suite (happened
   during the audit).
+- **D22 Array.initialize negative-count crash** (found by W4.1's P2 row, FIXED same
+  commit): `Compat.Array.initialize` passed counts straight through; Gren's
+  `Array.initialize` throws RangeError on negative counts where Elm returns `[]`.
+  Guarded `count <= 0 -> []` in the adapter.
 
 ---
 
@@ -311,14 +315,19 @@ no compiler in the loop.
 
 ### W4 — Differential semantics (P2) and behavior oracle (P3)
 
-- [ ] W4.1 [M3] Grow and complete the P2 table begun in W2.3: for every catalog
+- [x] W4.1 [M3] Grow and complete the P2 table begun in W2.3: for every catalog
       mapping row with semantic-delta risk (get, set, slice, intersperse, sort*,
       String.*, Char case functions, integer division, remainderBy/modBy, …), a
       seeded-input property comparing the mapped Gren call against an Elm-semantics
       reference implementation. Completion = every delta-risk row in
       `mappings/builtin.json` carries a `"propertyRow"` tag naming its test; a tier-0
       check asserts the tags and tests correspond. Prove: tier 0.
-- [ ] W4.2 [M3] P3 spike on `elm-community/list-extra`: the **primary deliverable is
+      RESULT: 15 new rows (modBy/remainderBy, 4 Char case, String concat/uncons,
+      Array.initialize, List tail/partition, Dict toList/fromList/partition,
+      Set partition); 19 propertyRows tags total; completeness checker wired into
+      `npm test`. The initialize row EXPOSED D22 (negative-count crash), adapter
+      guarded in the same commit.
+- [x] W4.2 [M3] P3 spike on `elm-community/list-extra`: the **primary deliverable is
       the elm-explorations/test → gren-lang/test API mapping table** (Fuzz/Expect
       surface deltas; test-framework kernel deps are MAPPED, never EXEMPTed, when used
       as test-deps). Define "portable test" = uses only the mapped surface; anything
@@ -482,7 +491,10 @@ DONE = M5.G and M6.G pass on the same clean commit.
 
 ## STATUS
 
-- Active milestone: **M3**. Next: W4.1.
+- Active milestone: **M3**. Next: W4.3 (wire P3 --with-tests), then W4.4, M3.G.
+- 2026-07-18 W4.1: P2 table complete — 21 seeded rows, 19 tagged mappings, tier-0
+  completeness checker. D22 discovered by the initialize row and fixed. Tier 0:
+  180 checks + checker in ~3s warm; canary 14/14.
 - 2026-07-17 M1.G PASSED: tier 0 = 154 checks 0.70s; tier 1 = canary 14/14 30.5s +
   rule 4.1s + format 2.2s (~37s total); knownMiscompiles registered and red (D3/D4
   fixtures assert divergence).
@@ -539,3 +551,11 @@ DONE = M5.G and M6.G pass on the same clean commit.
   reserved-export map. Tier 0: 165 checks.
 - 2026-07-17 M2.G: PASSED. knownMiscompiles empty. Tier 0: 165/0. Canary: 14/14.
   Pure partial: 199/202 (2 timeouts, 1 exit-1). Full tier-3 deferred per G1.
+- 2026-07-17 W4.2: elm-explorations/test -> gren-lang/test mapping table
+  (mappings/test-framework.json + builtin.json renames + docs/test-framework-mapping.md).
+  Finding: frameworks nearly identical (7 renames); list-extra tests ~95% portable;
+  real blocker is that the pipeline does not port tests/ dirs (W4.3's job).
+- 2026-07-18 W4.1: 15 new P2 rows via Haiku wave (5 impl + 5 adversarial verify + 1
+  checker agent); Fable QA'd all verdicts, rewrote 2 chunks, fixed 3. D22 found and
+  fixed: Compat.Array.initialize now guards count <= 0 (Gren throws RangeError where
+  Elm returns []). 180 Gren checks + property-rows checker green; canary 14/14.

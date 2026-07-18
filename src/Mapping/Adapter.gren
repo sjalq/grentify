@@ -824,9 +824,16 @@ append lhs rhs =
     lhs ++ rhs
 
 
+{-| Elm `Array.initialize` returns an empty array for count <= 0. Gren's
+`Array.initialize` throws a RangeError for negative counts; guard them out.
+-}
 initialize : Int -> (Int -> a) -> Array a
 initialize count make =
-    Array.initialize count 0 make
+    if count <= 0 then
+        []
+
+    else
+        Array.initialize count 0 make
 
 
 fromList : Array a -> Array a

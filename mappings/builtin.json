@@ -37,7 +37,11 @@
             "toPolar": "ElmToGren.Compat.Basics.toPolar",
             "fromPolar": "ElmToGren.Compat.Basics.fromPolar"
           },
-          "types": {}
+          "types": {},
+          "propertyRows": {
+            "modBy": "mathModByNonNegative",
+            "remainderBy": "mathRemainderByPreservesSign"
+          }
         },
         {
           "source": "List",
@@ -62,6 +66,11 @@
           },
           "types": {
             "List": "Array"
+          },
+          "propertyRows": {
+            "append": "arrayAppendPreservesElmOrder",
+            "tail": "listTailMatchesElm",
+            "partition": "listPartitionMatchesElm"
           }
         },
         {
@@ -81,6 +90,12 @@
           },
           "types": {
             "Array": "Array"
+          },
+          "propertyRows": {
+            "append": "arrayAppendPreservesElmOrder",
+            "get": "arrayGetMatchesElmBounds",
+            "set": "arraySetMatchesElmBounds",
+            "initialize": "arrayInitializeMatchesElm"
           }
         },
         {
@@ -116,6 +131,11 @@
           },
           "types": {
             "String": "String"
+          },
+          "propertyRows": {
+            "append": "stringAppendPreservesElmOrder",
+            "concat": "stringConcatMatchesElm",
+            "uncons": "stringUnconsMatchesElm"
           }
         },
         {
@@ -131,6 +151,11 @@
           },
           "types": {
             "Dict": "Dict"
+          },
+          "propertyRows": {
+            "toList": "dictToListMatchesElm",
+            "fromList": "dictFromListMatchesElm",
+            "partition": "dictPartitionMatchesElm"
           }
         },
         {
@@ -146,6 +171,9 @@
           },
           "types": {
             "Set": "Set"
+          },
+          "propertyRows": {
+            "partition": "setPartitionMatchesElm"
           }
         },
         {
@@ -190,7 +218,13 @@
             "toLocaleLower": "ElmToGren.Compat.Char.toLocaleLower",
             "toLocaleUpper": "ElmToGren.Compat.Char.toLocaleUpper"
           },
-          "types": { "Char": "Char" }
+          "types": { "Char": "Char" },
+          "propertyRows": {
+            "toLower": "charToLowerMatchesElm",
+            "toUpper": "charToUpperMatchesElm",
+            "toLocaleLower": "charToLocaleLowerMatchesElm",
+            "toLocaleUpper": "charToLocaleUpperMatchesElm"
+          }
         },
         { "source": "Bitwise", "target": "Bitwise", "values": {}, "types": {} },
         { "source": "Debug", "target": "Debug", "values": {}, "types": {} },

@@ -24,6 +24,10 @@ Laws under test:
 -}
 
 import Array exposing (Array)
+import Char
+import Dict exposing (Dict)
+import Math
+import Set exposing (Set)
 import String
 
 
@@ -42,6 +46,21 @@ tests =
     , arrayGetMatchesElmBounds
     , arraySetMatchesElmBounds
     , arraySliceParity
+    , mathModByNonNegative
+    , mathRemainderByPreservesSign
+    , charToLowerMatchesElm
+    , charToUpperMatchesElm
+    , charToLocaleLowerMatchesElm
+    , charToLocaleUpperMatchesElm
+    , stringConcatMatchesElm
+    , stringUnconsMatchesElm
+    , arrayInitializeMatchesElm
+    , listTailMatchesElm
+    , listPartitionMatchesElm
+    , dictToListMatchesElm
+    , dictFromListMatchesElm
+    , dictPartitionMatchesElm
+    , setPartitionMatchesElm
     ]
 
 
@@ -425,4 +444,948 @@ intDivideByZeroIsZero =
     , details =
         String.fromInt (Array.length outcomes)
             ++ " seeded numerators; n // 0 == 0 for all"
+    }
+
+
+
+-- ROW 7: MATH MODBY (floored modulo, result sign follows divisor)
+
+
+{-| Elm's modBy implements floored division: the result sign follows the divisor.
+Reference from first principles via truncated division (x // n * n subtraction).
+-}
+mathModByNonNegative : TestResult
+mathModByNonNegative =
+    let
+        outcomes =
+            Array.map
+                (\seed ->
+                    let
+                        x =
+                            seed - lcgModulus // 2
+
+                        nAbs =
+                            1 + fifthRemainder seed
+
+                        n =
+                            if fifthRemainder (lcgNext seed) == 0 then
+                                negate nAbs
+
+                            else
+                                nAbs
+
+                        truncated =
+                            x - (x // n) * n
+
+                        floored =
+                            if truncated == 0 then
+                                0
+
+                            else if (truncated < 0) == (n < 0) then
+                                truncated
+
+                            else
+                                truncated + n
+
+                        actual =
+                            Math.modBy n x
+
+                        passesLaw =
+                            actual == floored
+
+                        boundsCheckForPositiveN =
+                            if n > 0 then
+                                actual >= 0 && actual < n
+
+                            else
+                                True
+                    in
+                    { passesLaw = passesLaw
+                    , passesBounds = boundsCheckForPositiveN
+                    }
+                )
+                (seedStream sampleCount 357924681)
+
+        allPassLaw =
+            Array.all .passesLaw outcomes
+
+        allPassBounds =
+            Array.all .passesBounds outcomes
+    in
+    { name = "Math.modBy implements floored division (result sign follows divisor)"
+    , passed = allPassLaw && allPassBounds
+    , details =
+        String.fromInt (Array.length outcomes)
+            ++ " seeded (x, n) pairs, n never 0, both signs; all match floored law; positive-n results all in [0, n)"
+    }
+
+
+
+-- ROW 8: MATH REMAINDERBY (truncated remainder, result sign follows dividend)
+
+
+{-| Elm's remainderBy implements truncated division: the result sign follows the dividend.
+Reference is the raw truncated remainder x - (x // n) * n.
+-}
+mathRemainderByPreservesSign : TestResult
+mathRemainderByPreservesSign =
+    let
+        outcomes =
+            Array.map
+                (\seed ->
+                    let
+                        x =
+                            seed - lcgModulus // 2
+
+                        nAbs =
+                            1 + fifthRemainder seed
+
+                        n =
+                            if fifthRemainder (lcgNext seed) == 0 then
+                                negate nAbs
+
+                            else
+                                nAbs
+
+                        r =
+                            x - (x // n) * n
+
+                        actual =
+                            Math.remainderBy n x
+
+                        passesLaw =
+                            actual == r
+
+                        signPreserved =
+                            r == 0 || (r < 0) == (x < 0)
+                    in
+                    { passesLaw = passesLaw
+                    , signPreserved = signPreserved
+                    }
+                )
+                (seedStream sampleCount 531469872)
+
+        allPassLaw =
+            Array.all .passesLaw outcomes
+
+        allSignPreserved =
+            Array.all .signPreserved outcomes
+    in
+    { name = "Math.remainderBy implements truncated division (result sign follows dividend)"
+    , passed = allPassLaw && allSignPreserved
+    , details =
+        String.fromInt (Array.length outcomes)
+            ++ " seeded (x, n) pairs, n never 0, both signs; all match truncated remainder law; non-zero results preserve dividend sign"
+    }
+
+
+
+-- ROWS 9-12: CHAR CASE CONVERSION
+
+
+{-| Mirrors `ElmToGren.Compat.Char.toLower`: routes through String.toLower.
+-}
+compatCharToLower : Char -> Char
+compatCharToLower char =
+    when String.popFirst (String.toLower (String.fromChar char)) is
+        Just { first } ->
+            first
+
+        Nothing ->
+            char
+
+
+{-| Mirrors `ElmToGren.Compat.Char.toUpper`: routes through String.toUpper.
+-}
+compatCharToUpper : Char -> Char
+compatCharToUpper char =
+    when String.popFirst (String.toUpper (String.fromChar char)) is
+        Just { first } ->
+            first
+
+        Nothing ->
+            char
+
+
+{-| Mirrors `ElmToGren.Compat.Char.toLocaleLower`: pure delegation to toLower
+(Gren has no locale API; the adapter's law is locale == simple case mapping).
+-}
+compatCharToLocaleLower : Char -> Char
+compatCharToLocaleLower char =
+    compatCharToLower char
+
+
+{-| Mirrors `ElmToGren.Compat.Char.toLocaleUpper`: pure delegation to toUpper.
+-}
+compatCharToLocaleUpper : Char -> Char
+compatCharToLocaleUpper char =
+    compatCharToUpper char
+
+
+{-| Elm reference: toLower via Char.toCode/Char.fromCode arithmetic.
+Codes 65..90 (A..Z) map to +32 (a..z); fixed non-ASCII 192->224 (À->à),
+216->248 (Ø->ø); all other sampled codes unchanged.
+-}
+elmCharToLower : Char -> Char
+elmCharToLower char =
+    let
+        code =
+            Char.toCode char
+    in
+    if code >= 65 && code <= 90 then
+        Char.fromCode (code + 32)
+
+    else if code == 192 then
+        Char.fromCode 224
+
+    else if code == 216 then
+        Char.fromCode 248
+
+    else
+        char
+
+
+{-| Elm reference: toUpper via Char.toCode/Char.fromCode arithmetic.
+Codes 97..122 (a..z) map to -32 (A..Z); 224->192, 248->216; others unchanged.
+-}
+elmCharToUpper : Char -> Char
+elmCharToUpper char =
+    let
+        code =
+            Char.toCode char
+    in
+    if code >= 97 && code <= 122 then
+        Char.fromCode (code - 32)
+
+    else if code == 224 then
+        Char.fromCode 192
+
+    else if code == 248 then
+        Char.fromCode 216
+
+    else
+        char
+
+
+{-| Sample pool: digits, uppercase, lowercase, ASCII symbols, plus fixed
+non-ASCII pairs with known case mappings.
+-}
+charSamplePool : Array Char
+charSamplePool =
+    let
+        digitCodes =
+            Array.range 48 57
+
+        upperCodes =
+            Array.range 65 90
+
+        lowerCodes =
+            Array.range 97 122
+
+        symbolCodes =
+            Array.range 33 47
+
+        allCodes =
+            Array.flatten [ digitCodes, upperCodes, lowerCodes, symbolCodes, [ 192, 216, 224, 248 ] ]
+    in
+    Array.map Char.fromCode allCodes
+
+
+{-| Pick a character from the sample pool using the seed reduced to a pool index.
+-}
+charFromSeed : Int -> Char
+charFromSeed seed =
+    let
+        poolSize =
+            Array.length charSamplePool
+
+        index =
+            seed - (seed // poolSize) * poolSize
+    in
+    when Array.get index charSamplePool is
+        Just ch ->
+            ch
+
+        Nothing ->
+            'a'
+
+
+charToLowerMatchesElm : TestResult
+charToLowerMatchesElm =
+    let
+        outcomes =
+            Array.map
+                (\seed ->
+                    compatCharToLower (charFromSeed seed) == elmCharToLower (charFromSeed seed)
+                )
+                (seedStream sampleCount 654321987)
+    in
+    { name = "Char.toLower: adapter matches Elm simple-case reference (D char)"
+    , passed = Array.all identity outcomes
+    , details =
+        String.fromInt (Array.length outcomes)
+            ++ " seeded chars incl. non-ASCII pairs; adapter == code-arithmetic reference on all"
+    }
+
+
+charToUpperMatchesElm : TestResult
+charToUpperMatchesElm =
+    let
+        outcomes =
+            Array.map
+                (\seed ->
+                    compatCharToUpper (charFromSeed seed) == elmCharToUpper (charFromSeed seed)
+                )
+                (seedStream sampleCount 789456123)
+    in
+    { name = "Char.toUpper: adapter matches Elm simple-case reference"
+    , passed = Array.all identity outcomes
+    , details =
+        String.fromInt (Array.length outcomes)
+            ++ " seeded chars incl. non-ASCII pairs; adapter == code-arithmetic reference on all"
+    }
+
+
+{-| The adapter's locale law: with no locale API in Gren, toLocaleLower must
+equal the Elm simple-case mapping on every char where all locales agree
+(the entire sampled Latin-1 range).
+-}
+charToLocaleLowerMatchesElm : TestResult
+charToLocaleLowerMatchesElm =
+    let
+        outcomes =
+            Array.map
+                (\seed ->
+                    compatCharToLocaleLower (charFromSeed seed) == elmCharToLower (charFromSeed seed)
+                )
+                (seedStream sampleCount 321789654)
+    in
+    { name = "Char.toLocaleLower: delegating adapter matches Elm reference"
+    , passed = Array.all identity outcomes
+    , details =
+        String.fromInt (Array.length outcomes)
+            ++ " seeded chars; locale adapter == Elm simple-case reference on all"
+    }
+
+
+charToLocaleUpperMatchesElm : TestResult
+charToLocaleUpperMatchesElm =
+    let
+        outcomes =
+            Array.map
+                (\seed ->
+                    compatCharToLocaleUpper (charFromSeed seed) == elmCharToUpper (charFromSeed seed)
+                )
+                (seedStream sampleCount 456321789)
+    in
+    { name = "Char.toLocaleUpper: delegating adapter matches Elm reference"
+    , passed = Array.all identity outcomes
+    , details =
+        String.fromInt (Array.length outcomes)
+            ++ " seeded chars; locale adapter == Elm simple-case reference on all"
+    }
+
+
+
+-- ROWS 13-14: STRING CONCAT AND UNCONS
+
+
+{-| Mirrors `ElmToGren.Compat.String.concat`: String.join "".
+-}
+compatStringConcat : Array String -> String
+compatStringConcat strings =
+    String.join "" strings
+
+
+{-| Elm reference from first principles: left fold with Elm-order (++).
+-}
+elmStringConcat : Array String -> String
+elmStringConcat strings =
+    Array.foldl (\part acc -> acc ++ part) "" strings
+
+
+stringConcatMatchesElm : TestResult
+stringConcatMatchesElm =
+    let
+        outcomes =
+            Array.map
+                (\seed ->
+                    let
+                        strings =
+                            Array.range 0 (fifthRemainder seed - 1)
+                                |> Array.map (\i -> "S" ++ String.fromInt (fifthRemainder (seed + i)))
+
+                        joined =
+                            compatStringConcat strings
+
+                        orderKept =
+                            when Array.get 0 strings is
+                                Just firstPart ->
+                                    String.startsWith firstPart joined
+
+                                Nothing ->
+                                    joined == ""
+                    in
+                    joined == elmStringConcat strings && orderKept
+                )
+                (seedStream sampleCount 246897531)
+    in
+    { name = "String.concat: adapter matches Elm fold reference (order preserved)"
+    , passed = Array.all identity outcomes
+    , details =
+        String.fromInt (Array.length outcomes)
+            ++ " seeded arrays of 0..4 strings incl. empty; adapter == foldl (++) reference on all"
+    }
+
+
+{-| Mirrors `ElmToGren.Compat.String.uncons`: popFirst reshaped to {first, second}.
+-}
+compatStringUncons : String -> Maybe { first : Char, second : String }
+compatStringUncons string =
+    when String.popFirst string is
+        Just { first, rest } ->
+            Just { first = first, second = rest }
+
+        Nothing ->
+            Nothing
+
+
+{-| Elm reference from first principles: char array get/drop, no popFirst.
+-}
+elmStringUncons : String -> Maybe { first : Char, second : String }
+elmStringUncons string =
+    let
+        chars =
+            String.toArray string
+    in
+    when Array.get 0 chars is
+        Just firstChar ->
+            Just { first = firstChar, second = String.fromArray (Array.dropFirst 1 chars) }
+
+        Nothing ->
+            Nothing
+
+
+stringUnconsMatchesElm : TestResult
+stringUnconsMatchesElm =
+    let
+        samples =
+            [ "" ]
+                ++ Array.map
+                    (\seed ->
+                        Array.range 0 (fifthRemainder seed - 1)
+                            |> Array.map (\i -> String.fromChar (Char.fromCode (65 + fifthRemainder (seed + i))))
+                            |> String.join ""
+                    )
+                    (seedStream sampleCount 135798642)
+
+        outcomes =
+            Array.map
+                (\sample -> compatStringUncons sample == elmStringUncons sample)
+                samples
+    in
+    { name = "String.uncons: adapter matches Elm reference incl. empty string"
+    , passed = Array.all identity outcomes
+    , details =
+        String.fromInt (Array.length outcomes)
+            ++ " seeded strings of length 0..4 plus explicit \"\"; adapter == get/drop reference on all"
+    }
+
+
+
+-- ROW 15: ARRAY INITIALIZE
+
+
+{-| Mirrors `ElmToGren.Compat.Array.initialize`: count <= 0 guarded to empty,
+because Gren's `Array.initialize` throws a RangeError on negative counts where
+Elm returns []. The guard IS the divergence this row documents.
+-}
+compatArrayInitialize : Int -> (Int -> a) -> Array a
+compatArrayInitialize count make =
+    if count <= 0 then
+        []
+
+    else
+        Array.initialize count 0 make
+
+
+{-| Elm reference: n <= 0 is empty; else make applied over 0..n-1.
+-}
+elmArrayInitialize : Int -> (Int -> a) -> Array a
+elmArrayInitialize n make =
+    if n <= 0 then
+        []
+
+    else
+        Array.map make (Array.range 0 (n - 1))
+
+
+arrayInitializeMatchesElm : TestResult
+arrayInitializeMatchesElm =
+    let
+        outcomes =
+            Array.map
+                (\seed ->
+                    let
+                        n =
+                            smallIndex seed
+
+                        offset =
+                            fifthRemainder seed
+
+                        make =
+                            \i -> i * 7 + offset
+                    in
+                    compatArrayInitialize n make == elmArrayInitialize n make
+                )
+                (seedStream sampleCount 975318642)
+    in
+    { name = "Array.initialize: adapter matches Elm reference incl. n <= 0"
+    , passed = Array.all identity outcomes
+    , details =
+        String.fromInt (Array.length outcomes)
+            ++ " seeded n in -6..6; adapter == range/map reference on all"
+    }
+
+
+
+-- ROWS 16-17: LIST TAIL AND PARTITION
+
+
+{-| Mirrors `ElmToGren.Compat.List.tail`: popFirst rest.
+-}
+compatListTail : Array Int -> Maybe (Array Int)
+compatListTail values =
+    when Array.popFirst values is
+        Just { rest } ->
+            Just rest
+
+        Nothing ->
+            Nothing
+
+
+{-| Elm reference: tail [] == Nothing; tail (x::xs) == Just xs, via dropFirst.
+-}
+elmListTail : Array Int -> Maybe (Array Int)
+elmListTail values =
+    if Array.length values == 0 then
+        Nothing
+
+    else
+        Just (Array.dropFirst 1 values)
+
+
+{-| Seeded sample: length 0..4 from the 0..4 value domain, with an explicit
+duplicate of the first element appended to every non-empty sample so order
+preservation over duplicates is always exercised.
+-}
+listSampleFromSeed : Int -> Array Int
+listSampleFromSeed seed =
+    let
+        base =
+            Array.range 0 (fifthRemainder seed - 1)
+                |> Array.map (\i -> fifthRemainder (seed + i))
+    in
+    base ++ Array.takeFirst 1 base
+
+
+listTailMatchesElm : TestResult
+listTailMatchesElm =
+    let
+        outcomes =
+            Array.map
+                (\seed ->
+                    let
+                        sample =
+                            listSampleFromSeed seed
+                    in
+                    compatListTail sample == elmListTail sample
+                )
+                (seedStream sampleCount 864197532)
+    in
+    { name = "List.tail: adapter matches Elm reference incl. empty"
+    , passed = Array.all identity outcomes
+    , details =
+        String.fromInt (Array.length outcomes)
+            ++ " seeded arrays of length 0..5 with duplicates; adapter == dropFirst reference on all"
+    }
+
+
+{-| Mirrors `ElmToGren.Compat.List.partition`: Gren partition reshaped to {first, second}.
+-}
+compatListPartition : (Int -> Bool) -> Array Int -> { first : Array Int, second : Array Int }
+compatListPartition predicate values =
+    let
+        parts =
+            Array.partition predicate values
+    in
+    { first = parts.trues, second = parts.falses }
+
+
+{-| Elm reference: order-preserving double keepIf.
+-}
+elmListPartition : (Int -> Bool) -> Array Int -> { first : Array Int, second : Array Int }
+elmListPartition predicate values =
+    { first = Array.keepIf predicate values
+    , second = Array.keepIf (\value -> not (predicate value)) values
+    }
+
+
+listPartitionMatchesElm : TestResult
+listPartitionMatchesElm =
+    let
+        outcomes =
+            Array.map
+                (\seed ->
+                    let
+                        sample =
+                            listSampleFromSeed seed
+
+                        threshold =
+                            fifthRemainder (lcgNext seed)
+
+                        predicate =
+                            \value -> value > threshold
+                    in
+                    compatListPartition predicate sample == elmListPartition predicate sample
+                )
+                (seedStream sampleCount 753186429)
+    in
+    { name = "List.partition: adapter matches Elm order-preserving reference"
+    , passed = Array.all identity outcomes
+    , details =
+        String.fromInt (Array.length outcomes)
+            ++ " seeded arrays with duplicates, seeded thresholds; adapter == double-keepIf reference on all"
+    }
+
+
+
+-- ROWS 18-21: DICT AND SET
+
+
+{-| Mirrors `ElmToGren.Compat.Dict.toList`: foldr + pushFirst gives ascending order.
+-}
+dictsetCompatDictToList : Dict Int Int -> Array { first : Int, second : Int }
+dictsetCompatDictToList dictionary =
+    Dict.foldr
+        (\key value pairs -> Array.pushFirst { first = key, second = value } pairs)
+        []
+        dictionary
+
+
+{-| Mirrors `ElmToGren.Compat.Dict.fromList`: foldl Dict.set, last wins.
+-}
+dictsetCompatDictFromList : Array { first : Int, second : Int } -> Dict Int Int
+dictsetCompatDictFromList pairs =
+    Array.foldl
+        (\pair dictionary -> Dict.set pair.first pair.second dictionary)
+        Dict.empty
+        pairs
+
+
+{-| Mirrors `ElmToGren.Compat.Dict.partition`: Gren partition reshaped to {first, second}.
+-}
+dictsetCompatDictPartition : (Int -> Int -> Bool) -> Dict Int Int -> { first : Dict Int Int, second : Dict Int Int }
+dictsetCompatDictPartition predicate dictionary =
+    let
+        parts =
+            Dict.partition predicate dictionary
+    in
+    { first = parts.trues, second = parts.falses }
+
+
+{-| Mirrors `ElmToGren.Compat.Set.partition`: Gren partition reshaped to {first, second}.
+-}
+dictsetCompatSetPartition : (Int -> Bool) -> Set Int -> { first : Set Int, second : Set Int }
+dictsetCompatSetPartition predicate values =
+    let
+        parts =
+            Set.partition predicate values
+    in
+    { first = parts.trues, second = parts.falses }
+
+
+{-| Distinct keys of a pair array, first-seen order, no Dict machinery.
+-}
+dictsetDistinctKeys : Array { first : Int, second : Int } -> Array Int
+dictsetDistinctKeys pairs =
+    Array.foldl
+        (\pair acc ->
+            if Array.any (\known -> known == pair.first) acc then
+                acc
+
+            else
+                Array.pushLast pair.first acc
+        )
+        []
+        pairs
+
+
+{-| Last value bound to a key in a pair array, by left-to-right scan.
+-}
+dictsetLastValueFor : Int -> Array { first : Int, second : Int } -> Maybe Int
+dictsetLastValueFor key pairs =
+    Array.foldl
+        (\pair acc ->
+            if pair.first == key then
+                Just pair.second
+
+            else
+                acc
+        )
+        Nothing
+        pairs
+
+
+{-| Elm Dict.toList reference from first principles: last value per distinct
+key from the raw pairs, keys sorted ascending — no Dict iteration involved.
+-}
+dictsetElmDictToListReference : Array { first : Int, second : Int } -> Array { first : Int, second : Int }
+dictsetElmDictToListReference pairs =
+    dictsetDistinctKeys pairs
+        |> Array.sort
+        |> Array.map
+            (\key ->
+                { first = key
+                , second = Maybe.withDefault 0 (dictsetLastValueFor key pairs)
+                }
+            )
+
+
+{-| Elm Dict.partition reference: fold raw last-wins entries into two Dicts by predicate.
+-}
+dictsetElmDictPartitionReference :
+    (Int -> Int -> Bool)
+    -> Array { first : Int, second : Int }
+    -> { first : Dict Int Int, second : Dict Int Int }
+dictsetElmDictPartitionReference predicate pairs =
+    dictsetDistinctKeys pairs
+        |> Array.foldl
+            (\key acc ->
+                let
+                    value =
+                        Maybe.withDefault 0 (dictsetLastValueFor key pairs)
+                in
+                if predicate key value then
+                    { first = Dict.set key value acc.first, second = acc.second }
+
+                else
+                    { first = acc.first, second = Dict.set key value acc.second }
+            )
+            { first = Dict.empty, second = Dict.empty }
+
+
+{-| Elm Set.partition reference: fold distinct member values into two Sets by predicate.
+-}
+dictsetElmSetPartitionReference :
+    (Int -> Bool)
+    -> Array Int
+    -> { first : Set Int, second : Set Int }
+dictsetElmSetPartitionReference predicate values =
+    Array.foldl
+        (\value acc ->
+            if predicate value then
+                { first = Set.set value acc.first, second = acc.second }
+
+            else
+                { first = acc.first, second = Set.set value acc.second }
+        )
+        { first = Set.empty, second = Set.empty }
+        values
+
+
+{-| Seeded pairs: keys 0..4 (guaranteed duplicates over 32 pairs), seed values.
+-}
+dictsetPairsFromSeeds : Array Int -> Array { first : Int, second : Int }
+dictsetPairsFromSeeds seeds =
+    Array.indexedMap
+        (\idx seed -> { first = fifthRemainder idx, second = seed })
+        seeds
+
+
+{-| Canonical dict form for comparison: foldr into a pair array.
+-}
+dictsetCanonical : Dict Int Int -> Array { first : Int, second : Int }
+dictsetCanonical dictionary =
+    Dict.foldr
+        (\key value acc -> Array.pushFirst { first = key, second = value } acc)
+        []
+        dictionary
+
+
+dictsetDictsEqual : Dict Int Int -> Dict Int Int -> Bool
+dictsetDictsEqual d1 d2 =
+    dictsetCanonical d1 == dictsetCanonical d2
+
+
+dictsetDictsDisjoint : Dict Int Int -> Dict Int Int -> Bool
+dictsetDictsDisjoint d1 d2 =
+    Dict.foldl
+        (\key _ acc ->
+            when Dict.get key d2 is
+                Just _ ->
+                    False
+
+                Nothing ->
+                    acc
+        )
+        True
+        d1
+
+
+dictsetDictUnion : Dict Int Int -> Dict Int Int -> Dict Int Int
+dictsetDictUnion d1 d2 =
+    Dict.foldl (\key value acc -> Dict.set key value acc) d1 d2
+
+
+dictsetSetsEqual : Set Int -> Set Int -> Bool
+dictsetSetsEqual s1 s2 =
+    Set.foldr Array.pushLast [] s1 == Set.foldr Array.pushLast [] s2
+
+
+dictsetSetsDisjoint : Set Int -> Set Int -> Bool
+dictsetSetsDisjoint s1 s2 =
+    Set.foldl
+        (\value acc ->
+            if Set.member value s2 then
+                False
+
+            else
+                acc
+        )
+        True
+        s1
+
+
+dictsetSetUnion : Set Int -> Set Int -> Set Int
+dictsetSetUnion s1 s2 =
+    Set.foldl Set.set s1 s2
+
+
+dictToListMatchesElm : TestResult
+dictToListMatchesElm =
+    let
+        pairs =
+            dictsetPairsFromSeeds (seedStream 32 424242001)
+
+        result =
+            dictsetCompatDictToList (dictsetCompatDictFromList pairs)
+
+        expected =
+            dictsetElmDictToListReference pairs
+    in
+    { name = "Dict.toList: adapter returns ascending pairs matching raw-scan reference"
+    , passed = result == expected
+    , details =
+        "32 seeded pairs over 5 keys (duplicates guaranteed); adapter == sorted last-wins pair scan"
+    }
+
+
+dictFromListMatchesElm : TestResult
+dictFromListMatchesElm =
+    let
+        pairs =
+            dictsetPairsFromSeeds (seedStream 32 424242001)
+
+        dict =
+            dictsetCompatDictFromList pairs
+
+        distinctKeys =
+            dictsetDistinctKeys pairs
+
+        lastWinsHolds =
+            Array.all
+                (\key -> Dict.get key dict == dictsetLastValueFor key pairs)
+                distinctKeys
+
+        sizeMatches =
+            Dict.count dict == Array.length distinctKeys
+
+        duplicatesExercised =
+            Array.length pairs > Array.length distinctKeys
+    in
+    { name = "Dict.fromList: last duplicate wins per key (law-based check)"
+    , passed = lastWinsHolds && sizeMatches && duplicatesExercised
+    , details =
+        "32 seeded pairs over 5 keys; Dict.get per key == last scanned value; size == distinct keys; non-vacuity: duplicates present"
+    }
+
+
+dictPartitionMatchesElm : TestResult
+dictPartitionMatchesElm =
+    let
+        seeds =
+            seedStream 32 424242001
+
+        pairs =
+            dictsetPairsFromSeeds seeds
+
+        dict =
+            dictsetCompatDictFromList pairs
+
+        threshold =
+            lcgModulus // 2
+
+        predicate =
+            \_ value -> value < threshold
+
+        result =
+            dictsetCompatDictPartition predicate dict
+
+        expected =
+            dictsetElmDictPartitionReference predicate pairs
+
+        matchesReference =
+            dictsetDictsEqual result.first expected.first
+                && dictsetDictsEqual result.second expected.second
+
+        disjoint =
+            dictsetDictsDisjoint result.first result.second
+
+        unionRestores =
+            dictsetDictsEqual (dictsetDictUnion result.first result.second) dict
+    in
+    { name = "Dict.partition: adapter matches fold reference; disjoint; union restores"
+    , passed = matchesReference && disjoint && unionRestores
+    , details =
+        "32 seeded pairs, midpoint value threshold; both sides match reference, disjoint, union == original"
+    }
+
+
+setPartitionMatchesElm : TestResult
+setPartitionMatchesElm =
+    let
+        members =
+            seedStream 32 424242007
+                |> Array.map fifthRemainder
+
+        set =
+            Array.foldl Set.set Set.empty members
+
+        limit =
+            2
+
+        predicate =
+            \value -> value < limit
+
+        result =
+            dictsetCompatSetPartition predicate set
+
+        expected =
+            dictsetElmSetPartitionReference predicate members
+
+        matchesReference =
+            dictsetSetsEqual result.first expected.first
+                && dictsetSetsEqual result.second expected.second
+
+        disjoint =
+            dictsetSetsDisjoint result.first result.second
+
+        unionRestores =
+            dictsetSetsEqual (dictsetSetUnion result.first result.second) set
+    in
+    { name = "Set.partition: adapter matches fold reference; disjoint; union restores"
+    , passed = matchesReference && disjoint && unionRestores
+    , details =
+        "32 seeded members in 0..4, split at 2; both sides match reference, disjoint, union == original"
     }

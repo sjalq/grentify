@@ -118,6 +118,14 @@ runCommand environment context permissions parsed =
 
                                 else
                                     ""
+
+                            behaviorLine =
+                                when outcome.behaviorMessage is
+                                    Just message ->
+                                        "\n" ++ message
+
+                                    Nothing ->
+                                        ""
                         in
                         if options.json then
                             Stream.Log.line environment.stdout outcome.report
@@ -131,6 +139,7 @@ runCommand environment context permissions parsed =
                                     ++ ". Root: "
                                     ++ outcome.rootPackage
                                     ++ testModulesLine
+                                    ++ behaviorLine
                                 )
                     )
                 |> Task.onError

@@ -70,6 +70,7 @@ type alias Outcome =
     , packageCount : Int
     , testModuleCount : Int
     , report : String
+    , behaviorMessage : Maybe String
     }
 
 
@@ -657,7 +658,7 @@ finalize context permissions cliOptions output overlayPaths assets registry reso
                     (\metadata ->
                         let
                             report =
-                                encodeReport context cliOptions output rootIdentity metadata.compilerVersion planned
+                                encodeReport context cliOptions output rootIdentity metadata.compilerVersion planned Nothing
 
                             lockfile =
                                 encodeLock resolution rootIdentity metadata.compilerVersion metadata.mappingDigest planned
@@ -689,19 +690,68 @@ finalize context permissions cliOptions output overlayPaths assets registry reso
                                             output
                                             rootIdentity.grenName
                                             planned.rootTestModules
-                                            |> Task.map (\_ -> {})
+                                            |> Task.andThen
+                                                (\_ ->
+                                                    compileBehaviorHarness
+                                                        context.platform
+                                                        permissions.childProcess
+                                                        output
+                                                        assets.grenExecutable
+                                                        -- The verdict is recorded, never enforced: an
+                                                        -- infrastructure failure (timeout, abnormal exit)
+                                                        -- must not fail the port itself.
+                                                        |> Task.onError
+                                                            (\_ ->
+                                                                Task.succeed
+                                                                    { status = "harness-error"
+                                                                    , detail = "harness compile/run aborted (timeout or abnormal exit)"
+                                                                    }
+                                                            )
+                                                )
+                                            |> Task.map (\verdict -> Just verdict)
 
                                     else
-                                        Task.succeed {}
+                                        Task.succeed Nothing
                                 )
-                            |> Task.map
-                                (\_ ->
-                                    { output = output
-                                    , rootPackage = rootIdentity.grenName
-                                    , packageCount = Array.length planned.packages
-                                    , testModuleCount = planned.testModuleCount
-                                    , report = report
-                                    }
+                            |> Task.andThen
+                                (\behaviorVerdict ->
+                                    let
+                                        finalReport =
+                                            encodeReport context cliOptions output rootIdentity metadata.compilerVersion planned behaviorVerdict
+
+                                        behaviorMessage =
+                                            when behaviorVerdict is
+                                                Just verdict ->
+                                                    Just ("Behavior: " ++ verdict.status ++ " — " ++ verdict.detail)
+
+                                                Nothing ->
+                                                    Nothing
+                                    in
+                                    -- Overwrite the report file with the final report that includes the behavior verdict
+                                    if behaviorVerdict /= Nothing then
+                                        System.File.writeText permissions.fileSystem
+                                            (Path.join [ output, Path.fromPosixString "elm-to-gren.report.json" ])
+                                            (finalReport ++ "\n")
+                                            |> Task.map
+                                                (\_ ->
+                                                    { output = output
+                                                    , rootPackage = rootIdentity.grenName
+                                                    , packageCount = Array.length planned.packages
+                                                    , testModuleCount = planned.testModuleCount
+                                                    , report = finalReport
+                                                    , behaviorMessage = behaviorMessage
+                                                    }
+                                                )
+
+                                    else
+                                        Task.succeed
+                                            { output = output
+                                            , rootPackage = rootIdentity.grenName
+                                            , packageCount = Array.length planned.packages
+                                            , testModuleCount = planned.testModuleCount
+                                            , report = report
+                                            , behaviorMessage = behaviorMessage
+                                            }
                                 )
                     )
 
@@ -1036,17 +1086,36 @@ hexByte value =
     String.slice high (high + 1) digits ++ String.slice low (low + 1) digits
 
 
-encodeReport context cliOptions output rootIdentity compiler planned =
-    Encode.object
-        [ { key = "schemaVersion", value = Encode.int 1 }
-        , { key = "root", value = Encode.string rootIdentity.grenName }
-        , { key = "toolVersion", value = Encode.string context.toolVersion }
-        , { key = "compilerVersion", value = Encode.string compiler }
-        , { key = "output", value = Encode.string (Path.toPosixString output) }
-        , { key = "verified", value = Encode.bool True }
-        , { key = "packages", value = Encode.array encodePackage planned.packages }
-        , { key = "diagnostics", value = Encode.array encodeDiagnostic planned.diagnostics }
-        ]
+encodeReport context cliOptions output rootIdentity compiler planned behaviorVerdict =
+    let
+        baseObject =
+            [ { key = "schemaVersion", value = Encode.int 1 }
+            , { key = "root", value = Encode.string rootIdentity.grenName }
+            , { key = "toolVersion", value = Encode.string context.toolVersion }
+            , { key = "compilerVersion", value = Encode.string compiler }
+            , { key = "output", value = Encode.string (Path.toPosixString output) }
+            , { key = "verified", value = Encode.bool True }
+            , { key = "packages", value = Encode.array encodePackage planned.packages }
+            , { key = "diagnostics", value = Encode.array encodeDiagnostic planned.diagnostics }
+            ]
+
+        withBehavior =
+            when behaviorVerdict is
+                Just verdict ->
+                    Array.pushLast
+                        { key = "behavior"
+                        , value =
+                            Encode.object
+                                [ { key = "status", value = Encode.string verdict.status }
+                                , { key = "detail", value = Encode.string verdict.detail }
+                                ]
+                        }
+                        baseObject
+
+                Nothing ->
+                    baseObject
+    in
+    Encode.object withBehavior
         |> Encode.encode 2
 
 
@@ -1437,6 +1506,7 @@ finalizeAdd context permissions cliOptions output assets resolution planned =
                                             , packageCount = Array.length planned.packages
                                             , testModuleCount = planned.testModuleCount
                                             , report = addReport rootIdentity libDirectory planned
+                                            , behaviorMessage = Nothing
                                             }
                                         )
                     )
@@ -1771,6 +1841,164 @@ emitBehaviorHarness platform fileSystem output rootGrenName testModules =
                         )
                         (Task.succeed {})
             )
+
+
+type alias BehaviorVerdict =
+    { status : String
+    , detail : String
+    }
+
+
+{-| Compile the behavior harness and run it, returning a verdict.
+Verdict status: "tested" | "test-failures" | "tests-unportable"
+-}
+compileBehaviorHarness
+    : Node.Platform
+    -> ChildProcess.Permission
+    -> Path
+    -> String
+    -> Task Error BehaviorVerdict
+compileBehaviorHarness platform permission output grenExecutable =
+    let
+        harnessDirPath =
+            Path.join [ output, Path.fromPosixString "behavior-tests" ]
+
+        harnessDirStr =
+            System.File.pathToString platform harnessDirPath
+    in
+    System.Process.run permission
+        { program = grenExecutable
+        , arguments = [ "make", "Main", "--output=harness.js" ]
+        , workingDirectory = harnessDirStr
+        , environment = Dict.empty
+        , allowedExitCodes = [ 0, 1 ]
+        , timeoutMilliseconds = 300 * 1000
+        , maximumOutputBytes = 10 * 1024 * 1024
+        }
+        |> Task.andThen
+            (\compileOutput ->
+                if compileOutput.exitCode == 0 then
+                    -- Compilation succeeded, now run the harness
+                    runBehaviorHarness platform permission harnessDirPath
+                        |> Task.map
+                            (\runOutput ->
+                                classifyRunVerdict runOutput
+                            )
+
+                else
+                    -- Compilation failed, extract error lines
+                    Task.succeed
+                        { status = "tests-unportable"
+                        , detail = extractCompileError compileOutput.stderr compileOutput.stdout
+                        }
+            )
+
+
+{-| Run the behavior harness and return the process output.
+-}
+runBehaviorHarness
+    : Node.Platform
+    -> ChildProcess.Permission
+    -> Path
+    -> Task Error System.Process.Output
+runBehaviorHarness platform permission harnessDirPath =
+    let
+        harnessDirStr =
+            System.File.pathToString platform harnessDirPath
+
+        absHarnessPath =
+            harnessDirStr ++ "/harness.js"
+    in
+    System.Process.run permission
+        { program = "node"
+        , arguments = [ "-e", "require('" ++ absHarnessPath ++ "').Gren.Main.init()" ]
+        , workingDirectory = harnessDirStr
+        , environment = Dict.empty
+        , allowedExitCodes = [ 0, 1 ]
+        , timeoutMilliseconds = 120 * 1000
+        , maximumOutputBytes = 5 * 1024 * 1024
+        }
+
+
+{-| Classify the behavior test verdict based on exit code and output.
+-}
+classifyRunVerdict : System.Process.Output -> BehaviorVerdict
+classifyRunVerdict output =
+    let
+        allOutput =
+            output.stdout ++ "\n" ++ output.stderr
+
+        lines =
+            String.split "\n" allOutput
+
+        behaviorLine =
+            findBehaviorLine lines
+    in
+    if output.exitCode == 0 && String.contains "BEHAVIOR PASS" behaviorLine then
+        { status = "tested"
+        , detail = String.trim behaviorLine
+        }
+
+    else if output.exitCode == 1 && String.contains "BEHAVIOR FAIL" behaviorLine then
+        { status = "test-failures"
+        , detail = String.trim behaviorLine
+        }
+
+    else
+        { status = "test-failures"
+        , detail =
+            if String.isEmpty behaviorLine then
+                "Harness exited with code "
+                    ++ String.fromInt output.exitCode
+                    ++ " but produced no test output."
+
+            else
+                String.trim behaviorLine
+        }
+
+
+findBehaviorLine : Array String -> String
+findBehaviorLine lines =
+    when Array.first lines is
+        Nothing ->
+            ""
+
+        Just line ->
+            if String.startsWith "BEHAVIOR" line then
+                line
+
+            else
+                findBehaviorLine (Array.dropFirst 1 lines)
+
+
+{-| Extract the first compile error from stderr/stdout (max 800 chars).
+-}
+extractCompileError : String -> String -> String
+extractCompileError stderr stdout =
+    let
+        errorLines =
+            if String.isEmpty stderr then
+                stdout
+
+            else
+                stderr
+
+        firstError =
+            String.split "\n" errorLines
+                |> Array.first
+                |> Maybe.withDefault errorLines
+
+        chars =
+            String.split "" firstError
+
+        truncated =
+            if Array.length chars > 800 then
+                String.slice 0 800 firstError ++ "..."
+
+            else
+                firstError
+    in
+    truncated
 
 
 resultTask : (problem -> Error) -> Result problem value -> Task Error value

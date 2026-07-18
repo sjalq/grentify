@@ -353,9 +353,13 @@ no compiler in the loop.
       list-extra suite RUNS under gren on node; failures are triaged into W2/W4.1
       tasks (a red suite with triaged causes is a valid spike outcome; record the
       recipe and triage here). Not a GATE; no human sign-off needed. Prove: tier 2.
-- [ ] W4.3 [M3] Wire P3 into the port pipeline (`--with-tests`) and suite: behavior
+- [x] W4.3 [M3] Wire P3 into the port pipeline (`--with-tests`) and suite: behavior
       results recorded per-package in the ledger (`behavior: tested|compile-only`).
       Prove: tier 2 (one package end-to-end) + tier 0 (report/ledger units).
+      COMPLETE via a-d below. End-to-end proof: maybe-extra ports with
+      `Behavior: tested — BEHAVIOR PASS: 30 passed, 0 failed` in log and
+      `"behavior": {"status": "tested", ...}` in the report. Ledger-side
+      consumption of the report field lands with W4.4's batch.
       Split (protocol rule 2):
       - [x] W4.3a runnable-harness spike: prove gren-lang/test executes on node
             against ported list-extra output; committed runbook in
@@ -381,8 +385,14 @@ no compiler in the loop.
             ["src", "../src"] instead of a local: dep — tests may import
             internal (non-exposed) package modules and Compat adapters, which
             mirrors elm-test semantics. list-extra end-to-end blocked by D23.
-      - [ ] W4.3d behavior verdict: run harness, parse outcome, record
+      - [x] W4.3d behavior verdict: run harness, parse outcome, record
             `behavior: tested|compile-only` in report + ledger.
+            LANDED: orchestrator compiles (300s cap) + runs (120s cap) the
+            emitted harness; verdict statuses tested / test-failures /
+            tests-unportable / harness-error (infra failures folded via
+            onError — the verdict is recorded, NEVER enforced; a red harness
+            cannot fail the port). Report gains a "behavior" object only when
+            --with-tests ran. Three-way proof matrix verified independently.
 - [ ] W4.4 [M3] `tier 4 batch` Grow the behavior set to ≥25 curated packages (start
       with the canary 14). Results into ledger through the §5 law.
       Prove: harvest iterations show ≥25 ledger entries `behavior: "tested"`.
@@ -613,6 +623,13 @@ DONE = M5.G and M6.G pass on the same clean commit.
   Fable-validated on main): Cli flag, Acquire.testFiles, root-only ["src","tests"]
   extraction, Draft.testModules partition, test-module count in output. Baseline
   path byte-identical without the flag. Tier 0: 180 + checker; canary 14/14.
+- 2026-07-18 W4.3d: behavior verdict wired into the tool (Haiku impl + adversarial
+  re-proof; Fable QA found and fixed the one leak both missed: non-{0,1} exits /
+  timeouts propagated as Error and failed the port — now folded to
+  "harness-error" via onError). W4.3 COMPLETE: one command ports a package,
+  emits + compiles + runs its own test suite, and records the verdict.
+  maybe-extra: tested 30/30; list-extra: tests-unportable (D24) recorded, port
+  still succeeds; no-flag: no behavior field. Tier 0: 185; canary 14/14.
 - 2026-07-18 D23 FIXED (Fable): bisected to the extractor via raw elm-review run
   (site JSON: moduleName "Fuzz" vs null); minimal repro isolated the trigger to
   lambda-param shadow + let body (plain lambda and differently-named param both

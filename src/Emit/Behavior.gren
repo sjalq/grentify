@@ -37,10 +37,10 @@ type alias PlanResult =
 Returns a record containing the generated files and any modules that had zero tests.
 Files are emitted under behavior-tests/ (not included in paths).
 
-Signature: rootGrenName -> Array GeneratedModule -> { files : Array FilePlan, skippedModules : Array String }
+Signature: rootGrenName -> Array GeneratedModule -> Dict String Dependency -> { files : Array FilePlan, skippedModules : Array String }
 -}
-planBehaviorTests : String -> Array GeneratedModule -> PlanResult
-planBehaviorTests rootGrenName testModules =
+planBehaviorTests : String -> Array GeneratedModule -> Dict String Manifest.Dependency -> PlanResult
+planBehaviorTests rootGrenName testModules rootDependencies =
     let
         -- Convert test modules to source modules and detect their test declarations
         moduleInfos =
@@ -60,7 +60,7 @@ planBehaviorTests rootGrenName testModules =
 
         -- Build gren.json manifest
         manifestJson =
-            buildManifest rootGrenName
+            buildManifest rootGrenName rootDependencies
 
         -- Combine all files
         testModuleFiles =
@@ -255,22 +255,89 @@ buildModuleDescribe info =
 The harness is an application inside the root package that can access all source
 modules (including compat adapters) via source-directories, avoiding the need to
 expose internal implementation modules.
+
+Merges base dependencies with root package dependencies. Base deps (core, node, test)
+take priority on collision; url goes to direct if root needs it, otherwise stays indirect.
 -}
-buildManifest : String -> String
-buildManifest _ =
+buildManifest : String -> Dict String Manifest.Dependency -> String
+buildManifest _ rootDependencies =
     let
+        baseDirect =
+            [ { key = "gren-lang/core", value = Encode.string "7.4.2" }
+            , { key = "gren-lang/node", value = Encode.string "6.1.3" }
+            , { key = "gren-lang/test", value = Encode.string "5.0.0" }
+            ]
+
+        urlInRoot =
+            Dict.get "gren-lang/url" rootDependencies
+
+        rootDirect =
+            rootDependencies
+                |> Dict.foldr
+                    (\key value acc ->
+                        -- Include all root dependencies except core, node, test (which are already in base)
+                        -- url is handled separately based on whether root needs it direct
+                        if key /= "gren-lang/core" && key /= "gren-lang/node" && key /= "gren-lang/test" && key /= "gren-lang/url" then
+                            when value is
+                                Manifest.VersionRange range ->
+                                    Array.pushLast { key = key, value = Encode.string (rangeLowerBound range) } acc
+                                Manifest.LocalPath _ ->
+                                    acc
+                        else
+                            acc
+                    )
+                    []
+
+        -- Add url to direct if root package needs it (is a VersionRange)
+        rootDirectWithUrl =
+            when urlInRoot is
+                Just (Manifest.VersionRange range) ->
+                    Array.pushLast { key = "gren-lang/url", value = Encode.string (rangeLowerBound range) } rootDirect
+
+                _ ->
+                    rootDirect
+
+        baseDictArray =
+            Array.foldl
+                (\{ key, value } acc -> Array.pushLast { key = key, value = value } acc)
+                []
+                baseDirect
+
+        mergedArray =
+            Array.foldl
+                (\{ key, value } acc ->
+                    -- Check if key exists in baseDict
+                    let
+                        exists =
+                            Array.any (\{ key = k } -> k == key) baseDirect
+                    in
+                    if exists then
+                        acc
+                    else
+                        Array.pushLast { key = key, value = value } acc
+                )
+                baseDictArray
+                rootDirectWithUrl
+
+        mergedDirect =
+            mergedArray
+
+        -- url goes to indirect only if root doesn't need it direct
+        indirectDeps =
+            when urlInRoot is
+                Just (Manifest.VersionRange _) ->
+                    []
+
+                _ ->
+                    [ { key = "gren-lang/url", value = Encode.string "6.0.0" } ]
+
         deps =
             Encode.object
                 [ { key = "direct"
-                  , value =
-                        Encode.object
-                            [ { key = "gren-lang/core", value = Encode.string "7.4.2" }
-                            , { key = "gren-lang/node", value = Encode.string "6.1.3" }
-                            , { key = "gren-lang/test", value = Encode.string "5.0.0" }
-                            ]
+                  , value = Encode.object mergedDirect
                   }
                 , { key = "indirect"
-                  , value = Encode.object [ { key = "gren-lang/url", value = Encode.string "6.0.0" } ]
+                  , value = Encode.object indirectDeps
                   }
                 ]
 
@@ -284,6 +351,17 @@ buildManifest _ =
                 ]
     in
     ensureTrailingNewline (Encode.encode 4 manifest)
+
+
+rangeLowerBound : String -> String
+rangeLowerBound range =
+    -- "6.0.2 <= v < 7.0.0" → "6.0.2"; already-exact pins pass through.
+    when String.firstIndexOf " <= v < " range is
+        Just index ->
+            String.slice 0 index range
+
+        Nothing ->
+            range
 
 
 {-| Ensure string ends with newline.

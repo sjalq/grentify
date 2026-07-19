@@ -684,31 +684,59 @@ finalize context permissions cliOptions output overlayPaths assets registry reso
                             |> Task.andThen
                                 (\_ ->
                                     if cliOptions.withTests && not (Array.isEmpty planned.rootTestModules) then
-                                        emitBehaviorHarness
-                                            context.platform
-                                            permissions.fileSystem
-                                            output
-                                            rootIdentity.grenName
-                                            planned.rootTestModules
-                                            |> Task.andThen
-                                                (\_ ->
-                                                    compileBehaviorHarness
-                                                        context.platform
-                                                        permissions.childProcess
-                                                        output
-                                                        assets.grenExecutable
-                                                        -- The verdict is recorded, never enforced: an
-                                                        -- infrastructure failure (timeout, abnormal exit)
-                                                        -- must not fail the port itself.
-                                                        |> Task.onError
-                                                            (\_ ->
-                                                                Task.succeed
-                                                                    { status = "harness-error"
-                                                                    , detail = "harness compile/run aborted (timeout or abnormal exit)"
-                                                                    }
-                                                            )
+                                        let
+                                            rootPackage =
+                                                planned.packages
+                                                    |> Array.keepIf (\pkg -> pkg.manifest.name == rootIdentity.grenName)
+                                                    |> Array.popFirst
+                                                    |> Maybe.map .first
+                                        in
+                                        when rootPackage is
+                                            Just pkg ->
+                                                let
+                                                    behaviorTask =
+                                                        if rootIdentity.platform == Mapping.Browser then
+                                                            Task.succeed
+                                                                { status = "browser-only"
+                                                                , detail = "browser-platform package; node harness cannot compile browser imports"
+                                                                }
+
+                                                        else
+                                                            emitBehaviorHarness
+                                                                context.platform
+                                                                permissions.fileSystem
+                                                                output
+                                                                rootIdentity.grenName
+                                                                planned.rootTestModules
+                                                                pkg.manifest.dependencies
+                                                                |> Task.andThen
+                                                                    (\_ ->
+                                                                        compileBehaviorHarness
+                                                                            context.platform
+                                                                            permissions.childProcess
+                                                                            output
+                                                                            assets.grenExecutable
+                                                                            -- The verdict is recorded, never enforced: an
+                                                                            -- infrastructure failure (timeout, abnormal exit)
+                                                                            -- must not fail the port itself.
+                                                                            |> Task.onError
+                                                                                (\_ ->
+                                                                                    Task.succeed
+                                                                                        { status = "harness-error"
+                                                                                        , detail = "harness compile/run aborted (timeout or abnormal exit)"
+                                                                                        }
+                                                                                )
+                                                                    )
+                                                in
+                                                behaviorTask
+                                                    |> Task.map (\verdict -> Just verdict)
+
+                                            Nothing ->
+                                                Task.succeed (Just
+                                                    { status = "harness-error"
+                                                    , detail = "root package not found in planned packages"
+                                                    }
                                                 )
-                                            |> Task.map (\verdict -> Just verdict)
 
                                     else
                                         Task.succeed Nothing
@@ -1813,14 +1841,15 @@ emitBehaviorHarness
     -> Path
     -> String
     -> Array Mapping.GeneratedModule
+    -> Dict String Manifest.Dependency
     -> Task Error {}
-emitBehaviorHarness platform fileSystem output rootGrenName testModules =
+emitBehaviorHarness platform fileSystem output rootGrenName testModules rootDependencies =
     let
         harnessDirPath =
             Path.join [ output, Path.fromPosixString "behavior-tests" ]
 
         plan =
-            Behavior.planBehaviorTests rootGrenName testModules
+            Behavior.planBehaviorTests rootGrenName testModules rootDependencies
     in
     System.File.ensureDirectory fileSystem harnessDirPath
         |> Task.andThen

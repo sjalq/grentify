@@ -14,6 +14,45 @@ const catalog = JSON.parse(
   fs.readFileSync(path.join(__dirname, "packages-canary.json"), "utf8"),
 );
 
+/**
+ * Classify status/detail to detect broken-upstream patterns.
+ * Law: broken-upstream means the ORIGINAL suite cannot build under Elm 0.19,
+ * verified for elm-hex by inspection (bare toString NAMING ERROR).
+ *
+ * Relic patterns table (extend with future Elm 0.18 relics):
+ * - toString: Elm 0.18 function, needs Debug.toString in Elm 0.19+
+ */
+function classify(status, detail, outDir = "") {
+  // Detect tests-broken-upstream: NAMING ERROR mentioning toString (Elm 0.18 relic)
+  if (status === "tests-unportable" && detail.includes("NAMING ERROR")) {
+    // Check if the generated test file contains bare toString (Elm 0.18 relic)
+    let hasToString = detail.includes("toString");
+    if (!hasToString && outDir) {
+      try {
+        const testsPath = path.join(
+          outDir,
+          "behavior-tests",
+          "src",
+          "Tests.gren",
+        );
+        if (fs.existsSync(testsPath)) {
+          const content = fs.readFileSync(testsPath, "utf8");
+          // Look for bare toString only — a preceding dot means a qualified
+          // call like Hex.toString, which is NOT the Elm 0.18 relic.
+          hasToString = /(^|[^.\w])toString\b/.test(content);
+        }
+      } catch {
+        /* ignore read errors */
+      }
+    }
+
+    if (hasToString) {
+      return { status: "tests-broken-upstream", detail };
+    }
+  }
+  return { status, detail };
+}
+
 // Parse CLI flags
 const args = {
   concurrency: 2,
@@ -139,8 +178,8 @@ mapPool(packages, args.concurrency, async (pkg, index) => {
           status = behavior.status || "unknown";
           detail = behavior.detail || "";
         } else {
-          status = "no-behavior";
-          detail = "report missing behavior object";
+          status = "no-tests";
+          detail = "package has no portable test modules";
         }
       } catch (err) {
         status = "report-parse-error";
@@ -156,6 +195,11 @@ mapPool(packages, args.concurrency, async (pkg, index) => {
     const tail = stderr.slice(-3).join(" ");
     detail = tail || `exit ${result.status}`;
   }
+
+  // Apply classification (e.g., tests-unportable + toString => tests-broken-upstream)
+  const classified = classify(status, detail, out);
+  status = classified.status;
+  detail = classified.detail;
 
   console.log(`${status} (${ms}ms)`);
   if (detail && status !== "tested") {

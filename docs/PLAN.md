@@ -406,16 +406,22 @@ no compiler in the loop.
       elm-color — its port-failed entry is the D13 version-probe flake),
       no-tests 4 (elm-response, toop, html-extra, elm-dom: no tests/ in
       archive), unportable 7 in classes:
-      - [ ] W4.4a harness deps: merge the emitted package's gren.json deps
+      - [x] W4.4a harness deps: merge the emitted package's gren.json deps
             into the harness gren.json (iso8601-date-strings needs
             gren-lang/parser). Prove: tier 2 on that package -> tested.
-      - [ ] W4.4b platform guard: browser-platform packages get verdict
+            LANDED: root deps merged (exact lower-bound versions; base wins);
+            iso8601-date-strings now TESTED 24/24.
+      - [x] W4.4b platform guard: browser-platform packages get verdict
             "browser-only" without a doomed node compile (remotedata's
             RemoteData.gren imports Http). Prove: tier 2 on remotedata.
-      - [ ] W4.4c runner statuses: "no-behavior" -> "no-tests";
+            LANDED: guard on the root identity's platform; verdict recorded,
+            no harness emitted.
+      - [x] W4.4c runner statuses: "no-behavior" -> "no-tests";
             classify Elm-0.18-relic suites (bare toString: elm-hex CONFIRMED
             broken upstream — original tests never compiled under 0.19) as
             "tests-broken-upstream". Prove: tier 0 (runner) + rerun log.
+            LANDED; Fable tightened the relic regex to exclude qualified
+            calls (Hex.toString must not classify as relic).
       - [ ] W4.4d specimen triage: elm-codec + json-decode-pipeline NAMING
             errors — root-cause each (may be new mapping gaps or more
             0.18 relics). Prove: recorded root cause per package here.

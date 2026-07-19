@@ -90,25 +90,17 @@ const logPath = path.join(root, "test", "ecosystem", "behavior-log.jsonl");
 const cli = path.join(root, "bin", "elm-to-gren.cjs");
 const stamp = gitStamp(root);
 
-// Load and COMPACT the log (last-wins per name@version+commit), so repeated
-// proof runs and --fresh reruns never pile up duplicates.
+// The log file is STRICTLY append-only: a startup rewrite-compaction here
+// once raced a concurrent batch's appends and silently dropped entries.
+// Compaction happens IN MEMORY only (last-wins per name@version); consumers
+// must apply the same last-wins rule when reading.
 const existingLog = new Map();
-if (fs.existsSync(logPath)) {
+if (fs.existsSync(logPath) && !args.fresh) {
   try {
     const lines = fs.readFileSync(logPath, "utf8").split("\n").filter(Boolean);
-    const compacted = new Map();
     for (const line of lines) {
       const entry = JSON.parse(line);
-      compacted.set(`${entry.name}@${entry.version}@${entry.commit}`, entry);
-    }
-    fs.writeFileSync(
-      logPath,
-      [...compacted.values()].map((e) => JSON.stringify(e)).join("\n") + "\n",
-    );
-    if (!args.fresh) {
-      for (const entry of compacted.values()) {
-        existingLog.set(`${entry.name}@${entry.version}`, entry);
-      }
+      existingLog.set(`${entry.name}@${entry.version}`, entry);
     }
   } catch (err) {
     console.warn(`[behavior-batch] warning: failed to read log: ${err.message}`);

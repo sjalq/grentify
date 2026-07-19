@@ -35,6 +35,8 @@ tests =
     , multiDeclLetIfKeepsSiblingBinds
     , fixedListPatternPrintsAsArray
     , binopLetRhsBreaksAfterOperator
+    , applicationLetArgStartsOwnLine
+    , nestedLetStaysValid
     -- Hex leaves: print as decimal of the Int value (not "0x" ++ decimal digits).
     , hexExprPrintsAsDecimalOfValue
     , hexPatPrintsAsDecimalOfValue
@@ -380,6 +382,108 @@ binopLetRhsBreaksAfterOperator =
     in
     outcome
         "binop with let RHS breaks after operator"
+        ok
+        ("printed:\n" ++ printed)
+
+
+{-| D25: ExprApplication with ExprLet argument must print `let` on its own line.
+The opening paren must be followed by newline, with `let` indented deeper.
+-}
+applicationLetArgStartsOwnLine : TestResult
+applicationLetArgStartsOwnLine =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "test"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprApplication
+                            [ ExprVar { moduleName = Just "Test", name = "describe" }
+                            , ExprString "apply"
+                            , ExprLet
+                                { declarations =
+                                    [ LetDestructure
+                                        { pattern = PatVar "fun4"
+                                        , expression =
+                                            ExprInt 42
+                                        }
+                                    ]
+                                , expression =
+                                    ExprVar { moduleName = Nothing, name = "fun4" }
+                                }
+                            ]
+                    }
+                ]
+
+        printed =
+            Print.print file
+
+        ok =
+            not (String.contains "(let" printed)
+                && not (String.contains ") (let" printed)
+                && String.contains "(\n" printed
+                && String.contains "let\n" printed
+                && String.contains "fun4" printed
+    in
+    outcome
+        "application with let arg: let starts own line after newline paren"
+        ok
+        ("printed:\n" ++ printed)
+
+
+{-| Nested let in application argument: inner let must also start own line.
+-}
+nestedLetStaysValid : TestResult
+nestedLetStaysValid =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "nested"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprApplication
+                            [ ExprVar { moduleName = Nothing, name = "map" }
+                            , ExprLet
+                                { declarations =
+                                    [ LetDestructure
+                                        { pattern = PatVar "x"
+                                        , expression =
+                                            ExprLet
+                                                { declarations =
+                                                    [ LetDestructure
+                                                        { pattern = PatVar "y"
+                                                        , expression = ExprInt 1
+                                                        }
+                                                    ]
+                                                , expression =
+                                                    ExprVar { moduleName = Nothing, name = "y" }
+                                                }
+                                        }
+                                    ]
+                                , expression =
+                                    ExprVar { moduleName = Nothing, name = "x" }
+                                }
+                            , ExprVar { moduleName = Nothing, name = "items" }
+                            ]
+                    }
+                ]
+
+        printed =
+            Print.print file
+
+        ok =
+            String.contains "let" printed
+                && not (String.contains "(let" printed)
+                && not (String.contains "=(let" printed)
+    in
+    outcome
+        "nested let in application: both lets valid"
         ok
         ("printed:\n" ++ printed)
 

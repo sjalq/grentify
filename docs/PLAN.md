@@ -221,6 +221,12 @@ Coverage and pipeline:
   import's EXPLICIT exposing list and (b) not actually bound by any enclosing
   scope. Residual (documented in the module): names from `exposing (..)`
   imports cannot be repaired without dependency docs.
+- **D25 let-in-argument indentation** (found by W4.4 behavior sweeps —
+  array-extra + fast-dict "UNFINISHED LET", OPEN -> fix in flight): the
+  printer emits `let` inline after preceding tokens (`describe "x" (let`)
+  while its declarations indent at the statement's base column — shallower
+  than the `let` keyword, which Gren's layout rules reject. Canonical fix:
+  a let-expression in argument position always starts on its own line.
 - **D24 tuple comparability lost under record lowering** (found by the first
   D23-unblocked harness compile, OPEN): Elm tuples are `comparable`
   (`List.sort [(1,2),(0,3)]` works); the port lowers tuples to records, and

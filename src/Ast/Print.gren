@@ -753,7 +753,7 @@ printExpr locals prec expr =
                         ++ printExpr locals 0 body
             in
             if prec > 0 then
-                "(" ++ rendered ++ ")"
+                "(\n    " ++ indentBlock 1 rendered ++ "\n)"
 
             else
                 rendered

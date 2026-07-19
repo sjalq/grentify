@@ -177,6 +177,7 @@ type AdapterId
     | BytesEncodeAdapter
     | CharAdapter
     | DictAdapter
+    | ExpectAdapter
     | HtmlAttributesAdapter
     | HtmlEventsAdapter
     | HtmlKeyedAdapter
@@ -217,6 +218,9 @@ adapterIdName adapterId =
 
         DictAdapter ->
             "Dict"
+
+        ExpectAdapter ->
+            "Expect"
 
         HtmlAttributesAdapter ->
             "Html.Attributes"

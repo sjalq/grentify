@@ -527,7 +527,9 @@
           "source": "Expect",
           "target": "Expect",
           "values": {
-            "equalLists": "equalArrays"
+            "equalLists": "equalArrays",
+            "true": "ElmToGren.Compat.Expect.true",
+            "false": "ElmToGren.Compat.Expect.false"
           },
           "types": { "Expectation": "Expectation", "FloatingPointTolerance": "FloatingPointTolerance" }
         },

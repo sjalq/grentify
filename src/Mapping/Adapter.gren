@@ -38,6 +38,7 @@ all =
     , BytesEncodeAdapter
     , CharAdapter
     , DictAdapter
+    , ExpectAdapter
     , HtmlAttributesAdapter
     , HtmlEventsAdapter
     , HtmlKeyedAdapter
@@ -207,6 +208,9 @@ sourceFor adapterId =
 
         DictAdapter ->
             dictSource
+
+        ExpectAdapter ->
+            expectSource
 
         HtmlAttributesAdapter ->
             htmlAttributesSource
@@ -1092,6 +1096,37 @@ partition predicate dictionary =
             Dict.partition predicate dictionary
     in
     { first = parts.trues, second = parts.falses }
+"""
+
+
+{-| Elm elm-explorations/test had Expect.true and Expect.false predicates.
+gren-lang/test 5.0.0 dropped them in favor of explicit assertions.
+This adapter restores the surface.
+-}
+expectSource : String
+expectSource =
+    """
+module ElmToGren.Compat.Expect exposing (true, false)
+
+import Expect
+
+
+true : String -> Bool -> Expect.Expectation
+true message condition =
+    if condition then
+        Expect.pass
+
+    else
+        Expect.fail message
+
+
+false : String -> Bool -> Expect.Expectation
+false message condition =
+    if condition then
+        Expect.fail message
+
+    else
+        Expect.pass
 """
 
 

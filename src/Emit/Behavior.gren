@@ -91,6 +91,7 @@ type alias ModuleInfo =
 
 
 {-| Convert a test GeneratedModule to ModuleInfo, detecting test declarations.
+Filters detected declarations against the module's explicit exposing list.
 -}
 moduleToInfo : String -> GeneratedModule -> ModuleInfo
 moduleToInfo _ module_ =
@@ -101,14 +102,89 @@ moduleToInfo _ module_ =
                 |> String.dropLast (String.count ".gren")
                 |> String.replace "/" "."
 
-        testDecls =
+        detectedDecls =
             detectTestDeclarations module_.source
+
+        exposedDecls =
+            parseExposingList module_.source
+
+        testDecls =
+            when exposedDecls is
+                ExposingAll ->
+                    detectedDecls
+
+                ExposingList list ->
+                    detectedDecls
+                        |> Array.keepIf (\decl -> Array.any (\exposed -> exposed == decl) list)
     in
     { moduleName = moduleName
     , relativePath = module_.relativePath
     , source = module_.source
     , testDecls = testDecls
     }
+
+
+type ExposingStyle
+    = ExposingAll
+    | ExposingList (Array String)
+
+
+{-| Parse the module exposing list from source.
+
+Line scan for "module X exposing (...)" header. Handles both `exposing (..)` (all)
+and explicit lists. Comment: Line scan on canonical printer output is reliable.
+-}
+parseExposingList : String -> ExposingStyle
+parseExposingList source =
+    let
+        lines =
+            String.lines source
+
+        moduleLine =
+            Array.findFirst (\line -> String.startsWith "module " line) lines
+    in
+    when moduleLine is
+        Just found ->
+            let
+                line =
+                    found.value
+            in
+            if String.contains "exposing (..)" line then
+                ExposingAll
+
+            else
+                extractExposedNames line
+
+        Nothing ->
+            ExposingAll
+
+
+{-| Extract individual names from "module X exposing (a, b, c)" on a single line.
+-}
+extractExposedNames : String -> ExposingStyle
+extractExposedNames line =
+    when String.firstIndexOf "exposing (" line is
+        Just startIdx ->
+            let
+                afterExposing =
+                    String.dropFirst (startIdx + String.count "exposing (") line
+
+                beforeClose =
+                    when String.firstIndexOf ")" afterExposing is
+                        Just closeIdx ->
+                            String.slice 0 closeIdx afterExposing
+
+                        Nothing ->
+                            afterExposing
+            in
+            beforeClose
+                |> String.split ","
+                |> Array.map String.trim
+                |> Array.keepIf (\name -> not (String.isEmpty name))
+                |> ExposingList
+
+        Nothing ->
+            ExposingAll
 
 
 {-| Detect test declarations in source by scanning for lines matching

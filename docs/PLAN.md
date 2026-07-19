@@ -432,11 +432,14 @@ no compiler in the loop.
             json-decode-pipeline = mapping gap — `Expect.true`/`Expect.false`
             dropped in gren-lang/test 5; fix = Compat.Expect wrappers over
             pass/fail + catalog rows (-> W4.4g).
-      - [ ] W4.4f harness Main: reference only EXPOSED test decls
+      - [x] W4.4f harness Main: reference only EXPOSED test decls
             (explicit list intersect; exposing (..) = all). Prove: tier 2
             elm-codec -> tested/test-failures.
-      - [ ] W4.4g Expect.true/false Compat adapters + catalog rows.
+            LANDED: elm-codec now TESTED 67/67.
+      - [x] W4.4g Expect.true/false Compat adapters + catalog rows.
             Prove: tier 2 json-decode-pipeline -> tested/test-failures.
+            LANDED: ExpectAdapter (pass/fail wrappers, Elm msg-first
+            signature); json-decode-pipeline now TESTED 10/10.
       - D24 (list-extra, date TYPE MISMATCH) tracked in §6; needs the
         typed sortWith rewrite task, not a W4.4 bite.
       - [ ] W4.4e extend the curated list beyond canary toward >= 25 tested

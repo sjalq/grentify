@@ -4,6 +4,8 @@ module Port.Plan exposing
     , buildManifest
     , inferPackagePlatform
     , targetName
+    , analogueRoot
+    , analogueRootByName
     )
 
 {-| Deterministic planning from resolved Elm package identities to Gren package
@@ -51,6 +53,29 @@ targetName registry manifest =
 
         Nothing ->
             Ok sourceName
+
+
+{-| If a package is analogue-mapped (gren-analogue kind), return its Gren package name and version.
+Returns Nothing for transpiled or unmapped packages.
+-}
+analogueRoot : Registry -> Manifest -> Maybe { grenPackage : String, grenVersion : String }
+analogueRoot registry manifest =
+    analogueRootByName registry (PackageName.toString manifest.name)
+
+
+{-| Same as analogueRoot but takes the package name as a string (e.g., "avh4/elm-color").
+-}
+analogueRootByName : Registry -> String -> Maybe { grenPackage : String, grenVersion : String }
+analogueRootByName registry elmPackageName =
+    when MappingRegistry.mappingFor elmPackageName registry is
+        Just (GrenAnalogue details) ->
+            Just
+                { grenPackage = details.grenPackage
+                , grenVersion = details.grenVersion
+                }
+
+        _ ->
+            Nothing
 
 
 inferPackagePlatform

@@ -451,14 +451,17 @@ no compiler in the loop.
       - [ ] W4.4e extend the curated list beyond canary toward >= 25 tested
             (pick packages with real 0.19 test suites, common platform).
             Round 1 done (20 candidates); round 2 in flight (~25 more).
-      - [ ] W4.4h analogue-root harness: packages whose root maps to a
-            Gren-native analogue (avh4/elm-color -> aramiscd/gren-color)
-            have no emitted ../src — the harness must depend on the analogue
-            REGISTRY package instead of source-including. elm-color has 3
-            portable test modules blocked on this; its repeated ~400s
-            "invalid version string" port-fails via the runner are this
-            path's version probe misbehaving (non-fatal when run directly).
-            Prove: tier 2 elm-color -> tested/test-failures.
+      - [x] W4.4h analogue-root harness (PARTIAL, residual filed): landed —
+            analogue registry dep in harness gren.json (Haiku), ../src dropped
+            for analogue roots + required Compat adapters emitted into the
+            harness src (Fable; the Haiku kept ../src against spec ->
+            AMBIGUOUS IMPORT, and adapters vanish without ../src).
+            RESIDUAL (not a bite): elm-color's tests import Hex =
+            rtfeldman/elm-hex, a real Elm TEST-DEPENDENCY — harnesses would
+            need recursively PORTED test-deps. Applies to any package whose
+            tests use community test-deps; W4.2 flagged this class. File
+            under M4+ scope; elm-color parked as tests-unportable
+            (test-dependency-unported).
 - [ ] M3.G [M3] **GATE M3**: Requires: W4.1–W4.4. ≥25 behavior-verified ledger
       entries; P2 table complete
       per W4.1's check; tier 1 green. Flip §STATUS to M4. Prove: tier 0 + tier 1.

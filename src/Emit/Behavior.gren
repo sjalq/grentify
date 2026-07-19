@@ -17,6 +17,7 @@ import Array exposing (Array)
 import Dict exposing (Dict)
 import Emit.Manifest as Manifest exposing (Dependency(..))
 import Json.Encode as Encode
+import Mapping.Adapter as Adapter
 import Mapping.Types exposing (GeneratedModule)
 
 
@@ -37,10 +38,12 @@ type alias PlanResult =
 Returns a record containing the generated files and any modules that had zero tests.
 Files are emitted under behavior-tests/ (not included in paths).
 
-Signature: rootGrenName -> Array GeneratedModule -> Dict String Dependency -> { files : Array FilePlan, skippedModules : Array String }
+analogueInfo: if the root is analogue-mapped, contains { grenPackage, grenVersion }; Nothing otherwise.
+
+Signature: rootGrenName -> Array GeneratedModule -> Dict String Dependency -> Maybe { grenPackage, grenVersion } -> { files : Array FilePlan, skippedModules : Array String }
 -}
-planBehaviorTests : String -> Array GeneratedModule -> Dict String Manifest.Dependency -> PlanResult
-planBehaviorTests rootGrenName testModules rootDependencies =
+planBehaviorTests : String -> Array GeneratedModule -> Dict String Manifest.Dependency -> Maybe { grenPackage : String, grenVersion : String } -> PlanResult
+planBehaviorTests rootGrenName testModules rootDependencies analogueInfo =
     let
         -- Convert test modules to source modules and detect their test declarations
         moduleInfos =
@@ -60,7 +63,7 @@ planBehaviorTests rootGrenName testModules rootDependencies =
 
         -- Build gren.json manifest
         manifestJson =
-            buildManifest rootGrenName rootDependencies
+            buildManifest rootGrenName rootDependencies analogueInfo
 
         -- Combine all files
         testModuleFiles =
@@ -71,11 +74,60 @@ planBehaviorTests rootGrenName testModules rootDependencies =
                     }
                 )
 
+        -- Analogue roots have no ../src to supply the Compat adapters the
+        -- transformed test modules import; emit the required adapters into
+        -- the harness's own src. Requirements are read from the modules'
+        -- import lines (our own printer output, so a line scan is reliable).
+        adapterFiles =
+            when analogueInfo is
+                Nothing ->
+                    []
+
+                Just _ ->
+                    testModules
+                        |> Array.foldl
+                            (\module_ acc ->
+                                String.split "\n" module_.source
+                                    |> Array.foldl
+                                        (\line inner ->
+                                            if String.startsWith "import ElmToGren.Compat." line then
+                                                let
+                                                    imported =
+                                                        line
+                                                            |> String.dropFirst (String.count "import ")
+                                                            |> String.split " "
+                                                            |> Array.first
+                                                            |> Maybe.withDefault ""
+                                                in
+                                                Array.pushLast imported inner
+
+                                            else
+                                                inner
+                                        )
+                                        acc
+                            )
+                            []
+                        |> (\requirements ->
+                                when Adapter.generateFromRequirements requirements is
+                                    Ok generated ->
+                                        Array.map
+                                            (\adapterModule ->
+                                                { relativePath = "src/" ++ adapterModule.relativePath
+                                                , contents = ensureTrailingNewline adapterModule.source
+                                                }
+                                            )
+                                            generated
+
+                                    Err _ ->
+                                        []
+                           )
+
         allFiles =
             [ { relativePath = "gren.json", contents = manifestJson }
             , { relativePath = "src/Main.gren", contents = mainSource }
             ]
                 ++ testModuleFiles
+                ++ adapterFiles
     in
     { files = allFiles
     , skippedModules = skipped
@@ -332,17 +384,29 @@ The harness is an application inside the root package that can access all source
 modules (including compat adapters) via source-directories, avoiding the need to
 expose internal implementation modules.
 
+For analogue-mapped roots: do NOT include "../src" (just ["src"]) and add the
+analogue package as a direct dependency. For normal roots: include ["src", "../src"].
+
 Merges base dependencies with root package dependencies. Base deps (core, node, test)
 take priority on collision; url goes to direct if root needs it, otherwise stays indirect.
 -}
-buildManifest : String -> Dict String Manifest.Dependency -> String
-buildManifest _ rootDependencies =
+buildManifest : String -> Dict String Manifest.Dependency -> Maybe { grenPackage : String, grenVersion : String } -> String
+buildManifest _ rootDependencies analogueInfo =
     let
         baseDirect =
             [ { key = "gren-lang/core", value = Encode.string "7.4.2" }
             , { key = "gren-lang/node", value = Encode.string "6.1.3" }
             , { key = "gren-lang/test", value = Encode.string "5.0.0" }
             ]
+
+        -- If root is analogue-mapped, add the analogue package to base dependencies
+        baseDirectWithAnalogue =
+            when analogueInfo is
+                Just { grenPackage, grenVersion } ->
+                    Array.pushLast { key = grenPackage, value = Encode.string grenVersion } baseDirect
+
+                Nothing ->
+                    baseDirect
 
         urlInRoot =
             Dict.get "gren-lang/url" rootDependencies
@@ -377,7 +441,7 @@ buildManifest _ rootDependencies =
             Array.foldl
                 (\{ key, value } acc -> Array.pushLast { key = key, value = value } acc)
                 []
-                baseDirect
+                baseDirectWithAnalogue
 
         mergedArray =
             Array.foldl
@@ -385,7 +449,7 @@ buildManifest _ rootDependencies =
                     -- Check if key exists in baseDict
                     let
                         exists =
-                            Array.any (\{ key = k } -> k == key) baseDirect
+                            Array.any (\{ key = k } -> k == key) baseDirectWithAnalogue
                     in
                     if exists then
                         acc
@@ -417,11 +481,23 @@ buildManifest _ rootDependencies =
                   }
                 ]
 
+        -- Analogue roots must NOT source-include "../src": the emitted output
+        -- carries a local reference copy of the analogue's modules, which
+        -- would collide (AMBIGUOUS IMPORT) with the registry dependency that
+        -- provides the same module names.
+        sourceDirectories =
+            when analogueInfo is
+                Just _ ->
+                    [ "src" ]
+
+                Nothing ->
+                    [ "src", "../src" ]
+
         manifest =
             Encode.object
                 [ { key = "type", value = Encode.string "application" }
                 , { key = "platform", value = Encode.string "node" }
-                , { key = "source-directories", value = Encode.array Encode.string [ "src", "../src" ] }
+                , { key = "source-directories", value = Encode.array Encode.string sourceDirectories }
                 , { key = "gren-version", value = Encode.string "0.6.6" }
                 , { key = "dependencies", value = deps }
                 ]

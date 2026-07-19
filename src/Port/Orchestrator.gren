@@ -702,6 +702,10 @@ finalize context permissions cliOptions output overlayPaths assets registry reso
                                                                 }
 
                                                         else
+                                                            let
+                                                                analogueInfo =
+                                                                    Plan.analogueRootByName registry rootKey
+                                                            in
                                                             emitBehaviorHarness
                                                                 context.platform
                                                                 permissions.fileSystem
@@ -709,6 +713,7 @@ finalize context permissions cliOptions output overlayPaths assets registry reso
                                                                 rootIdentity.grenName
                                                                 planned.rootTestModules
                                                                 pkg.manifest.dependencies
+                                                                analogueInfo
                                                                 |> Task.andThen
                                                                     (\_ ->
                                                                         compileBehaviorHarness
@@ -1842,14 +1847,15 @@ emitBehaviorHarness
     -> String
     -> Array Mapping.GeneratedModule
     -> Dict String Manifest.Dependency
+    -> Maybe { grenPackage : String, grenVersion : String }
     -> Task Error {}
-emitBehaviorHarness platform fileSystem output rootGrenName testModules rootDependencies =
+emitBehaviorHarness platform fileSystem output rootGrenName testModules rootDependencies analogueInfo =
     let
         harnessDirPath =
             Path.join [ output, Path.fromPosixString "behavior-tests" ]
 
         plan =
-            Behavior.planBehaviorTests rootGrenName testModules rootDependencies
+            Behavior.planBehaviorTests rootGrenName testModules rootDependencies analogueInfo
     in
     System.File.ensureDirectory fileSystem harnessDirPath
         |> Task.andThen

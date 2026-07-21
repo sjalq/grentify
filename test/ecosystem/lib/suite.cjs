@@ -29,6 +29,10 @@ const TRANSIENT_RETRY_PATTERNS = [
   /ENOTEMPTY/,
   /shasum exited with code 1/,
   /invalid version string/,
+  // elm-review crashing on non-JSON elm output: concurrent review-app
+  // warm-up races in a cold elm-home (observed 2026-07-21 gate run:
+  // 26 instant exit-1s, all clean solo).
+  /is not valid JSON/,
 ];
 
 /**

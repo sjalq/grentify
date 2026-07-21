@@ -1443,12 +1443,21 @@ namespaceExposedModules package =
         exposed =
             when manifest.exposedModules is
                 ExposedArray names ->
-                    ExposedArray (Array.map (\name -> "Elm." ++ name) names)
+                    ExposedArray (Array.map (\name -> prefixIfNeeded name) names)
 
                 ExposedDict groups ->
-                    ExposedDict (Dict.map (\_ names -> Array.map (\name -> "Elm." ++ name) names) groups)
+                    ExposedDict (Dict.map (\_ names -> Array.map (\name -> prefixIfNeeded name) names) groups)
     in
     { package | manifest = { manifest | exposedModules = exposed } }
+
+
+prefixIfNeeded : String -> String
+prefixIfNeeded name =
+    if String.startsWith "Elm." name then
+        name
+
+    else
+        "Elm." ++ name
 
 
 
@@ -1536,30 +1545,46 @@ finalizeAdd context permissions cliOptions output assets resolution planned =
                                 Task.fail error
 
                             Ok updatedManifest ->
-                                System.File.ensureDirectory permissions.fileSystem packagesRoot
+                                generateStagingPath packagesRoot
                                     |> Task.andThen
-                                        (\_ ->
-                                            writeVendored context
-                                                permissions
-                                                assets
-                                                packagesRoot
-                                                vendored
+                                        (\staging ->
+                                            System.File.ensureDirectory permissions.fileSystem packagesRoot
+                                                |> Task.andThen (\_ -> System.File.ensureDirectory permissions.fileSystem staging)
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        writeVendored context
+                                                            permissions
+                                                            assets
+                                                            staging
+                                                            vendored
+                                                    )
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        atomicReplaceAdd permissions.fileSystem staging packagesRoot
+                                                    )
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        System.File.writeText permissions.fileSystem manifestPath updatedManifest
+                                                            |> Task.map (\_ -> {})
+                                                    )
+                                                |> Task.map
+                                                    (\_ ->
+                                                        { output = output
+                                                        , rootPackage = rootIdentity.grenName
+                                                        , packageCount = Array.length planned.packages
+                                                        , testModuleCount = planned.testModuleCount
+                                                        , report = addReport rootIdentity libDirectory planned
+                                                        , behaviorMessage = Nothing
+                                                        }
+                                                    )
+                                                |> Task.onError
+                                                    (\error ->
+                                                        removeIfExistsAdd permissions.fileSystem staging
+                                                            |> Task.onError (\_ -> Task.succeed {})
+                                                            |> Task.andThen (\_ -> Task.fail error)
+                                                    )
                                         )
-                                    |> Task.andThen
-                                        (\_ ->
-                                            System.File.writeText permissions.fileSystem manifestPath updatedManifest
-                                                |> Task.map (\_ -> {})
-                                        )
-                                    |> Task.map
-                                        (\_ ->
-                                            { output = output
-                                            , rootPackage = rootIdentity.grenName
-                                            , packageCount = Array.length planned.packages
-                                            , testModuleCount = planned.testModuleCount
-                                            , report = addReport rootIdentity libDirectory planned
-                                            , behaviorMessage = Nothing
-                                            }
-                                        )
+
                     )
 
 
@@ -1655,6 +1680,101 @@ removePath permission path =
                             (\error ->
                                 PortError.create "ADD_FAILED"
                                     ("Could not clear " ++ Path.toPosixString path ++ ": " ++ FileSystem.errorToString error)
+                            )
+
+                else
+                    Task.succeed {}
+            )
+
+
+generateStagingPath : Path -> Task Error Path
+generateStagingPath destination =
+    Crypto.getSecureContext
+        |> Task.mapError
+            (\_ ->
+                PortError.create "ADD_FAILED"
+                    "Secure randomness is unavailable for staging packages."
+            )
+        |> Task.andThen Crypto.randomUuidV4
+        |> Task.map
+            (\uuid ->
+                let
+                    parent =
+                        Path.parentPath destination |> Maybe.withDefault Path.empty
+
+                    name =
+                        "."
+                            ++ Path.filenameWithExtension destination
+                            ++ ".elm-to-gren-"
+                            ++ uuid
+                in
+                Path.join [ parent, Path.fromPosixString name ]
+            )
+
+
+atomicReplaceAdd : FileSystem.Permission -> Path -> Path -> Task Error {}
+atomicReplaceAdd permission staging destination =
+    generateStagingPath destination
+        |> Task.andThen
+            (\backup ->
+                System.File.exists permission destination
+                    |> Task.andThen
+                        (\hadDestination ->
+                            if hadDestination then
+                                FileSystem.move permission backup destination
+                                    |> Task.map (\_ -> {})
+                                    |> Task.mapError
+                                        (\error ->
+                                            PortError.create "ADD_FAILED"
+                                                ("Could not back up existing packages: " ++ FileSystem.errorToString error)
+                                        )
+                                    |> Task.andThen
+                                        (\_ ->
+                                            FileSystem.move permission destination staging
+                                                |> Task.map (\_ -> {})
+                                                |> Task.mapError
+                                                    (\error ->
+                                                        PortError.create "ADD_FAILED"
+                                                            ("Could not publish vendored packages: " ++ FileSystem.errorToString error)
+                                                    )
+                                                |> Task.onError
+                                                    (\publishError ->
+                                                        FileSystem.move permission destination backup
+                                                            |> Task.map (\_ -> {})
+                                                            |> Task.onError (\_ -> Task.succeed {})
+                                                            |> Task.andThen (\_ -> Task.fail publishError)
+                                                    )
+                                        )
+                                    |> Task.andThen
+                                        (\_ ->
+                                            removeIfExistsAdd permission backup
+                                                |> Task.onError (\_ -> Task.succeed {})
+                                        )
+
+                            else
+                                FileSystem.move permission destination staging
+                                    |> Task.map (\_ -> {})
+                                    |> Task.mapError
+                                        (\error ->
+                                            PortError.create "ADD_FAILED"
+                                                ("Could not publish vendored packages: " ++ FileSystem.errorToString error)
+                                        )
+                        )
+            )
+
+
+removeIfExistsAdd : FileSystem.Permission -> Path -> Task Error {}
+removeIfExistsAdd permission path =
+    System.File.exists permission path
+        |> Task.andThen
+            (\pathExists ->
+                if pathExists then
+                    FileSystem.remove permission { recursive = True } path
+                        |> Task.map (\_ -> {})
+                        |> Task.mapError
+                            (\error ->
+                                PortError.create "ADD_FAILED"
+                                    ("Could not clean up staging directory " ++ Path.toPosixString path ++ ": " ++ FileSystem.errorToString error)
                             )
 
                 else

@@ -522,9 +522,14 @@ no compiler in the loop.
       EXEMPT(broken-upstream) only with recorded upstream-build failure. elm-ionicons:
       apply the "no package is too big" rule — raise its budget or fix the scale
       cause; it may not be EXEMPTed. Prove: tier 2 per package.
-- [ ] W5.8 [M4] D14 `add`: stage-then-commit like `port` (no partial writes); stop
+- [x] W5.8 [M4] D14 `add`: stage-then-commit like `port` (no partial writes); stop
       double-prefixing `Elm.`-native modules. Prove: tier 2 (`add` round-trip fixture
       into a scratch app, idempotence re-run) + tier 1.
+      DONE: vendored tree staged then committed (generateStagingPath);
+      prefixIfNeeded guards Elm.-named modules. Fable-run proofs: round-trip
+      compiles, second add idempotent, bogus add exits 1 with ZERO new files,
+      canary 14/14. (Haiku's own fixture app was broken; code verified
+      independently.)
 - [ ] W5.5 [M4] **GATE M4**: Requires: W3.2–W3.5, W5.1, W5.3, W5.4, W5.8.
       Clean-tree tier 3 both suites: 202/202 and 252/252, or
       every failure matched by a ledger EXEMPT entry with evidence (the W5.2

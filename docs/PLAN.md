@@ -128,9 +128,10 @@ Tier-0 note: tier 0 includes sub-second node tests; "pure Gren" is not a require
 9. Each milestone ends with its GATE task (Mn.G). The GATE task runs the gate checks,
    stamps the ledger where applicable, flips §STATUS to the next milestone.
 10. **Delegation model** (set by the human 2026-07-18, supersedes the original
-    "Opus 4.6 subbies" instruction; updated to Haiku by the human 2026-07-19):
+    "Opus 4.6 subbies" instruction; updated to Haiku by the human 2026-07-19;
+    upgraded to Sonnet by the human 2026-07-21 for throughput):
     the lead agent (Fable) owns types work, laws/specs, project management, and
-    QA of every wave; implementation is farmed out to Haiku subagents in small,
+    QA of every wave; implementation is farmed out to Sonnet subagents in small,
     tightly-specced bites that lean on the Gren compiler as their guardrail.
     Every subagent deliverable is adversarially reviewed and then re-proven by
     the lead before commit; nothing lands on the lead's say-so alone, and

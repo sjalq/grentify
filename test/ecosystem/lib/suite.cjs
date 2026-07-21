@@ -98,12 +98,16 @@ async function retryOnce(fn) {
  * Memory-capped concurrency. TOTAL memory is the basis, not freemem:
  * macOS reports cache-held RAM as used, so freemem-based caps collapse
  * every run to -j1 (observed live: "-j6 clamped to -j1" on a 16GB idle
- * machine). Law: one port worker per 3GB of machine, floor 2.
+ * machine). Law (human instruction 2026-07-22: "parallel to the max of
+ * the actual ram, reduce on degradation"): one worker per 1.5GB, also
+ * capped by cores-1; DEGRADATION BACKOFF in runSuite shrinks the live
+ * pool by one on every timeout/hang, floor 3.
  */
 function defaultConcurrency(requested = 1) {
   const totalMem = os.totalmem();
-  const maxFromMem = Math.max(2, Math.floor(totalMem / (3 * 1024 ** 3)));
-  return Math.min(requested, maxFromMem);
+  const maxFromMem = Math.max(2, Math.floor(totalMem / (1.5 * 1024 ** 3)));
+  const maxFromCpu = Math.max(2, os.cpus().length - 1);
+  return Math.min(requested, maxFromMem, maxFromCpu);
 }
 
 /**
@@ -259,7 +263,17 @@ async function runSuite(options) {
   const failReasons = {};
   let stop = false;
 
-  await mapPool(filtered.packages, args.concurrency, async (pkg, index) => {
+  // Degradation backoff (2026-07-22 law): start at the RAM/CPU max and
+  // shed one worker on every timeout/hang, floor 3 — contention shows up
+  // as hangs long before OOM.
+  const poolRef = { current: args.concurrency };
+  const degrade = () => {
+    if (poolRef.current > 3) {
+      poolRef.current -= 1;
+      console.log(`[suite] degradation: pool reduced to -j${poolRef.current}`);
+    }
+  };
+  await mapPool(filtered.packages, poolRef, async (pkg, index) => {
     if (stop) {
       return;
     }
@@ -317,6 +331,7 @@ async function runSuite(options) {
 
     const text = `${result.stderr || ""}\n${result.stdout || ""}`;
     if (result.timedOut) {
+      degrade();
       failed += 1;
       const reason = classifyTimeout(true, volumeAfter, budgetMs);
       failReasons[reason] = (failReasons[reason] || 0) + 1;
@@ -545,14 +560,23 @@ function spawnCapture(program, args, cwd, timeoutMs = 0) {
   });
 }
 
+/**
+ * Adaptive worker pool. `limit` may be a number (fixed) or a { current }
+ * ref that callers shrink mid-run (degradation backoff): workers whose
+ * index exceeds the shrunken limit retire after their current item.
+ */
 async function mapPool(items, limit, fn) {
+  const limitRef = typeof limit === "number" ? { current: limit } : limit;
   let i = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (i < items.length) {
-      const idx = i++;
-      await fn(items[idx], idx);
-    }
-  });
+  const workers = Array.from(
+    { length: Math.min(limitRef.current, items.length) },
+    async (_, workerIndex) => {
+      while (i < items.length && workerIndex < limitRef.current) {
+        const idx = i++;
+        await fn(items[idx], idx);
+      }
+    },
+  );
   await Promise.all(workers);
 }
 

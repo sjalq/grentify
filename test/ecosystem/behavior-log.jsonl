@@ -319,3 +319,4 @@
 {"name":"rluiten/trie","version":"2.1.1","status":"tested","detail":"BEHAVIOR PASS: 36 passed, 0 failed","commit":"98edbc393c344c84d8c9d5ea92306a93609f7826","date":"2026-07-19T18:00:00.842Z"}
 {"name":"fredcy/elm-parseint","version":"2.0.1","status":"tested","detail":"BEHAVIOR PASS: 58 passed, 0 failed","commit":"98edbc393c344c84d8c9d5ea92306a93609f7826","date":"2026-07-19T18:00:03.972Z"}
 {"name":"NoRedInk/elm-simple-fuzzy","version":"1.0.3","status":"tested","detail":"BEHAVIOR PASS: 21 passed, 0 failed","commit":"98edbc393c344c84d8c9d5ea92306a93609f7826","date":"2026-07-19T18:00:06.573Z"}
+{"name":"rtfeldman/elm-hex","version":"1.0.0","status":"tests-broken-upstream","detail":"-- NAMING ERROR ------------------------------------------------- src/Tests.gren","commit":"254802b82acffab56f2d54ddf71a3a18967865fd","date":"2026-07-21T10:06:59.093Z"}

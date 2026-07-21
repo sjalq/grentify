@@ -195,6 +195,30 @@ regressionFixtureChecks =
       , passed = fixtureAgreesInt w51bFixture 15
       , details = "pre == post == 15 on Edit [7,8]; newFixes binding preserved"
       }
+    , { name = "regression: Fifo/remove Fifo [] [] agrees (arm 1, Nothing-ish)"
+      , passed =
+            fixtureAgreesValue
+                (fifoRemoveFixtureFile fifoScrutineeEmptyEmpty)
+                (VArray [ VInt 1 ])
+      , details = "pre == post == [1] on Fifo [] []"
+      }
+    , { name = "regression: Fifo/remove Fifo [] [1,2] agrees (arm 2 recurses into arm 3)"
+      , passed =
+            fixtureAgreesValue
+                (fifoRemoveFixtureFile fifoScrutineeEmptyNonEmpty)
+                (VArray [ VInt 3, VInt 1, VArray [ VInt 2 ], VArray [] ])
+      , details =
+            "pre == post == [3,1,[2],[]] on Fifo [] [1,2]; second column `[]` "
+                ++ "(row 1, literal) vs `back` (rows 2/3, irrefutable var) is "
+                ++ "the column that must disqualify the ctor-embedded merge"
+      }
+    , { name = "regression: Fifo/remove Fifo [3,4] [5] agrees (arm 3 direct hit)"
+      , passed =
+            fixtureAgreesValue
+                (fifoRemoveFixtureFile fifoScrutineeConsNonEmpty)
+                (VArray [ VInt 3, VInt 3, VArray [ VInt 4 ], VArray [ VInt 5 ] ])
+      , details = "pre == post == [3,3,[4],[5]] on Fifo [3,4] [5]"
+      }
     ]
 
 
@@ -213,6 +237,31 @@ fixtureAgreesInt file expected =
         { pre = Just (Done a), post = Just (Done b) } ->
             (Eval.valueEq a b == Just True)
                 && (Eval.valueEq a (VInt expected) == Just True)
+
+        _ ->
+            False
+
+
+{-| Both sides evaluate to the same `Done expected` value (any `Value`, not
+just `VInt`). Unlike the property runner's `compareFile`, a `Stuck` outcome on
+either side is a hard failure here, not a discard — these fixtures pin a
+*known* answer, so "the transform couldn't decide" is exactly the defect this
+regression exists to catch (D-fifo: MatchCompile's ctor-embedded merge
+produced an unbound `back` reference).
+-}
+fixtureAgreesValue : File -> Value -> Bool
+fixtureAgreesValue file expected =
+    let
+        before =
+            CtorLaw.apply (CtorLaw.collectFromFile file) file
+
+        after =
+            MatchCompile.compile Dict.empty before
+    in
+    when { pre = targetOutcome before, post = targetOutcome after } is
+        { pre = Just (Done a), post = Just (Done b) } ->
+            (Eval.valueEq a b == Just True)
+                && (Eval.valueEq a expected == Just True)
 
         _ ->
             False
@@ -330,6 +379,106 @@ w51bFixture =
             }
         ]
         (ExprCase { expression = scrutinee, cases = arms })
+
+
+{-| D-fifo: the exact `remove` shape from jfmengels/elm-review's
+`Vendor/Fifo.elm` — `type Fifo = Fifo (List Int) (List Int)`, matched by:
+
+    Fifo [] []          -> Nothing-ish     (marker [1])
+    Fifo [] back        -> recurse-ish     (remove (Fifo back []))
+    Fifo (next::rest) back -> uses next, rest, AND back (marker [3, next, rest, back])
+
+Row 1's second column is the literal `[]`; rows 2/3 bind that same column as
+the irrefutable var `back`. That mix (refutable in one row, irrefutable in
+the others) on a column *other* than the ctor's designated list column is
+exactly what must disqualify `Fifo` from the ctor-embedded merge and route
+the match to `compileGeneralCase` instead.
+-}
+fifoRemoveFixtureFile : Expr -> File
+fifoRemoveFixtureFile scrutinee =
+    buildFileWith
+        [ DeclCustomType
+            { name = "Fifo"
+            , documentation = Nothing
+            , generics = [ "a" ]
+            , constructors =
+                [ { name = "Fifo"
+                  , arguments =
+                        [ Ast.Types.TypeTyped
+                            { ref = { moduleName = Just "List", name = "List" }
+                            , arguments = [ Ast.Types.TypeGeneric "a" ]
+                            }
+                        , Ast.Types.TypeTyped
+                            { ref = { moduleName = Just "List", name = "List" }
+                            , arguments = [ Ast.Types.TypeGeneric "a" ]
+                            }
+                        ]
+                  }
+                ]
+            }
+        , DeclFunction
+            { name = "remove"
+            , documentation = Nothing
+            , signature = Nothing
+            , arguments = [ PatVar "fifo" ]
+            , expression =
+                ExprCase
+                    { expression = bare "fifo"
+                    , cases =
+                        [ { pattern = fifoPat (PatList []) (PatList [])
+                          , body = ExprList [ ExprInt 1 ]
+                          }
+                        , { pattern = fifoPat (PatList []) (PatVar "back")
+                          , body =
+                                ExprApplication
+                                    [ bare "remove"
+                                    , ExprApplication
+                                        [ bare "Fifo", bare "back", ExprList [] ]
+                                    ]
+                          }
+                        , { pattern =
+                                fifoPat
+                                    (PatCons
+                                        { head = PatVar "next", tail = PatVar "rest" }
+                                    )
+                                    (PatVar "back")
+                          , body =
+                                ExprList
+                                    [ ExprInt 3, bare "next", bare "rest", bare "back" ]
+                          }
+                        ]
+                    }
+            }
+        ]
+        (ExprApplication [ bare "remove", scrutinee ])
+
+
+fifoPat : Pattern -> Pattern -> Pattern
+fifoPat first second =
+    PatNamed
+        { ref = { moduleName = Nothing, name = "Fifo" }
+        , arguments = [ first, second ]
+        }
+
+
+fifoScrutineeEmptyEmpty : Expr
+fifoScrutineeEmptyEmpty =
+    ExprApplication [ bare "Fifo", ExprList [], ExprList [] ]
+
+
+fifoScrutineeEmptyNonEmpty : Expr
+fifoScrutineeEmptyNonEmpty =
+    ExprApplication
+        [ bare "Fifo", ExprList [], ExprList [ ExprInt 1, ExprInt 2 ] ]
+
+
+fifoScrutineeConsNonEmpty : Expr
+fifoScrutineeConsNonEmpty =
+    ExprApplication
+        [ bare "Fifo"
+        , ExprList [ ExprInt 3, ExprInt 4 ]
+        , ExprList [ ExprInt 5 ]
+        ]
 
 
 batchPat : Pattern -> Pattern

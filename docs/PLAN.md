@@ -575,10 +575,19 @@ no compiler in the loop.
             ElmCore site STILL fails; the true empty-print there is
             unidentified. Needs the emitted line 21 cut at the parse
             position (staging retention or a doc-record minimal specimen).
-      - [ ] W5.1e NEW (surfaced by the deeper port): Vendor.Fifo references
-            generated helper `ctor_Fifo_elmToGren` that is never emitted —
-            CtorLaw multi-arg helper generation misses vendored/sub-module
-            ctor definition sites. 2 sites.
+      - [x] W5.1e (surfaced by the deeper port; original framing WRONG —
+            helper emission was innocent, proven by two green CtorLawTest
+            regressions): real bug = D28, MatchCompile's ctor-embedded
+            collapse admitted matches with a second refutable column
+            (Fifo [] back vs Fifo [] []), losing the var binding. FIXED:
+            eligibility law `ctorGroupsRespectOtherColumnLaw` (every other
+            column irrefutable in every row, else general path) + red-first
+            evaluator fixtures (2/3 scrutinees red pre-fix). BONUS D29
+            fixed same pass: sole-ctor record destructure emitted a
+            redundant `_` arm that CRASHES gren 0.6.6's compiler
+            (upstream bug, 8-line repro isolated) — now emits the plain
+            destructure, sidestepping it. Local-package fast-repro
+            technique documented in the W5.1e trail (seconds vs 12 min).
 - [x] W5.3 [M4] D12 treeview ctor-arity: root-cause the cross-package rewrite miss;
       fix. Prove: tier 2 on both treeviews + tier 1.
       DONE (with a plot twist): root cause was OUR extractor's hardcoded

@@ -4,8 +4,11 @@ module Ast.CtorLawTest exposing (tests)
 -}
 
 import Array exposing (Array)
+import Ast.BareResolve as BareResolve
 import Ast.CtorLaw as CtorLaw
+import Ast.NameSub as NameSub
 import Ast.Print as Print
+import Ast.RecordAlias as RecordAlias
 import Ast.Types exposing
     ( Declaration(..)
     , Exposing(..)
@@ -16,6 +19,7 @@ import Ast.Types exposing
     , TypeAnn(..)
     )
 import Dict exposing (Dict)
+import Mapping.Types exposing (Registry)
 import String
 
 
@@ -33,6 +37,8 @@ tests =
     , importedMultiArgViaQualifiedName
     , collectSkipsUnaryCtors
     , importedMultiArgViaImportAlias
+    , fifoLikeCtorValueUsesAllShareOneHelper
+    , fifoRealLoweringChainStillEmitsHelper
     ]
 
 
@@ -263,6 +269,196 @@ importedMultiArgViaImportAlias =
         "import-alias Internal.StyleClass gets a curried helper"
         ok
         ("printed:\n" ++ printed)
+
+
+{-| Mirrors jfmengels/elm-review's `Vendor.Fifo` shape (2-arg local ctor `Fifo`)
+and its three real value-position uses: a fully-applied ctor in `insert`'s
+body, a ctor application on the *right* of a `<|` pipeline in `remove`, and a
+ctor application nested inside a tuple argument in `remove`. All three must
+rewrite to the *same* shared `ctor_Fifo_elmToGren` helper, and that helper
+declaration must actually be emitted into the file.
+-}
+fifoLikeCtorValueUsesAllShareOneHelper : TestResult
+fifoLikeCtorValueUsesAllShareOneHelper =
+    let
+        printed =
+            Print.print (CtorLaw.apply Dict.empty fifoFixtureFile)
+
+        helperOccurrences =
+            Array.length (String.split "ctor_Fifo_elmToGren" printed) - 1
+
+        ok =
+            -- One shared helper declaration plus three rewritten call sites.
+            helperOccurrences
+                == 4
+                && String.contains "ctor_Fifo_elmToGren a0 a1 =" printed
+    in
+    outcome
+        "Fifo-shaped 2-arg ctor: application, <| right-side, and tuple-nested uses all share one emitted helper"
+        ok
+        ("helper occurrences: "
+            ++ String.fromInt helperOccurrences
+            ++ "\nprinted:\n"
+            ++ printed
+        )
+
+
+{-| Same fixture as `fifoLikeCtorValueUsesAllShareOneHelper`, but driven
+through the *actual* per-module lowering chain `Transform.Pipeline` runs
+(`BareResolve -> NameSub -> RecordAlias -> CtorLaw`) instead of calling
+`CtorLaw.apply` directly on the raw fixture. NameSub rewrites `::` to
+`Array.pushFirst` *before* CtorLaw ever sees the file — this is the fidelity
+gap a hand-built CtorLaw-only fixture cannot see, since real elm-review ASTs
+always reach CtorLaw already lowered by the earlier passes.
+-}
+fifoRealLoweringChainStillEmitsHelper : TestResult
+fifoRealLoweringChainStillEmitsHelper =
+    let
+        emptyRegistry : Registry
+        emptyRegistry =
+            { packageOrder = [], packages = Dict.empty, modules = Dict.empty }
+
+        lowered =
+            fifoFixtureFile
+                |> BareResolve.apply
+                |> NameSub.apply emptyRegistry
+                |> RecordAlias.apply Dict.empty
+                |> CtorLaw.apply Dict.empty
+
+        printed =
+            Print.print lowered
+
+        helperOccurrences =
+            Array.length (String.split "ctor_Fifo_elmToGren" printed) - 1
+
+        ok =
+            helperOccurrences
+                == 4
+                && String.contains "ctor_Fifo_elmToGren a0 a1 =" printed
+    in
+    outcome
+        "Fifo fixture through the real BareResolve -> NameSub -> RecordAlias -> CtorLaw chain still emits one shared helper"
+        ok
+        ("helper occurrences: "
+            ++ String.fromInt helperOccurrences
+            ++ "\nprinted:\n"
+            ++ printed
+        )
+
+
+{-| Mirrors jfmengels/elm-review's `Vendor.Fifo` shape (2-arg local ctor `Fifo`)
+and its three real value-position uses: a fully-applied ctor in `insert`'s
+body, a ctor application on the *right* of a `<|` pipeline in `remove`, and a
+ctor application nested inside a tuple argument in `remove`.
+-}
+fifoFixtureFile : File
+fifoFixtureFile =
+    let
+        fifoRef =
+            { moduleName = Nothing, name = "Fifo" }
+
+        file =
+            emptyFile "Vendor.Fifo"
+                []
+                [ DeclCustomType
+                    { name = "Fifo"
+                    , documentation = Nothing
+                    , generics = [ "a" ]
+                    , constructors =
+                        [ { name = "Fifo"
+                          , arguments =
+                              [ TypeGeneric "listA", TypeGeneric "listA" ]
+                          }
+                        ]
+                    }
+                , DeclFunction
+                    { name = "insert"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments =
+                        [ PatVar "a"
+                        , PatNamed
+                            { ref = fifoRef
+                            , arguments = [ PatVar "front", PatVar "back" ]
+                            }
+                        ]
+                    , expression =
+                        -- `Fifo front (a :: back)` — fully-applied ctor value use.
+                        ExprApplication
+                            [ ExprVar fifoRef
+                            , ExprVar { moduleName = Nothing, name = "front" }
+                            , ExprBinop
+                                { operator = "::"
+                                , left = ExprVar { moduleName = Nothing, name = "a" }
+                                , right = ExprVar { moduleName = Nothing, name = "back" }
+                                }
+                            ]
+                    }
+                , DeclFunction
+                    { name = "remove"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "fifo" ]
+                    , expression =
+                        ExprCase
+                            { expression = ExprVar { moduleName = Nothing, name = "fifo" }
+                            , cases =
+                                [ { pattern =
+                                        PatNamed { ref = fifoRef, arguments = [ PatList [], PatList [] ] }
+                                  , body = ExprVar { moduleName = Nothing, name = "Nothing" }
+                                  }
+                                , { pattern =
+                                        PatNamed
+                                            { ref = fifoRef
+                                            , arguments = [ PatList [], PatVar "back" ]
+                                            }
+                                  , body =
+                                        -- `remove <| Fifo (List.reverse back) []` — ctor use on
+                                        -- the *right* of a `<|` pipeline.
+                                        ExprBinop
+                                            { operator = "<|"
+                                            , left = ExprVar { moduleName = Nothing, name = "remove" }
+                                            , right =
+                                                ExprApplication
+                                                    [ ExprVar fifoRef
+                                                    , ExprApplication
+                                                        [ ExprVar { moduleName = Just "List", name = "reverse" }
+                                                        , ExprVar { moduleName = Nothing, name = "back" }
+                                                        ]
+                                                    , ExprList []
+                                                    ]
+                                            }
+                                  }
+                                , { pattern =
+                                        PatNamed
+                                            { ref = fifoRef
+                                            , arguments =
+                                                [ PatCons
+                                                    { head = PatVar "next", tail = PatVar "rest" }
+                                                , PatVar "back"
+                                                ]
+                                            }
+                                  , body =
+                                        -- `Just ( next, Fifo rest back )` — ctor use nested
+                                        -- inside a tuple inside another application's argument.
+                                        ExprApplication
+                                            [ ExprVar { moduleName = Nothing, name = "Just" }
+                                            , ExprTuple
+                                                [ ExprVar { moduleName = Nothing, name = "next" }
+                                                , ExprApplication
+                                                    [ ExprVar fifoRef
+                                                    , ExprVar { moduleName = Nothing, name = "rest" }
+                                                    , ExprVar { moduleName = Nothing, name = "back" }
+                                                    ]
+                                                ]
+                                            ]
+                                  }
+                                ]
+                            }
+                    }
+                ]
+    in
+    file
 
 
 -- helpers -------------------------------------------------------------------

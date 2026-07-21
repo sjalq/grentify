@@ -1220,8 +1220,23 @@ matchNamedPattern sole seed scope ref args value body fail =
 
             matchExpr =
                 if
-                    isIrrefutable sole
-                        (PatNamed { ref = ref, arguments = args })
+                    -- `namedPat` binds every payload slot as a plain `PatVar`
+                    -- temp (never the caller's original, possibly-refutable
+                    -- sub-pattern), so it is *always* structurally irrefutable
+                    -- once the ctor itself is sole — soleness alone is the
+                    -- right test here, not `isIrrefutable` on the original
+                    -- `args`. The real refutability testing on those original
+                    -- args (list peels, literals, …) happens inside
+                    -- `afterMatch`, which threads `fail` itself. Requiring the
+                    -- original args to also be irrefutable falls through to
+                    -- the `ExprCase [..., PatAll]` branch below for a sole
+                    -- ctor with a refutable payload (e.g. `Fifo [] []`) — a
+                    -- provably-unreachable wildcard on a single-constructor
+                    -- type that trips a real Gren 0.6.6 compiler crash
+                    -- ("Map.!: given key is not an element in the map") for
+                    -- record-payload sole ctors, rather than the ordinary
+                    -- "redundant pattern" diagnostic it gives for plain ones.
+                    isSoleCtor sole ref
                 then
                     wrapDestructure namedPat value afterMatch
 
@@ -3099,6 +3114,79 @@ isCtorEmbeddedCase arms =
     Array.any armHasCtorList arms
         && Array.all ctorArmOk arms
         && not (ctorShadows arms)
+        && ctorGroupsRespectOtherColumnLaw arms
+
+
+{-| Law: a ctor's list-column merge (the `collapsibleCtorNames` fast path
+*and* `rewriteCtorArm`'s per-arm peer-fallback rewrite alike) is only sound
+when every OTHER argument column is irrefutable — `PatVar` / `PatAll` — in
+EVERY row that shares this ctor name. A literal (including `[]`), a nested
+ctor, or any other refutable pattern in another column means those rows are
+not interchangeable peers on the list column alone; merging them silently
+drops that other column's own test and can reference a name that was never
+bound on that path.
+
+`Fifo [] [] -> …; Fifo [] back -> …; Fifo (next::rest) back -> …` is exactly
+this: the list column is index 0, but row 1's index-1 column is the literal
+`[]` while rows 2/3 bind it as `back` — refutable in one row, irrefutable in
+the others. That disqualifies the whole `Fifo` group and routes the case to
+`compileGeneralCase`, which peels each arm's pattern independently instead of
+merging peers.
+-}
+ctorGroupsRespectOtherColumnLaw : Array CaseArm -> Bool
+ctorGroupsRespectOtherColumnLaw arms =
+    arms
+        |> Array.mapAndKeepJust ctorArmName
+        |> distinctNames
+        |> Array.all (\name -> ctorGroupOtherColumnsIrrefutable name arms)
+
+
+ctorGroupOtherColumnsIrrefutable : String -> Array CaseArm -> Bool
+ctorGroupOtherColumnsIrrefutable name arms =
+    let
+        group =
+            Array.keepIf (\arm -> ctorArmName arm == Just name) arms
+    in
+    when firstListColumnAcrossGroup group is
+        Nothing ->
+            -- No list column anywhere in this ctor's rows: the list-merge
+            -- machinery never engages, so there is nothing to protect.
+            True
+
+        Just listIndex ->
+            Array.all (otherColumnsIrrefutableAt listIndex) group
+
+
+firstListColumnAcrossGroup : Array CaseArm -> Maybe Int
+firstListColumnAcrossGroup group =
+    Array.foldl
+        (\arm found ->
+            when found is
+                Just _ ->
+                    found
+
+                Nothing ->
+                    when arm.pattern is
+                        PatNamed { arguments = args } ->
+                            firstListColumn args
+
+                        _ ->
+                            Nothing)
+        Nothing
+        group
+
+
+otherColumnsIrrefutableAt : Int -> CaseArm -> Bool
+otherColumnsIrrefutableAt listIndex arm =
+    when arm.pattern is
+        PatNamed { arguments = args } ->
+            Array.indexedFoldl
+                (\i arg ok -> ok && (i == listIndex || isIrrefutablePat arg))
+                True
+                args
+
+        _ ->
+            True
 
 
 isReservedMap : String -> Bool

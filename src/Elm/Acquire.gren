@@ -608,16 +608,57 @@ ensureArchive permissions options endpoint archivePath =
                             Task.fail (PortError.create "CACHE_INVALID" "Archive cache path has no parent.")
 
                         Just parent ->
-                            System.File.ensureDirectory permissions.fileSystem parent
-                                |> Task.andThen (\_ -> fetchBytes permissions.http endpoint.url)
+                            downloadArchiveWithUniqueness permissions options endpoint archivePath parent
+            )
+
+
+downloadArchiveWithUniqueness : Permissions -> Options -> Endpoint -> Path -> Path -> Task Error Path
+downloadArchiveWithUniqueness permissions options endpoint archivePath parent =
+    System.File.ensureDirectory permissions.fileSystem parent
+        |> Task.andThen (\_ -> generateUniqueSuffix permissions.childProcess)
+        |> Task.andThen
+            (\uniqueSuffix ->
+                let
+                    tempPath =
+                        Path.fromPosixString (Path.toPosixString archivePath ++ ".tmp." ++ uniqueSuffix)
+                in
+                fetchBytes permissions.http endpoint.url
+                    |> Task.andThen
+                        (\bytes ->
+                            FileSystem.writeFile permissions.fileSystem bytes tempPath
+                                |> Task.mapError
+                                    (FileSystem.errorToString
+                                        >> PortError.create "FILE_WRITE_FAILED"
+                                    )
                                 |> Task.andThen
-                                    (\bytes ->
-                                        FileSystem.writeFile permissions.fileSystem bytes archivePath
+                                    (\_ ->
+                                        FileSystem.move permissions.fileSystem archivePath tempPath
                                             |> Task.mapError
                                                 (FileSystem.errorToString
-                                                    >> PortError.create "FILE_WRITE_FAILED"
+                                                    >> PortError.create "CACHE_WRITE_FAILED"
                                                 )
+                                            |> Task.onError (adoptWinnersArchive permissions archivePath tempPath)
                                     )
+                        )
+                |> Task.map (\_ -> archivePath)
+            )
+
+
+adoptWinnersArchive : Permissions -> Path -> Path -> Error -> Task Error Path
+adoptWinnersArchive permissions archivePath tempPath moveError =
+    System.File.exists permissions.fileSystem archivePath
+        |> Task.andThen
+            (\finalExists ->
+                removeIfExists permissions.fileSystem tempPath
+                    |> Task.onError (\_ -> Task.succeed {})
+                    |> Task.andThen
+                        (\_ ->
+                            if finalExists then
+                                Task.succeed archivePath
+
+                            else
+                                Task.fail moveError
+                        )
             )
 
 
@@ -733,7 +774,7 @@ verifyArchive platform permission archivePath expected =
 extractArchive : Node.Platform -> Permissions -> Path -> Path -> Task Error Path
 extractArchive platform permissions destination archivePath =
     let
-        partial =
+        partialWithoutUniqueness =
             when Path.parentPath destination is
                 Just parent ->
                     Path.append
@@ -746,53 +787,85 @@ extractArchive platform permissions destination archivePath =
         marker directory =
             Path.append (Path.fromPosixString ".elm-to-gren-extracted") directory
 
+        makePartialUnique uniqueSuffix =
+            let
+                basePath =
+                    Path.toPosixString partialWithoutUniqueness
+            in
+            Path.fromPosixString (basePath ++ "." ++ uniqueSuffix)
+
         cleanPartial error =
-            removeIfExists permissions.fileSystem partial
+            removeIfExists permissions.fileSystem partialWithoutUniqueness
                 |> Task.onError (\_ -> Task.succeed {})
                 |> Task.andThen (\_ -> Task.fail error)
+
+        adoptWinnersResultAfterRenameFail partial error =
+            System.File.exists permissions.fileSystem destination
+                |> Task.andThen
+                    (\exists ->
+                        removeIfExists permissions.fileSystem partial
+                            |> Task.onError (\_ -> Task.succeed {})
+                            |> Task.andThen
+                                (\_ ->
+                                    if exists then
+                                        Task.succeed destination
+
+                                    else
+                                        Task.fail error
+                                )
+                    )
     in
-    System.File.exists permissions.fileSystem (marker destination)
+    System.File.exists permissions.fileSystem destination
         |> Task.andThen
-            (\complete ->
-                if complete then
+            (\finalExists ->
+                if finalExists then
+                    -- Winner already extracted; adopt their result
                     Task.succeed destination
 
                 else
-                    removeIfExists permissions.fileSystem destination
-                        |> Task.andThen (\_ -> removeIfExists permissions.fileSystem partial)
-                        |> Task.andThen (\_ -> validateArchiveEntries platform permissions.childProcess archivePath)
-                        |> Task.andThen (\_ -> System.File.ensureDirectory permissions.fileSystem partial)
+                    generateUniqueSuffix permissions.childProcess
                         |> Task.andThen
-                            (\_ ->
-                                System.Process.run permissions.childProcess
-                                    { program = "unzip"
-                                    , arguments =
-                                        [ "-q"
-                                        , System.File.pathToString platform archivePath
-                                        , "-d"
-                                        , System.File.pathToString platform partial
-                                        ]
-                                    , workingDirectory = "."
-                                    , environment = Dict.empty
-                                    , allowedExitCodes = [ 0 ]
-                                    , timeoutMilliseconds = 5 * 60 * 1000
-                                    , maximumOutputBytes = 16 * 1024 * 1024
-                                    }
-                            )
-                        |> Task.andThen
-                            (\_ ->
-                                System.File.writeText permissions.fileSystem (marker partial) "verified\n"
-                            )
-                        |> Task.andThen
-                            (\_ ->
-                                FileSystem.move permissions.fileSystem destination partial
-                                    |> Task.mapError
-                                        (FileSystem.errorToString
-                                            >> PortError.create "CACHE_WRITE_FAILED"
+                            (\uniqueSuffix ->
+                                let
+                                    partial =
+                                        makePartialUnique uniqueSuffix
+                                in
+                                validateArchiveEntries platform permissions.childProcess archivePath
+                                    |> Task.andThen (\_ -> System.File.ensureDirectory permissions.fileSystem partial)
+                                    |> Task.andThen
+                                        (\_ ->
+                                            System.Process.run permissions.childProcess
+                                                { program = "unzip"
+                                                , arguments =
+                                                    [ "-q"
+                                                    , "-n"
+                                                    , System.File.pathToString platform archivePath
+                                                    , "-d"
+                                                    , System.File.pathToString platform partial
+                                                    ]
+                                                , workingDirectory = "."
+                                                , environment = Dict.empty
+                                                , allowedExitCodes = [ 0 ]
+                                                , timeoutMilliseconds = 5 * 60 * 1000
+                                                , maximumOutputBytes = 16 * 1024 * 1024
+                                                }
                                         )
+                                    |> Task.andThen
+                                        (\_ ->
+                                            System.File.writeText permissions.fileSystem (marker partial) "verified\n"
+                                        )
+                                    |> Task.andThen
+                                        (\_ ->
+                                            FileSystem.move permissions.fileSystem destination partial
+                                                |> Task.mapError
+                                                    (FileSystem.errorToString
+                                                        >> PortError.create "CACHE_WRITE_FAILED"
+                                                    )
+                                                |> Task.onError (adoptWinnersResultAfterRenameFail partial)
+                                        )
+                                    |> Task.map (\_ -> destination)
+                                    |> Task.onError (cleanPartial)
                             )
-                        |> Task.map (\_ -> destination)
-                        |> Task.onError cleanPartial
             )
 
 
@@ -850,6 +923,35 @@ removeIfExists permission path =
                 else
                     Task.succeed {}
             )
+
+
+{-| Generate a unique suffix for temporary files/directories.
+Uses current time to ensure uniqueness across concurrent processes.
+-}
+generateUniqueSuffix : ChildProcess.Permission -> Task Error String
+generateUniqueSuffix permission =
+    System.Process.run permission
+        { program = "date"
+        , arguments = [ "+%s%N" ]
+        , workingDirectory = "."
+        , environment = Dict.empty
+        , allowedExitCodes = [ 0 ]
+        , timeoutMilliseconds = 5 * 1000
+        , maximumOutputBytes = 1024
+        }
+        |> Task.andThen
+            (\result ->
+                String.trim result.stdout
+                    |> (\timestamp ->
+                            if String.isEmpty timestamp then
+                                Task.fail (PortError.create "UNIQUE_SUFFIX_FAILED" "Failed to generate timestamp suffix.")
+
+                            else
+                                Task.succeed timestamp
+                    )
+            )
+        |> Task.mapError
+            (\_ -> PortError.create "UNIQUE_SUFFIX_FAILED" "Could not generate unique suffix for temporary path.")
 
 
 validateEntryNames : Array String -> Result String {}

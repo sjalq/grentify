@@ -238,6 +238,18 @@ Coverage and pipeline:
   while its declarations indent at the statement's base column — shallower
   than the `let` keyword, which Gren's layout rules reject. Canonical fix:
   a let-expression in argument position always starts on its own line.
+- **D30 review-app compile races under sustained suite concurrency** (OPEN,
+  blocks the M4 gate's full -j5 runs): even with warm shared caches, elm-review
+  recompiles a dep-set variant app mid-suite and concurrent compiles in the
+  shared elm-home/review project emit non-JSON elm errors ("+------" art) that
+  crash elm-review's build.js ("is not valid JSON"). W3.2b's single retry is
+  insufficient — both attempts land inside the same contention window. All
+  specimens port clean solo. FIX SHAPE (next session's first bite): a cross-
+  process compile LOCK around the review-app build in src/Review/Runner.gren
+  (lockfile + wait, adopt-the-winner on the compiled artifact), or a serial
+  pre-warm pass of all dep-set variants before suites go parallel. Gate v2
+  evidence: 3 fails in first 70 (monocle hang + 2 race exit-1s), everything
+  else green.
 - **D26 review-app JS corrupted at compile time** (found via W5.3, OPEN,
   URGENT — currently breaks ~6/14 canary): one of the two elm-review compiled
   app variants (hash 22ef79…, selected per analyzed package's dep-set) is

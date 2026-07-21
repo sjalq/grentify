@@ -1,0 +1,254 @@
+module Ast.NameSubTest exposing (tests)
+
+{-| Regression: `Ast.NameSub`'s bare-remap rewrite (`collectBareRemaps` /
+`rewriteBareRemaps`) is a second, independent bare-name qualifier — sibling to
+`Ast.BareResolve`'s D23 repair — and used to have NO scope tracking at all, so
+it blindly requalified locally-bound shadows of an exposed import name.
+
+Concretely: `import Html.Attributes exposing (classList)` where
+`withClassList classList (DialogState state) = DialogState { state |
+classList = classList }` had its own `classList` PARAMETER rewritten to the
+`ElmToGren.Compat.Html.Attributes.classList` adapter target — a function
+value substituted where a bare array was expected, a TYPE MISMATCH. NameSub
+must respect the same scope law `Ast.BareResolve` does (shared via
+`Ast.Scope`): a local binding always wins over an import.
+-}
+
+import Array exposing (Array)
+import Ast.NameSub as NameSub
+import Ast.Types as T exposing (Expr(..), LetDecl(..), Pattern(..))
+import Dict
+import Mapping.Types exposing (Registry)
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+{-| Minimal registry: `Html.Attributes`' `classList` remaps to the
+multi-segment Compat adapter target — the exact shape `collectBareRemaps`
+looks for (a bare exposed name whose catalog target contains a ".").
+-}
+htmlAttributesRegistry : Registry
+htmlAttributesRegistry =
+    { packageOrder = []
+    , packages = Dict.empty
+    , modules =
+        Dict.singleton "Html.Attributes"
+            { source = "Html.Attributes"
+            , target = "Html.Attributes"
+            , values = Dict.singleton "classList" "ElmToGren.Compat.Html.Attributes.classList"
+            , types = Dict.empty
+            }
+    }
+
+
+htmlAttributesImport : T.Import
+htmlAttributesImport =
+    { moduleName = "Html.Attributes"
+    , alias = Just "Attrs"
+    , exposing_ = Just (T.ExposeExplicit [ T.ExposeFunction "classList" ])
+    }
+
+
+fileWith : Array T.Declaration -> T.File
+fileWith declarations =
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = T.NormalModule
+        , moduleName = "Repro"
+        , exposing_ = T.ExposeAll
+        }
+    , comments = []
+    , imports = [ htmlAttributesImport ]
+    , declarations = declarations
+    }
+
+
+bare : String -> Expr
+bare name =
+    ExprVar { moduleName = Nothing, name = name }
+
+
+qualified : String -> String -> Expr
+qualified moduleName name =
+    ExprVar { moduleName = Just moduleName, name = name }
+
+
+expressionOfNamed : String -> T.File -> Maybe Expr
+expressionOfNamed name file =
+    file.declarations
+        |> Array.keepIf
+            (\declaration ->
+                when declaration is
+                    T.DeclFunction function ->
+                        function.name == name
+
+                    _ ->
+                        False
+            )
+        |> Array.first
+        |> Maybe.andThen
+            (\declaration ->
+                when declaration is
+                    T.DeclFunction function ->
+                        Just function.expression
+
+                    _ ->
+                        Nothing
+            )
+
+
+{-| The exact `withClassList` shape: a function parameter shadowing the
+`classList` exposed from `Html.Attributes`, used bare in a record update.
+-}
+withClassListDecl : T.Declaration
+withClassListDecl =
+    T.DeclFunction
+        { name = "withClassList"
+        , documentation = Nothing
+        , signature = Nothing
+        , arguments =
+            [ PatVar "classList"
+            , PatNamed
+                { ref = { moduleName = Nothing, name = "DialogState" }
+                , arguments = [ PatVar "state" ]
+                }
+            ]
+        , expression =
+            ExprApplication
+                [ bare "DialogState"
+                , ExprUpdate
+                    { name = "state"
+                    , fields = [ { name = "classList", value = bare "classList" } ]
+                    }
+                ]
+        }
+
+
+{-| A genuinely-unbound bare `classList` — no local binding shadows it, so it
+must resolve to the adapter target.
+-}
+unboundUseDecl : T.Declaration
+unboundUseDecl =
+    T.DeclFunction
+        { name = "unboundUse"
+        , documentation = Nothing
+        , signature = Nothing
+        , arguments = []
+        , expression = bare "classList"
+        }
+
+
+{-| A let-bound `classList` shadowing the import inside its own function. -}
+letShadowDecl : T.Declaration
+letShadowDecl =
+    T.DeclFunction
+        { name = "letShadow"
+        , documentation = Nothing
+        , signature = Nothing
+        , arguments = []
+        , expression =
+            ExprLet
+                { declarations =
+                    [ LetFunction { name = "classList", arguments = [], expression = ExprList [] }
+                    , LetFunction { name = "keptLocal", arguments = [], expression = bare "classList" }
+                    ]
+                , expression = bare "keptLocal"
+                }
+        }
+
+
+{-| A sibling top-level function with no local binding at all — must still be
+remapped, proving the fix is scoped per-declaration, not disabled module-wide.
+-}
+siblingUnboundDecl : T.Declaration
+siblingUnboundDecl =
+    T.DeclFunction
+        { name = "siblingUnbound"
+        , documentation = Nothing
+        , signature = Nothing
+        , arguments = []
+        , expression = bare "classList"
+        }
+
+
+tests : Array TestResult
+tests =
+    [ paramShadowStaysLocal
+    , unboundBareIsRemapped
+    , letBoundStaysLocalSiblingRemapped
+    ]
+
+
+paramShadowStaysLocal : TestResult
+paramShadowStaysLocal =
+    let
+        result =
+            NameSub.apply htmlAttributesRegistry (fileWith [ withClassListDecl ])
+                |> expressionOfNamed "withClassList"
+
+        stillLocal =
+            when result is
+                Just (ExprApplication parts) ->
+                    Array.get 1 parts
+                        == Just
+                            (ExprUpdate
+                                { name = "state"
+                                , fields = [ { name = "classList", value = bare "classList" } ]
+                                }
+                            )
+
+                _ ->
+                    False
+    in
+    { name = "withClassList: param-bound `classList` stays local in the record-update RHS"
+    , passed = stillLocal
+    , details = "DialogState { state | classList = classList } must not requalify the parameter"
+    }
+
+
+unboundBareIsRemapped : TestResult
+unboundBareIsRemapped =
+    let
+        result =
+            NameSub.apply htmlAttributesRegistry (fileWith [ unboundUseDecl ])
+                |> expressionOfNamed "unboundUse"
+    in
+    { name = "a genuinely-unbound bare `classList` is remapped to the adapter"
+    , passed = result == Just (qualified "ElmToGren.Compat.Html.Attributes" "classList")
+    , details = "no local binding shadows it; the catalog's multi-segment remap applies"
+    }
+
+
+letBoundStaysLocalSiblingRemapped : TestResult
+letBoundStaysLocalSiblingRemapped =
+    let
+        transformed =
+            NameSub.apply htmlAttributesRegistry (fileWith [ letShadowDecl, siblingUnboundDecl ])
+
+        letBody =
+            expressionOfNamed "letShadow" transformed
+
+        siblingBody =
+            expressionOfNamed "siblingUnbound" transformed
+
+        letStillLocal =
+            when letBody is
+                Just (ExprLet letBlock) ->
+                    Array.get 1 letBlock.declarations
+                        == Just (LetFunction { name = "keptLocal", arguments = [], expression = bare "classList" })
+
+                _ ->
+                    False
+
+        siblingRemapped =
+            siblingBody == Just (qualified "ElmToGren.Compat.Html.Attributes" "classList")
+    in
+    { name = "let-bound `classList` stays local while a sibling unbound use is remapped"
+    , passed = letStillLocal && siblingRemapped
+    , details = "scope is per-declaration: one function's let binding doesn't leak into another's"
+    }

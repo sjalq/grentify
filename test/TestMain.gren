@@ -5,6 +5,7 @@ import Ast.BareResolveTest
 import Ast.CtorLawTest
 import Ast.EvalPropTest
 import Ast.EvalTest
+import Ast.NameSubTest
 import Ast.PrintTest
 import Ast.ReservedTest
 import Ast.RecordAliasTest
@@ -85,6 +86,7 @@ allChecks =
     , Ast.CtorLawTest.tests
     , Ast.EvalPropTest.tests
     , Ast.EvalTest.tests
+    , Ast.NameSubTest.tests
     , Ast.PrintTest.tests
     , Ast.ReservedTest.tests
     , Ast.RecordAliasTest.tests

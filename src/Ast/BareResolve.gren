@@ -15,10 +15,15 @@ receive catalog mapping like any other qualified ref.
 Names from `exposing (..)` imports are untouched (their member lists are not
 known here); a shadow-leak on such a name would survive — accepted residual,
 see D23 in docs/PLAN.md.
+
+The scope walk (which names are bound at a given use site) is shared with
+`Ast.NameSub` via `Ast.Scope` — see that module's header for why a second,
+independent tracker is exactly how this bug class breeds.
 -}
 
 import Array exposing (Array)
-import Ast.Types as T exposing (Expr(..), LetDecl(..), Pattern(..))
+import Ast.Scope as Scope
+import Ast.Types as T exposing (NamedRef)
 import Dict exposing (Dict)
 import Set exposing (Set)
 
@@ -31,21 +36,12 @@ apply file =
         exposedImports =
             importedNameTable file.imports
 
-        topLevelNames =
-            file.declarations
-                |> Array.foldl
-                    (\declaration acc ->
-                        when declaration is
-                            T.DeclFunction function ->
-                                Set.set function.name acc
+        qualifiedTargets : Dict String NamedRef
+        qualifiedTargets =
+            Dict.map (\name sourceModule -> { moduleName = Just sourceModule, name = name }) exposedImports
 
-                            T.DeclDestructure destructure ->
-                                addPatternNames destructure.pattern acc
-
-                            _ ->
-                                acc
-                    )
-                    Set.empty
+        topLevel =
+            Scope.topLevelNames file.declarations
     in
     if Dict.isEmpty exposedImports then
         file
@@ -54,7 +50,7 @@ apply file =
         { file
             | declarations =
                 Array.map
-                    (resolveDeclaration exposedImports topLevelNames)
+                    (resolveDeclaration qualifiedTargets topLevel)
                     file.declarations
         }
 
@@ -88,182 +84,26 @@ importedNameTable imports =
         imports
 
 
-resolveDeclaration : Dict String String -> Set String -> T.Declaration -> T.Declaration
-resolveDeclaration exposedImports topLevel declaration =
+resolveDeclaration : Dict String NamedRef -> Set String -> T.Declaration -> T.Declaration
+resolveDeclaration qualifiedTargets topLevel declaration =
     when declaration is
         T.DeclFunction function ->
             T.DeclFunction
                 { function
                     | expression =
-                        resolveExpr
-                            exposedImports
-                            (Array.foldl addPatternNames topLevel function.arguments)
+                        Scope.rewriteBareVars
+                            identity
+                            qualifiedTargets
+                            (Array.foldl Scope.addPatternNames topLevel function.arguments)
                             function.expression
                 }
 
         T.DeclDestructure destructure ->
             T.DeclDestructure
                 { destructure
-                    | expression = resolveExpr exposedImports topLevel destructure.expression
+                    | expression =
+                        Scope.rewriteBareVars identity qualifiedTargets topLevel destructure.expression
                 }
 
         _ ->
             declaration
-
-
-resolveExpr : Dict String String -> Set String -> Expr -> Expr
-resolveExpr exposedImports bound expression =
-    let
-        continue =
-            resolveExpr exposedImports bound
-    in
-    when expression is
-        ExprVar ref ->
-            when ref.moduleName is
-                Just _ ->
-                    expression
-
-                Nothing ->
-                    if Set.member ref.name bound then
-                        expression
-
-                    else
-                        when Dict.get ref.name exposedImports is
-                            Just sourceModule ->
-                                ExprVar { moduleName = Just sourceModule, name = ref.name }
-
-                            Nothing ->
-                                expression
-
-        ExprApplication parts ->
-            ExprApplication (Array.map continue parts)
-
-        ExprBinop binop ->
-            ExprBinop { binop | left = continue binop.left, right = continue binop.right }
-
-        ExprIf branch ->
-            ExprIf
-                { condition = continue branch.condition
-                , then_ = continue branch.then_
-                , else_ = continue branch.else_
-                }
-
-        ExprNegation inner ->
-            ExprNegation (continue inner)
-
-        ExprTuple items ->
-            ExprTuple (Array.map continue items)
-
-        ExprLet letBlock ->
-            let
-                boundWithDecls =
-                    Array.foldl addLetDeclNames bound letBlock.declarations
-            in
-            ExprLet
-                { declarations =
-                    Array.map
-                        (\letDecl ->
-                            when letDecl is
-                                LetFunction function ->
-                                    LetFunction
-                                        { function
-                                            | expression =
-                                                resolveExpr
-                                                    exposedImports
-                                                    (Array.foldl addPatternNames boundWithDecls function.arguments)
-                                                    function.expression
-                                        }
-
-                                LetDestructure destructure ->
-                                    LetDestructure
-                                        { destructure
-                                            | expression = resolveExpr exposedImports boundWithDecls destructure.expression
-                                        }
-                        )
-                        letBlock.declarations
-                , expression = resolveExpr exposedImports boundWithDecls letBlock.expression
-                }
-
-        ExprCase caseBlock ->
-            ExprCase
-                { expression = continue caseBlock.expression
-                , cases =
-                    Array.map
-                        (\arm ->
-                            { pattern = arm.pattern
-                            , body =
-                                resolveExpr
-                                    exposedImports
-                                    (addPatternNames arm.pattern bound)
-                                    arm.body
-                            }
-                        )
-                        caseBlock.cases
-                }
-
-        ExprLambda lambda ->
-            ExprLambda
-                { arguments = lambda.arguments
-                , expression =
-                    resolveExpr
-                        exposedImports
-                        (Array.foldl addPatternNames bound lambda.arguments)
-                        lambda.expression
-                }
-
-        ExprRecord fields ->
-            ExprRecord (Array.map (\field -> { field | value = continue field.value }) fields)
-
-        ExprList items ->
-            ExprList (Array.map continue items)
-
-        ExprAccess access ->
-            ExprAccess { access | record = continue access.record }
-
-        ExprUpdate update ->
-            ExprUpdate
-                { update | fields = Array.map (\field -> { field | value = continue field.value }) update.fields }
-
-        _ ->
-            expression
-
-
-addLetDeclNames : LetDecl -> Set String -> Set String
-addLetDeclNames letDecl acc =
-    when letDecl is
-        LetFunction function ->
-            Set.set function.name acc
-
-        LetDestructure destructure ->
-            addPatternNames destructure.pattern acc
-
-
-addPatternNames : Pattern -> Set String -> Set String
-addPatternNames pattern acc =
-    when pattern is
-        PatVar name ->
-            Set.set name acc
-
-        PatAs alias_ ->
-            addPatternNames alias_.pattern (Set.set alias_.name acc)
-
-        PatTuple items ->
-            Array.foldl addPatternNames acc items
-
-        PatList items ->
-            Array.foldl addPatternNames acc items
-
-        PatCons cons ->
-            addPatternNames cons.tail (addPatternNames cons.head acc)
-
-        PatRecord fields ->
-            Array.foldl Set.set acc fields
-
-        PatRecordBind fields ->
-            Array.foldl (\field inner -> addPatternNames field.pattern inner) acc fields
-
-        PatNamed named ->
-            Array.foldl addPatternNames acc named.arguments
-
-        _ ->
-            acc

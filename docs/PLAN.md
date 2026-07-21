@@ -598,6 +598,11 @@ no compiler in the loop.
         Html.Attributes.classList => Compat fn where pairs expected.
         D23-family extractor scope leak at record-update position; needs
         the same repair-law extension (BareResolve/AstEncode). Fixable.
+        FIXED (D27, Sonnet + Fable QA): the true culprit was a THIRD
+        rewriter — NameSub's scope-blind bare-remap walker clobbering
+        locally-bound shadows after BareResolve got them right. Scope
+        tracking consolidated into new src/Ast/Scope.gren shared by both
+        passes (G2); NameSubTest regressions; modal-dialog ports verified.
       - elm-ionicons: PORTS CLEAN, verified=true (report on disk) — the
         old timeout died with the intervening speedups. Done; "no package
         is too big" upheld with zero exemptions.

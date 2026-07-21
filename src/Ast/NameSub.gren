@@ -9,6 +9,7 @@ matching the edit-path seed in `Transform.Pipeline.collectMappingEdits`.
 -}
 
 import Array exposing ( Array )
+import Ast.Scope as Scope
 import Ast.Types as Types exposing
     ( Declaration(..)
     , Exposing(..)
@@ -29,6 +30,7 @@ import Dict exposing ( Dict )
 import Mapping.Registry as Registry
 import Mapping.Types exposing ( ModuleMapping, Registry )
 import Maybe exposing ( Maybe(..) )
+import Set exposing ( Set )
 
 
 apply : Registry -> File -> File
@@ -41,13 +43,20 @@ apply registry file =
         bareRemaps =
             collectBareRemaps registry file.imports
 
+        -- Law: a bare-remap name shadowed by a local binding (top-level decl,
+        -- function/lambda argument, let, case pattern) is never rewritten — the
+        -- local binding wins over the import, per Elm scoping. Scope walk is
+        -- shared with Ast.BareResolve via Ast.Scope; see that module's header.
+        topLevel =
+            Scope.topLevelNames file.declarations
+
         withMapped =
             { file
                 | imports = Array.map (subImport registry) file.imports
                 , declarations =
                       file.declarations
                           |> Array.map (subDeclaration registry)
-                          |> Array.map (rewriteBareRemaps bareRemaps)
+                          |> Array.map (rewriteBareRemaps topLevel bareRemaps)
                 , moduleDefinition = subModuleDef registry file.moduleDefinition
             }
     in
@@ -111,8 +120,8 @@ exposedItemName item =
             Nothing
 
 
-rewriteBareRemaps : Dict String NamedRef -> Declaration -> Declaration
-rewriteBareRemaps remaps declaration =
+rewriteBareRemaps : Set String -> Dict String NamedRef -> Declaration -> Declaration
+rewriteBareRemaps topLevel remaps declaration =
     if Array.isEmpty (Dict.keys remaps) then
         declaration
 
@@ -126,7 +135,12 @@ rewriteBareRemaps remaps declaration =
                                   fn.signature
                         , arguments =
                               Array.map (rewriteBarePattern remaps) fn.arguments
-                        , expression = rewriteBareExpr remaps fn.expression
+                        , expression =
+                              Scope.rewriteBareVars
+                                  (rewriteBarePattern remaps)
+                                  remaps
+                                  (Array.foldl Scope.addPatternNames topLevel fn.arguments)
+                                  fn.expression
                     }
 
             DeclAlias aliasDecl ->
@@ -152,7 +166,8 @@ rewriteBareRemaps remaps declaration =
             DeclDestructure { pattern = pattern, expression = expression } ->
                 DeclDestructure
                     { pattern = rewriteBarePattern remaps pattern
-                    , expression = rewriteBareExpr remaps expression
+                    , expression =
+                          Scope.rewriteBareVars (rewriteBarePattern remaps) remaps topLevel expression
                     }
 
             DeclInfix ->
@@ -205,17 +220,6 @@ rewriteBareType remaps typeAnn =
 
         _ ->
             typeAnn
-
-
-rewriteBareExpr : Dict String NamedRef -> Expr -> Expr
-rewriteBareExpr remaps expr =
-    when expr is
-        ExprVar ref ->
-            ExprVar (rewriteBareRef remaps ref)
-
-        _ ->
-            Walk.mapExprChildrenWithPatterns (rewriteBareExpr remaps)
-                (rewriteBarePattern remaps) expr
 
 
 rewriteBarePattern : Dict String NamedRef -> Pattern -> Pattern

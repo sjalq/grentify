@@ -145,17 +145,22 @@ function adaptiveTimeoutMs(metrics, baseTimeoutMs) {
 }
 
 /**
+ * Classify a timeout as scale or hang, based on volume classification.
+ *
+ * Decision table (only volume packages may be "scale"):
+ * - NOT timedOut               => return "timeout"
+ * - timedOut AND volume        => return "scale"
+ * - timedOut AND NOT volume    => return "hang" (regardless of budgetMs)
+ *
  * @param {boolean} timedOut
  * @param {VolumeMetrics|null} metrics
- * @param {number} budgetMs
- * @returns {"timeout"|"scale"}
+ * @param {number} budgetMs (unused; budget size never excuses a non-volume timeout)
+ * @returns {"timeout"|"scale"|"hang"}
  */
 function classifyTimeout(timedOut, metrics, budgetMs) {
   if (!timedOut) return "timeout";
   if (metrics && metrics.volume) return "scale";
-  // If budget already elevated, still call scale when package looks large mid-run
-  if (budgetMs >= 8 * 60_000) return "scale";
-  return "timeout";
+  return "hang";
 }
 
 function walk(dir, onFile, depth = 0) {

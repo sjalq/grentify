@@ -541,6 +541,18 @@ no compiler in the loop.
       the volume set.
 - [ ] W5.1 [M4] D11 elm-review: fix the embedded-docs type-mismatch class.
       Prove: tier 2 (`--package jfmengels/elm-review@2.16.6`).
+      CENSUS DONE (2026-07-21, full port log): only 4 classes / 6 sites:
+      - [ ] W5.1a BAD UNICODE ESCAPE (1 site, Ansi): printer emits \u001b
+            bare; Gren needs \u{001B}. Printer escape-sequence bug.
+      - [ ] W5.1b NAMING ERROR `newFixes` (3 sites, 2 modules): a binding
+            vanished — suspect rename/binder pass dropping a let/lambda
+            name (Review.Error.Fixes).
+      - [ ] W5.1c TYPE MISMATCH (1 site, ModuleNameLookupTable.Internal):
+            Dict.set key via toRangeLike — D24-family comparability under
+            tuple lowering.
+      - [ ] W5.1d UNFINISHED RECORD (1 site): printer layout breaks inside
+            the giant embedded-docs record literal (the original "embedded
+            docs" suspicion — actually the smallest class).
 - [x] W5.3 [M4] D12 treeview ctor-arity: root-cause the cross-package rewrite miss;
       fix. Prove: tier 2 on both treeviews + tier 1.
       DONE (with a plot twist): root cause was OUR extractor's hardcoded

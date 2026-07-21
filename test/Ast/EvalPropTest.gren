@@ -191,6 +191,10 @@ regressionFixtureChecks =
       , passed = fixtureAgreesInt d4Fixture 0
       , details = "pre == post == 0 on Batch []"
       }
+    , { name = "regression: W5.1b empty+var merge binds var name (Edit [7,8] == 15)"
+      , passed = fixtureAgreesInt w51bFixture 15
+      , details = "pre == post == 15 on Edit [7,8]; newFixes binding preserved"
+      }
     ]
 
 
@@ -258,6 +262,74 @@ d4Fixture =
           , body = ExprInt 0
           }
         ]
+
+
+{-| W5.1b: ctor with empty+var list peers.
+Type F = Remove | Edit (List Int).
+Scrutinee: Edit [7,8].
+Arms: Remove -> 0; Edit [] -> 1; Edit newFixes -> (case newFixes is [a,b] -> a+b; _ -> 0).
+Expected on Edit [7,8]: arm 3 matched, newFixes=[7,8], inner case matches, returns 7+8=15.
+-}
+w51bFixture : File
+w51bFixture =
+    let
+        innerCase =
+            ExprCase
+                { expression = bare "newFixes"
+                , cases =
+                    [ { pattern = PatList [ PatVar "a", PatVar "b" ]
+                      , body = plus (bare "a") (bare "b")
+                      }
+                    , { pattern = PatAll, body = ExprInt 0 }
+                    ]
+                }
+
+        scrutinee =
+            ExprApplication [ bare "Edit", ExprList [ ExprInt 7, ExprInt 8 ] ]
+
+        arms =
+            [ { pattern =
+                    PatNamed
+                        { ref = { moduleName = Nothing, name = "Remove" }
+                        , arguments = []
+                        }
+              , body = ExprInt 0
+              }
+            , { pattern =
+                    PatNamed
+                        { ref = { moduleName = Nothing, name = "Edit" }
+                        , arguments = [ PatList [] ]
+                        }
+              , body = ExprInt 1
+              }
+            , { pattern =
+                    PatNamed
+                        { ref = { moduleName = Nothing, name = "Edit" }
+                        , arguments = [ PatVar "newFixes" ]
+                        }
+              , body = innerCase
+              }
+            ]
+    in
+    buildFileWith
+        [ DeclCustomType
+            { name = "F"
+            , documentation = Nothing
+            , generics = []
+            , constructors =
+                [ { name = "Remove", arguments = [] }
+                , { name = "Edit"
+                  , arguments =
+                        [ Ast.Types.TypeTyped
+                            { ref = { moduleName = Just "List", name = "List" }
+                            , arguments = [ Ast.Types.TypeGeneric "a" ]
+                            }
+                        ]
+                  }
+                ]
+            }
+        ]
+        (ExprCase { expression = scrutinee, cases = arms })
 
 
 batchPat : Pattern -> Pattern

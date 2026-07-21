@@ -2849,10 +2849,37 @@ firstListColumn args =
                         Nothing) Nothing args
 
 
+{-| Find sibling arm of the same ctor that binds the whole list as a bare variable.
+For example, `Edit newFixes` where newFixes should bind the entire list value.
+-}
+ctorWholeListVarArm : String -> Array CaseArm -> Maybe { name : String, body : Expr }
+ctorWholeListVarArm ctorName arms =
+    arms
+        |> Array.mapAndKeepJust
+            (\arm ->
+                when arm.pattern is
+                    PatNamed { ref = ref, arguments = args } ->
+                        if ref.name /= ctorName then
+                            Nothing
+
+                        else
+                            when Array.first args is
+                                Just (PatVar name) ->
+                                    Just { name = name, body = arm.body }
+
+                                _ ->
+                                    Nothing
+
+                    _ ->
+                        Nothing)
+        |> Array.first
+
+
 {-| Collapse all arms of one ctor into `Ctor … clVar … -> <list peel>`, reusing
 the plain list-case totalizer so every peer merges with first-match order. A peel
 that runs out of arms falls through to the case's irrefutable arm (never a
-reachable `Debug.todo`); the whole scrutinee rebinds a named catch-all.
+reachable `Debug.todo`); the whole scrutinee rebinds a named catch-all. Whole-list
+variable bindings (e.g. `Edit newFixes`) provide fallback for non-empty lists.
 -}
 collapseCtorGroup :
     SoleCtors
@@ -2915,29 +2942,45 @@ collapseCtorGroup sole seed scrutinee catchAll ctorName arms =
                                             unwrapCtorListArm e.arm
                                                 placement.index colVar) indexed
 
-                                -- Non-exhaustive peel falls through to the case's
-                                -- irrefutable arm; a named catch-all rebinds the
-                                -- whole scrutinee (D4).
-                                fallthrough =
-                                    when catchAll is
-                                        Just entry ->
-                                            when entry.name is
-                                                Just n ->
-                                                    [ { pattern = PatAll
-                                                      , body =
-                                                            wrapLet n scrutinee
-                                                                entry.body
-                                                      }
-                                                    ]
+                                -- Non-exhaustive peel falls through to:
+                                -- (1) a sibling ctor arm that binds the whole list
+                                --     as a variable (e.g., `Edit newFixes`), OR
+                                -- (2) the case's irrefutable arm (e.g., `_` catch-all)
+                                -- For case (1), bind the variable to the list value
+                                -- before running the arm's body.
+                                wholeListVarArm =
+                                    ctorWholeListVarArm ctorName arms
 
-                                                Nothing ->
-                                                    [ { pattern = PatAll
-                                                      , body = entry.body
-                                                      }
-                                                    ]
+                                fallthrough =
+                                    when wholeListVarArm is
+                                        Just entry ->
+                                            [ { pattern = PatAll
+                                              , body =
+                                                    wrapLet entry.name
+                                                        (var listVar) entry.body
+                                              }
+                                            ]
 
                                         Nothing ->
-                                            []
+                                            when catchAll is
+                                                Just entry ->
+                                                    when entry.name is
+                                                        Just n ->
+                                                            [ { pattern = PatAll
+                                                              , body =
+                                                                    wrapLet n scrutinee
+                                                                        entry.body
+                                                              }
+                                                            ]
+
+                                                        Nothing ->
+                                                            [ { pattern = PatAll
+                                                              , body = entry.body
+                                                              }
+                                                            ]
+
+                                                Nothing ->
+                                                    []
                             in
                             Just
                                 { pattern =
@@ -3166,10 +3209,24 @@ rewriteCtorArm sole seed allArms arm =
                 consPeer =
                     ctorConsListPeer ref.name allArms
 
+                openListArm =
+                    ctorOpenListFallbackArm ref.name allArms
+
                 nonEmptyFb =
-                    ctorOpenListFallback ref.name allArms
-                        |> Maybe.withDefault
-                            (todo "elm-to-gren: expected empty list")
+                    when openListArm is
+                        Just entry ->
+                            when entry.varName is
+                                Just varName ->
+                                    -- Body references the whole list as a variable;
+                                    -- will be bound to the actual list value in
+                                    -- peelBoundListMerged
+                                    entry.body
+
+                                Nothing ->
+                                    entry.body
+
+                        Nothing ->
+                            todo "elm-to-gren: expected empty list"
 
                 prepared =
                     Array.indexedMap (\i arg -> prepareCtorArg (seed + i) arg)
@@ -3190,8 +3247,9 @@ rewriteCtorArm sole seed allArms arm =
                             (\item body ->
                                 Array.foldl
                                     (\bind inner ->
-                                        peelBoundListMerged sole bind body
-                                            emptyFb nonEmptyFb consPeer) body
+                                        peelBoundListMergedWithFallback sole bind
+                                            body emptyFb nonEmptyFb consPeer
+                                            openListArm) body
                                     item.listBinds) arm.body prepared
                     }
 
@@ -3199,10 +3257,15 @@ rewriteCtorArm sole seed allArms arm =
             Nothing
 
 
-{-| Body of a later arm `Ctor _` / `Ctor xs` — used when `Ctor []` sees a non-empty list.
+{-| Body and var name of a later arm `Ctor _` / `Ctor xs` — used when `Ctor []`
+sees a non-empty list. When the arm binds the whole list as a variable, return
+the name so it can be bound to the actual list value.
 -}
-ctorOpenListFallback : String -> Array CaseArm -> Maybe Expr
-ctorOpenListFallback ctorName arms =
+ctorOpenListFallbackArm :
+    String
+    -> Array CaseArm
+    -> Maybe { varName : Maybe String, body : Expr }
+ctorOpenListFallbackArm ctorName arms =
     arms
         |> Array.mapAndKeepJust
             (\arm ->
@@ -3214,10 +3277,10 @@ ctorOpenListFallback ctorName arms =
                         else
                             when Array.first args is
                                 Just PatAll ->
-                                    Just arm.body
+                                    Just { varName = Nothing, body = arm.body }
 
-                                Just (PatVar _) ->
-                                    Just arm.body
+                                Just (PatVar name) ->
+                                    Just { varName = Just name, body = arm.body }
 
                                 _ ->
                                     Nothing
@@ -3225,6 +3288,14 @@ ctorOpenListFallback ctorName arms =
                     _ ->
                         Nothing)
         |> Array.first
+
+
+{-| Body of a later arm `Ctor _` / `Ctor xs` — used when `Ctor []` sees a non-empty list.
+-}
+ctorOpenListFallback : String -> Array CaseArm -> Maybe Expr
+ctorOpenListFallback ctorName arms =
+    ctorOpenListFallbackArm ctorName arms
+        |> Maybe.map .body
 
 
 {-| Peer arm `Ctor … (x :: xs)` (possibly nested under single-arg ctors) for
@@ -3444,6 +3515,53 @@ prepareCtorArg seed arg =
 
                         else
                             { pattern = arg, listBinds = [], failed = False }
+
+
+{-| Peel a list bound under a ctor arm, with optional fallback info.
+When this is the exact-empty arm and a cons peer exists, merge into one
+`popFirst` dispatch. When fallback arm binds the whole list as a variable,
+bind it before running the body.
+-}
+peelBoundListMergedWithFallback :
+    SoleCtors
+    -> ListBind
+    -> Expr
+    -> Expr
+    -> Expr
+    -> Maybe { heads : Array Pattern, rest : Pattern, body : Expr }
+    -> Maybe { varName : Maybe String, body : Expr }
+    -> Expr
+peelBoundListMergedWithFallback sole bind body emptyFb nonEmptyFb consPeer
+        fallbackArm =
+    if bind.exactEmpty then
+        when consPeer is
+            Just peer ->
+                -- Empty + cons siblings: one peel, both bodies.
+                compileListCaseOnVar sole 0 (occupy bind.listName emptyScope)
+                    bind.listName peer.heads peer.rest peer.body body
+
+            Nothing ->
+                -- Peel empty case, and use fallback for non-empty.
+                -- If fallback arm has a variable binding, bind it to the list value.
+                let
+                    actualNonEmptyFb =
+                        when fallbackArm is
+                            Just entry ->
+                                when entry.varName is
+                                    Just varName ->
+                                        wrapLet varName (var bind.listName)
+                                            entry.body
+
+                                    Nothing ->
+                                        entry.body
+
+                            Nothing ->
+                                nonEmptyFb
+                in
+                peelBoundList sole bind body emptyFb actualNonEmptyFb
+
+    else
+        peelBoundList sole bind body emptyFb nonEmptyFb
 
 
 {-| Peel a list bound under a ctor arm. When this is the exact-empty arm and a

@@ -554,6 +554,10 @@ no compiler in the loop.
             case fixes of Remove -> …; Edit [] -> …; Edit newFixes -> …
             Fix guardrails: EvalPropTest 240 cases + a new deterministic
             fixture of exactly this shape asserting agreement.
+            FIXED: whole-list var arm now binds the original payload under
+            its own name in the peel merge; regression fixture green
+            (Edit [7,8] == 15 pre==post), 240 property cases green,
+            canary 14/14.
       - [ ] W5.1c TYPE MISMATCH (1 site, ModuleNameLookupTable.Internal):
             Dict.set key via toRangeLike — D24-family comparability under
             tuple lowering.

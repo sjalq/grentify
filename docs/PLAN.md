@@ -250,6 +250,11 @@ Coverage and pipeline:
   pre-warm pass of all dep-set variants before suites go parallel. Gate v2
   evidence: 3 fails in first 70 (monocle hang + 2 race exit-1s), everything
   else green.
+  FIXED same day: extraction serialized machine-wide via atomic-mkdir
+  spinlock beside the shared review-app cache (withCompileLock in
+  Runner.gren); released on success AND failure paths; canary 14/14 at -j4
+  (90s — the serialization cost, refunded later by the extract cache which
+  bypasses locked extraction on hit).
 - **D26 review-app JS corrupted at compile time** (found via W5.3, OPEN,
   URGENT — currently breaks ~6/14 canary): one of the two elm-review compiled
   app variants (hash 22ef79…, selected per analyzed package's dep-set) is

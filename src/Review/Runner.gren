@@ -45,12 +45,75 @@ reviewCliRelative =
 run : Node.Platform -> ChildProcess.Permission -> Options -> Task Error Extraction
 run platform childProcess options =
     seedReviewApp platform childProcess options
-        |> Task.andThen (\_ -> invokeReview platform childProcess options)
+        |> Task.andThen (\_ -> withCompileLock platform childProcess options)
         |> Task.andThen
             (\extraction ->
                 saveReviewApp platform childProcess options
                     |> Task.map (\_ -> extraction)
             )
+
+
+{-| D30: concurrent elm-review invocations recompile dep-set variant apps in
+shared caches and race — elm emits non-JSON errors and elm-review crashes.
+One retry cannot escape a sustained contention window, so extraction is
+SERIALIZED machine-wide via an atomic mkdir spinlock next to the shared
+review-app cache. The extract cache (planned) makes most entries skip this
+entirely; correctness first.
+-}
+withCompileLock : Node.Platform -> ChildProcess.Permission -> Options -> Task Error Extraction
+withCompileLock platform childProcess options =
+    when options.reviewAppCache is
+        Nothing ->
+            invokeReview platform childProcess options
+
+        Just cacheRoot ->
+            let
+                lockDir =
+                    System.File.pathToString platform cacheRoot ++ ".extract-lock"
+
+                acquire =
+                    System.Process.run childProcess
+                        { program = "bash"
+                        , arguments =
+                            [ "-c"
+                            , "for i in $(seq 1 3000); do if mkdir '"
+                                ++ lockDir
+                                ++ "' 2>/dev/null; then exit 0; fi; sleep 0.2; done; exit 1"
+                            ]
+                        , workingDirectory = "."
+                        , environment = Dict.empty
+                        , allowedExitCodes = [ 0 ]
+                        , timeoutMilliseconds = 660 * 1000
+                        , maximumOutputBytes = 4096
+                        }
+
+                release =
+                    System.Process.run childProcess
+                        { program = "bash"
+                        , arguments = [ "-c", "rmdir '" ++ lockDir ++ "' 2>/dev/null || true" ]
+                        , workingDirectory = "."
+                        , environment = Dict.empty
+                        , allowedExitCodes = [ 0 ]
+                        , timeoutMilliseconds = 10 * 1000
+                        , maximumOutputBytes = 4096
+                        }
+            in
+            acquire
+                |> Task.mapError (\_ -> PortError.create "EXTRACT_LOCK" "Timed out waiting for the extraction lock.")
+                |> Task.andThen
+                    (\_ ->
+                        invokeReview platform childProcess options
+                            |> Task.andThen
+                                (\extraction ->
+                                    release |> Task.map (\_ -> extraction)
+                                )
+                            |> Task.onError
+                                (\reviewError ->
+                                    release
+                                        |> Task.andThen (\_ -> Task.fail reviewError)
+                                        |> Task.onError (\_ -> Task.fail reviewError)
+                                )
+                    )
 
 
 invokeReview : Node.Platform -> ChildProcess.Permission -> Options -> Task Error Extraction

@@ -500,11 +500,15 @@ no compiler in the loop.
       the "-j6" proofs were secretly serial until caught); (d) the version
       probe retries ×3 internally (starved `gren --version` under -j5 was the
       last flake). Proof: elm-ui set at true -j5, rounds 2-4 consecutive 6/6.
-- [ ] W3.3 [M4] D7: package verify always runs `gren docs` (drop the `make Main`
+- [x] W3.3 [M4] D7: package verify always runs `gren docs` (drop the `make Main`
       success short-circuit or run both). Prove: tier 1.
-- [ ] W3.4 [M4] D9: only volume-classified packages may classify `scale`; a non-volume
+      DONE: single path — packages verify via `gren docs` only, applications
+      via `gren make` (G2: dropped the make-first fallback entirely).
+- [x] W3.4 [M4] D9: only volume-classified packages may classify `scale`; a non-volume
       timeout is `hang` and is a bug. Port the classifier decision table to
       `test/ecosystem/lib/volume.test.cjs` (tier-0 node test). Prove: tier 0.
+      DONE: budget-size excuse removed from classifyTimeout; explicit
+      3-row decision table + unit checks wired into test:ledger.
 - [ ] W3.5 [M4] D8: close the volume double-standard. Preferred: profile gren-format
       on the elm-review corpus and make it fast enough to never skip. Acceptable
       fallback: verify both raw and formatted artifacts for non-volume so classes

@@ -20,8 +20,8 @@ verify
         }
     -> Task Error {}
 verify platform permission options =
-    -- Applications must use gren make (docs rejects them).
-    -- Packages try make first (Main present), else fall back to gren docs.
+    -- Applications verify via gren make (docs rejects them).
+    -- Packages verify via gren docs (the definition of a valid package).
     let
         workingDir =
             System.File.pathToString platform options.packageDirectory
@@ -49,16 +49,8 @@ verify platform permission options =
             |> Task.mapError verifyFailed
 
     else
-        runGren makeArgs [ 0, 1 ]
-            |> Task.andThen
-                (\makeOutput ->
-                    if makeOutput.exitCode == 0 then
-                        Task.succeed {}
-
-                    else
-                        runGren docsArgs [ 0 ]
-                            |> Task.map (\_ -> {})
-                )
+        runGren docsArgs [ 0 ]
+            |> Task.map (\_ -> {})
             |> Task.mapError verifyFailed
 
 

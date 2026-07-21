@@ -129,10 +129,12 @@ Tier-0 note: tier 0 includes sub-second node tests; "pure Gren" is not a require
    stamps the ledger where applicable, flips §STATUS to the next milestone.
 10. **Delegation model** (set by the human 2026-07-18, supersedes the original
     "Opus 4.6 subbies" instruction; updated to Haiku by the human 2026-07-19;
-    upgraded to Sonnet by the human 2026-07-21 for throughput):
+    upgraded to Sonnet then to Opus 4.8 by the human 2026-07-21 — "screw it,
+    use opus 4.8 pls, lets get done"):
     the lead agent (Fable) owns types work, laws/specs, project management, and
-    QA of every wave; implementation is farmed out to Sonnet subagents in small,
-    tightly-specced bites that lean on the Gren compiler as their guardrail.
+    QA of every wave; implementation is farmed out to Opus 4.8 subagents in
+    small, tightly-specced bites that lean on the Gren compiler as their
+    guardrail.
     Every subagent deliverable is adversarially reviewed and then re-proven by
     the lead before commit; nothing lands on the lead's say-so alone, and
     nothing lands on a subagent's say-so alone.

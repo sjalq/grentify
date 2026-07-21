@@ -19,7 +19,7 @@ import Elm.Syntax.File exposing (File)
 import Elm.Syntax.Import exposing (Import)
 import Elm.Syntax.Module exposing (Module(..))
 import Elm.Syntax.Node as Node exposing (Node(..))
-import Elm.Syntax.Pattern exposing (Pattern(..))
+import Elm.Syntax.Pattern exposing (Pattern(..), QualifiedNameRef)
 import Elm.Syntax.Range exposing (Location, Range)
 import Elm.Syntax.Type exposing (ValueConstructor)
 import Elm.Syntax.TypeAnnotation exposing (TypeAnnotation(..))
@@ -1438,75 +1438,22 @@ collectPattern ((Node range pattern) as patternNode) context =
                     List.foldl collectPattern withMappedName members
             in
             case namedPlatformPayloadFields qualifiedName.moduleName qualifiedName.name of
+                -- Gren renames multi-arg constructor payloads to records with
+                -- domain field names (Http Response, Json.Decode.Error, …).
+                -- The table is a HINT keyed on distinctive names: it applies
+                -- only when the pattern's arity matches. A mismatch means the
+                -- pattern is a same-named ctor from an unrelated package
+                -- (e.g. treeview's 4-arg Node vs elm-syntax's 2-arg Node),
+                -- which must resolve through the Elm graph like any other.
                 Just fieldNames ->
-                    -- Gren renames multi-arg constructor payloads to records with
-                    -- domain field names (Http Response, Json.Decode.Error, …).
-                    -- Prefer those labels over positional first/second even when
-                    -- elm-review resolved the constructor from the Elm graph.
                     if List.length members == List.length fieldNames then
                         addNamedPayloadEdits fieldNames members withChildren
 
                     else
-                        addConstructorArityDiagnostic range qualifiedName.name (List.length fieldNames) (List.length members) withChildren
+                        resolveConstructorPattern patternNode range qualifiedName members withChildren
 
                 Nothing ->
-                    case resolveReference patternNode qualifiedName.moduleName qualifiedName.name context of
-                        Resolved (ConstructorReference constructor) ->
-                            if constructor.arity > 1 && constructor.arity == List.length members then
-                                addPayloadEdits Types.CustomConstructor "=" members withChildren
-
-                            else if constructor.arity /= List.length members then
-                                addConstructorArityDiagnostic range qualifiedName.name constructor.arity (List.length members) withChildren
-
-                            else
-                                withChildren
-
-                        Resolved (RecordAliasReference _) ->
-                            addDiagnostic
-                                { code = "UNMAPPED_SYMBOL"
-                                , severity = Types.Error
-                                , message = "Record alias constructors cannot be used as patterns in Gren."
-                                , range = Just range
-                                , help = Just "Destructure the record by its fields instead."
-                                }
-                                withChildren
-
-                        AmbiguousReference modules ->
-                            addAmbiguousReferenceDiagnostic range qualifiedName.name modules withChildren
-
-                        UnresolvedReference ->
-                            if List.length members > 1 then
-                                -- Bare Json.Decode.Error constructors often resolve as
-                                -- Unresolved when only `import Json.Decode exposing (..)`
-                                -- is used. Match the known 2-arg Gren record shapes.
-                                case ( qualifiedName.name, List.length members ) of
-                                    ( "Field", 2 ) ->
-                                        addNamedPayloadEdits [ "name", "error" ] members withChildren
-
-                                    ( "Index", 2 ) ->
-                                        addNamedPayloadEdits [ "index", "error" ] members withChildren
-
-                                    ( "Failure", 2 ) ->
-                                        addNamedPayloadEdits [ "message", "value" ] members withChildren
-
-                                    -- stil4m/elm-syntax: Node Range a. Often unresolved
-                                    -- when only the dependency interface is available
-                                    -- (e.g. porting jfmengels/elm-review).
-                                    ( "Node", 2 ) ->
-                                        addPayloadEdits Types.CustomConstructor "=" members withChildren
-
-                                    _ ->
-                                        addDiagnostic
-                                            { code = "UNMAPPED_SYMBOL"
-                                            , severity = Types.Error
-                                            , message = "The multi-argument constructor pattern `" ++ qualifiedName.name ++ "` could not be resolved safely."
-                                            , range = Just range
-                                            , help = Just "Provide a mapping for the dependency constructor or include its Elm source in the package graph."
-                                            }
-                                            withChildren
-
-                            else
-                                withChildren
+                    resolveConstructorPattern patternNode range qualifiedName members withChildren
 
         AsPattern inner aliasName ->
             context
@@ -1703,6 +1650,70 @@ addNamedPayloadEditsWithSeparator kind separator labels members context =
 
         _ ->
             context
+
+
+{-| Resolve a constructor pattern through the Elm graph and lower its payload.
+Shared by the table-miss and table-arity-mismatch paths of NamedPattern.
+-}
+resolveConstructorPattern : Node Pattern -> Range -> QualifiedNameRef -> List (Node Pattern) -> ModuleContext -> ModuleContext
+resolveConstructorPattern patternNode range qualifiedName members withChildren =
+    case resolveReference patternNode qualifiedName.moduleName qualifiedName.name withChildren of
+        Resolved (ConstructorReference constructor) ->
+            if constructor.arity > 1 && constructor.arity == List.length members then
+                addPayloadEdits Types.CustomConstructor "=" members withChildren
+
+            else if constructor.arity /= List.length members then
+                addConstructorArityDiagnostic range qualifiedName.name constructor.arity (List.length members) withChildren
+
+            else
+                withChildren
+
+        Resolved (RecordAliasReference _) ->
+            addDiagnostic
+                { code = "UNMAPPED_SYMBOL"
+                , severity = Types.Error
+                , message = "Record alias constructors cannot be used as patterns in Gren."
+                , range = Just range
+                , help = Just "Destructure the record by its fields instead."
+                }
+                withChildren
+
+        AmbiguousReference modules ->
+            addAmbiguousReferenceDiagnostic range qualifiedName.name modules withChildren
+
+        UnresolvedReference ->
+            if List.length members > 1 then
+                -- Bare Json.Decode.Error constructors often resolve as
+                -- Unresolved when only `import Json.Decode exposing (..)`
+                -- is used. Match the known 2-arg Gren record shapes.
+                case ( qualifiedName.name, List.length members ) of
+                    ( "Field", 2 ) ->
+                        addNamedPayloadEdits [ "name", "error" ] members withChildren
+
+                    ( "Index", 2 ) ->
+                        addNamedPayloadEdits [ "index", "error" ] members withChildren
+
+                    ( "Failure", 2 ) ->
+                        addNamedPayloadEdits [ "message", "value" ] members withChildren
+
+                    -- stil4m/elm-syntax: Node Range a. Often unresolved
+                    -- when only the dependency interface is available
+                    -- (e.g. porting jfmengels/elm-review).
+                    ( "Node", 2 ) ->
+                        addPayloadEdits Types.CustomConstructor "=" members withChildren
+
+                    _ ->
+                        addDiagnostic
+                            { code = "UNMAPPED_SYMBOL"
+                            , severity = Types.Error
+                            , message = "The multi-argument constructor pattern `" ++ qualifiedName.name ++ "` could not be resolved safely."
+                            , range = Just range
+                            , help = Just "Provide a mapping for the dependency constructor or include its Elm source in the package graph."
+                            }
+                            withChildren
+
+            else
+                withChildren
 
 
 addConstructorArityDiagnostic : Range -> String -> Int -> Int -> ModuleContext -> ModuleContext

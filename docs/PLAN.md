@@ -235,6 +235,28 @@ Coverage and pipeline:
   while its declarations indent at the statement's base column — shallower
   than the `let` keyword, which Gren's layout rules reject. Canonical fix:
   a let-expression in argument position always starts on its own line.
+- **D26 review-app JS corrupted at compile time** (found via W5.3, OPEN,
+  URGENT — currently breaks ~6/14 canary): one of the two elm-review compiled
+  app variants (hash 22ef79…, selected per analyzed package's dep-set) is
+  emitted with a ~20-byte span DELETED mid-file (SyntaxError), deterministically,
+  from fully virgin caches (elm-home re-downloaded, all elm-stuff purged,
+  pristine committed review config — A/B proven). The other variant (40b90fce…)
+  compiles valid in the same run. Suites were green only because the shared
+  review-app cache held an anciently-compiled VALID 22ef79; that copy was
+  destroyed during this investigation. Historical corrupt copies first appeared
+  ~2026-07-18 in test:apps — coinciding with node 25.9.0; elm-review 2.13.5
+  post-processes compiled JS in node before writing, prime suspect. Recovery
+  paths to try: run elm-review under node <=22 (brew install node@22) to
+  regenerate a valid variant; or diff the two variants' generation inputs; or
+  upgrade elm-review. Until fixed, canary/suites are RED for packages whose
+  dep-set selects the corrupt variant.
+- **D12 treeview ctor-arity ROOT-CAUSED** (fix landed in review rule, e2e proof
+  blocked by D26): `namedPlatformPayloadFields` hardcoded "Node" -> {first,
+  second} (stil4m/elm-syntax shape) with a bare-name guard that captured EVERY
+  package's `Node`; treeview's 4-arg Node hit expected=2 -> hard diagnostic.
+  Fixed: the table is a HINT — on arity mismatch, fall through to real
+  reference resolution (new resolveConstructorPattern helper). The Haiku
+  diagnosis ("elm-review truncates ctor args") was refuted by extract JSON.
 - **D24 tuple comparability lost under record lowering** (found by the first
   D23-unblocked harness compile, OPEN): Elm tuples are `comparable`
   (`List.sort [(1,2),(0,3)]` works); the port lowers tuples to records, and

@@ -32,7 +32,10 @@ const { gitStamp } = require("../test/ecosystem/lib/git-stamp.cjs");
 const root = path.resolve(__dirname, "..");
 const snapshotPath = path.join(root, "test/ecosystem/registry-snapshot.json");
 const walkLogPath = path.join(root, "test/ecosystem/walk-log.jsonl");
-const cacheDir = path.join(root, ".test-cache", "walk", "cache");
+// Shared with the curated suites: months of elm-home, review-app, source,
+// and extract-cache warmth; content-addressed, so the walk only adds to it.
+// Override with --cache for an isolated run.
+const defaultCacheDir = path.join(root, ".test-cache", "ecosystem", "cache");
 const outRoot = path.join(root, ".test-cache", "walk", "out");
 const cli = path.join(root, "bin", "elm-to-gren.cjs");
 
@@ -111,7 +114,11 @@ function loadDoneSet() {
       if (!line.trim()) continue;
       try {
         const rec = JSON.parse(line);
-        if (rec.name && rec.version && rec.status !== "DRY-CANDIDATE") {
+        const starved =
+          rec.status === "working-failure" && rec.reason === "timeout";
+        if (rec.name && rec.version && rec.status !== "DRY-CANDIDATE" && !starved) {
+          // Timeouts are usually queue starvation, not verdicts —
+          // they re-run on resume.
           done.add(`${rec.name}@${rec.version}`);
         }
       } catch {
@@ -193,8 +200,13 @@ function parseArgs(argv) {
     limit: null,
     offset: 0,
     only: null,
-    concurrency: defaultConcurrency(9),
+    // Cold walks are extraction-bound and serialized by the D30 lock:
+    // -j beyond ~4 only deepens the queue until per-package budgets
+    // starve (sample walk: 23/32 bogus timeouts at -j9). Warm reruns
+    // can pass -j 9 explicitly — cache hits skip the lock.
+    concurrency: defaultConcurrency(4),
     timeoutMs: Number(process.env.PORT_TIMEOUT_MS || 360000),
+    cacheDir: defaultCacheDir,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -206,6 +218,7 @@ function parseArgs(argv) {
     else if (a === "-j" || a === "--concurrency")
       opts.concurrency = defaultConcurrency(Number(argv[++i]));
     else if (a === "--timeout-ms") opts.timeoutMs = Number(argv[++i]);
+    else if (a === "--cache") opts.cacheDir = String(argv[++i] || defaultCacheDir);
   }
   return opts;
 }
@@ -218,7 +231,7 @@ async function portOne(entry, stamp, opts) {
   const attempt = (platformArgs) =>
     spawnCapture(
       process.execPath,
-      [cli, coordinate, "--out", out, "--cache", cacheDir, ...platformArgs],
+      [cli, coordinate, "--out", out, "--cache", opts.cacheDir, ...platformArgs],
       root,
       opts.timeoutMs,
     );
@@ -312,7 +325,7 @@ async function main() {
     `[walk] commit=${stamp.short} dirty=${stamp.dirty} snapshot=${snapshot.packages.length} selected=${entries.length} done=${skippedDone} pending=${pending.length} -j${opts.concurrency}${opts.dryRun ? " DRY-RUN" : ""}`,
   );
 
-  fs.mkdirSync(cacheDir, { recursive: true });
+  fs.mkdirSync(opts.cacheDir, { recursive: true });
   fs.mkdirSync(outRoot, { recursive: true });
 
   const tally = {};

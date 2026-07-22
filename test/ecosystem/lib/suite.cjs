@@ -43,6 +43,11 @@ const TRANSIENT_RETRY_PATTERNS = [
   /shallow file has changed/,
   /shallow\.lock/,
   /initial ref transaction called with existing refs/,
+  // D34-family zip lifecycle: a corrupt-zip refetch window on a shared
+  // coordinate (remove -> shasum/lstat ENOENT) or a torn-era archive
+  // adoption. Reruns are clean; the winner's cache entry serves.
+  /ARCHIVE_INVALID/,
+  /CACHE_WRITE_FAILED: ENOENT/,
 ];
 
 /**

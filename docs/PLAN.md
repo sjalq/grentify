@@ -352,6 +352,20 @@ Coverage and pipeline:
   suite went from 0 tests ran (compile-dead) to 215/219 passing.
   The 4 fails are list-extra's own "stack safety" 10k-recursion tests
   (RangeError) — a NEW distinct class, filed as D35.
+- **D36 review-app shared cache was dead since birth** (found by the
+  elm-monocle hang triage — Opus subagent, Fable-QA'd, FIXED 2026-07-22):
+  seed/save hardcoded `…/cli/2.13.5` but elm-review names that segment
+  after its own package.json version (2.13.4 for the global binary; the
+  `--version` string lies), so depending on which binary resolves, the
+  shared review-app cache never seeded and every cold package recompiled
+  the review app (~20s) inside the D30 lock. THE "elm-monocle hang" WAS
+  THIS: a queue victim killed at budget — monocle solo ports in 24s cold,
+  2.7s warm, verified, no transform hang anywhere (the avh4/elm-color
+  "fixed-list when arms" hang-class suspect also passes in 11s). Fix:
+  seed/save copy at the version-agnostic `cli/` parent with a find-probe
+  readiness check. Measured: second cold package 12.6s -> 6.9s. Canary
+  14/14, tier 0 216. Hang-class ledger entries from cold gates should be
+  re-read as D36 queue victims.
 - **D35 deep-recursion stack overflow in ported code** (found by the
   D24a list-extra receipt, OPEN): list-extra's 4 "stack safety" tests
   (10k+ elements through intersperse/isInfixOf etc.) blow the node stack

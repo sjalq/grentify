@@ -45,11 +45,25 @@ type alias Options =
 
 
 {-| Relative path where elm-review stores its compiled app for a project.
-Version segment tracks the elm-review dependency used by this repo.
+Version segment tracks the elm-review dependency used by this repo. Used only
+as an extract-cache digest marker; the seed/save copy is version-agnostic
+(see `reviewCliParentRelative`) so it survives elm-review app-version drift.
 -}
 reviewCliRelative : String
 reviewCliRelative =
     "elm-stuff/generated-code/jfmengels/elm-review/cli/2.13.5"
+
+
+{-| Parent of elm-review's per-version generated CLI app. elm-review names the
+segment underneath (e.g. `2.13.4`) after its OWN package version, which is not
+the `elm-review --version` string and drifts independently. Seeding/saving the
+review-app cache at this parent level copies whatever version dir exists, so a
+version mismatch can no longer silently defeat the cache (which forced every
+cold package to recompile the review app from scratch under the D30 lock).
+-}
+reviewCliParentRelative : String
+reviewCliParentRelative =
+    "elm-stuff/generated-code/jfmengels/elm-review/cli"
 
 
 run : Node.Platform -> ChildProcess.Permission -> Options -> Task Error Extraction
@@ -353,25 +367,19 @@ seedReviewApp platform childProcess options =
         Just cacheRoot ->
             let
                 shared =
-                    Path.join [ cacheRoot, Path.fromPosixString reviewCliRelative ]
+                    Path.join [ cacheRoot, Path.fromPosixString reviewCliParentRelative ]
 
                 destination =
-                    Path.join [ options.packageRoot, Path.fromPosixString reviewCliRelative ]
-
-                sharedApps =
-                    Path.join [ shared, Path.fromPosixString "review-applications" ]
-
-                destApps =
-                    Path.join [ destination, Path.fromPosixString "review-applications" ]
+                    Path.join [ options.packageRoot, Path.fromPosixString reviewCliParentRelative ]
             in
-            System.File.exists options.fileSystem sharedApps
+            hasReviewApp platform childProcess shared
                 |> Task.andThen
                     (\sharedReady ->
                         if not sharedReady then
                             Task.succeed {}
 
                         else
-                            System.File.exists options.fileSystem destApps
+                            hasReviewApp platform childProcess destination
                                 |> Task.andThen
                                     (\already ->
                                         if already then
@@ -398,15 +406,12 @@ saveReviewApp platform childProcess options =
         Just cacheRoot ->
             let
                 source =
-                    Path.join [ options.packageRoot, Path.fromPosixString reviewCliRelative ]
+                    Path.join [ options.packageRoot, Path.fromPosixString reviewCliParentRelative ]
 
                 shared =
-                    Path.join [ cacheRoot, Path.fromPosixString reviewCliRelative ]
-
-                sourceApps =
-                    Path.join [ source, Path.fromPosixString "review-applications" ]
+                    Path.join [ cacheRoot, Path.fromPosixString reviewCliParentRelative ]
             in
-            System.File.exists options.fileSystem sourceApps
+            hasReviewApp platform childProcess source
                 |> Task.andThen
                     (\ready ->
                         if not ready then
@@ -419,6 +424,32 @@ saveReviewApp platform childProcess options =
                                         shellCopyTree platform childProcess source shared
                                     )
                     )
+
+
+{-| True when `root` (an `…/elm-review/cli` parent) holds a compiled review app
+for ANY elm-review app-version. elm-review names the version dir after its own
+package version, which differs from `elm-review --version`, so we discover the
+app by presence rather than assume a fixed segment. Missing dir / error → False
+(cold-build path). Uses `find` to stay consistent with the shell tree ops here.
+-}
+hasReviewApp : Node.Platform -> ChildProcess.Permission -> Path -> Task x Bool
+hasReviewApp platform childProcess root =
+    System.Process.run childProcess
+        { program = "bash"
+        , arguments =
+            [ "-c"
+            , "find '"
+                ++ System.File.pathToString platform root
+                ++ "' -type d -name review-applications -print -quit 2>/dev/null"
+            ]
+        , workingDirectory = "."
+        , environment = Dict.empty
+        , allowedExitCodes = [ 0, 1 ]
+        , timeoutMilliseconds = 10 * 1000
+        , maximumOutputBytes = 65536
+        }
+        |> Task.map (\output -> not (String.isEmpty (String.trim output.stdout)))
+        |> Task.onError (\_ -> Task.succeed False)
 
 
 {-| Best-effort `cp -a source/. dest/`. Failures are swallowed so review can cold-build.

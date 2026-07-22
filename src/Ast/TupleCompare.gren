@@ -522,7 +522,13 @@ comparatorBody shape depth left right =
             in
             when element is
                 Prim ->
-                    ExprApplication [ bareVar "compare", access left, access right ]
+                    -- Qualified for the same reason as IndexClamp's Basics.max
+                    -- (D39): a module-local `compare` would capture the bare name.
+                    ExprApplication
+                        [ ExprVar { moduleName = Just "Basics", name = "compare" }
+                        , access left
+                        , access right
+                        ]
 
                 Nested nested ->
                     applyComparator nested (depth + 1) (access left) (access right)

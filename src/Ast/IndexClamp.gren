@@ -93,8 +93,10 @@ provablyNonNegative expr =
 
 clamped : Expr -> Expr
 clamped count =
+    -- Qualified: a module-local `max` binding captures the bare name
+    -- (D39, NoRedInk/elm-debug-controls' Debug.Control).
     ExprApplication
-        [ ExprVar { moduleName = Nothing, name = "max" }
+        [ ExprVar { moduleName = Just "Basics", name = "max" }
         , ExprInt 0
         , count
         ]

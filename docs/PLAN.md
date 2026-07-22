@@ -352,6 +352,12 @@ Coverage and pipeline:
   suite went from 0 tests ran (compile-dead) to 215/219 passing.
   The 4 fails are list-extra's own "stack safety" 10k-recursion tests
   (RangeError) — a NEW distinct class, filed as D35.
+- **D39 generated helpers used bare Basics names** (found by gate v8
+  browser, FIXED 2026-07-22, Fable): IndexClamp emitted bare `max` and
+  TupleCompare bare `compare`; a module-local binding of either name
+  captures it (elm-debug-controls' Debug.Control binds `max` → "max is
+  not a function"). Both now emit qualified Basics.max / Basics.compare.
+  elm-rails re-ports verified; tier 0 221; canary 14/14.
 - **D38 D35 regression: inlined fallthrough duplicates same-name binders
   nested** (found by gate v8 pure, OPEN, fix delegated): removing the tf_
   thunks makes each duplicated continuation re-match the scrutinee INSIDE

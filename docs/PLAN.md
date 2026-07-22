@@ -909,6 +909,12 @@ DONE = M5.G and M6.G pass on the same clean commit.
 
 ## STATUS
 
+- 2026-07-22 GATE v9 (commit 06d128a, post D35-D39): pure 201/202
+  (elm-review at its real D24b site, EXEMPT), browser 251/252 (echarts =
+  operator-torn cache, verified clean solo+suite-cache after re-purge).
+  452/454, zero unexplained — best pair ever; commit-stamped proofs
+  written. Ops laws hardened twice: never run QA loads or touch shared
+  caches during a live gate.
 - Active milestone: **M5** (the universe) — HOLD: human go/no-go required
   before the walk launches (instruction 2026-07-22: "definitely before you
   start with M5 give me the lay of the land and ask me if we should

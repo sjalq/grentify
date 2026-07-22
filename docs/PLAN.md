@@ -255,6 +255,19 @@ Coverage and pipeline:
   Runner.gren); released on success AND failure paths; canary 14/14 at -j4
   (90s — the serialization cost, refunded later by the extract cache which
   bypasses locked extraction on hit).
+- **D33 fossilized per-package elm-stuff corruption in the registry cache**
+  (found by gate v5b + solo instrumentation, FIXED 2026-07-22): extraction
+  runs elm-review INSIDE the cached source tree under registry/packages, so
+  its per-package review-project elm-stuff persists between runs. A mid-write
+  kill (gate v3 era) truncated o.dat files at a 2MB boundary ("Corrupt File
+  ... not enough bytes"); elm's corrupt-cache error prints art+JSON mixed,
+  elm-review's JSON.parse crashes — the SAME 23 tail packages (the W4.4e
+  extension block, positions 179-201) failed EVERY gate since with "is not
+  valid JSON", misattributed to races (v3 "27 poisoned", v4, v5, v5b).
+  Fix: purged 632+745 elm-stuff trees from both registry caches; solo
+  verification green. TODO auto-heal: on "Corrupt File"/"CORRUPT CACHE" in
+  review output, delete the package's generated elm-stuff and retry once
+  (needed before the M5 walk — kills will recur).
 - **D32 review-app seed/save raced outside the D30 lock** (found by gate v5,
   FIXED 2026-07-22): seedReviewApp (shared→local cp -a) and saveReviewApp
   (local→shared cp -a) ran outside the extraction lock, so a save could tear

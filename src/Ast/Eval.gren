@@ -550,6 +550,12 @@ builtinFor ref =
         "identity" ->
             builtin "identity" 1
 
+        "Basics.compare" ->
+            builtin "compare" 2
+
+        "compare" ->
+            builtin "compare" 2
+
         _ ->
             Nothing
 
@@ -691,6 +697,16 @@ runBuiltin context fuel name args =
         { name = "String.fromInt", args = [ VInt n ] } ->
             done fuel (VString (String.fromInt n))
 
+        { name = "compare", args = [ left, right ] } ->
+            -- D24 comparators are generated in terms of Basics.compare;
+            -- primitives only, mirroring compareValues.
+            when compareValues left right is
+                Just order ->
+                    done fuel (orderValue order)
+
+                Nothing ->
+                    stuck fuel "compare on incomparable values"
+
         { name = "Array.popFirst", args = [ VArray xs ] } ->
             when Array.popFirst xs is
                 Just { first = first, rest = rest } ->
@@ -740,6 +756,23 @@ justValue payload =
 nothingValue : Value
 nothingValue =
     VCtor { name = "Nothing", arity = 0, args = [] }
+
+
+orderValue : Order -> Value
+orderValue order =
+    let
+        name =
+            when order is
+                LT ->
+                    "LT"
+
+                EQ ->
+                    "EQ"
+
+                GT ->
+                    "GT"
+    in
+    VCtor { name = name, arity = 0, args = [] }
 
 
 boolValue : Bool -> Value

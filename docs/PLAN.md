@@ -328,6 +328,22 @@ Coverage and pipeline:
   lexicographic comparator); no type inference exists in the pipeline today.
   Blocks list-extra's frequencies tests; pick a tuple-sort-free package for
   the W4.3d end-to-end proof.
+  D24a FIXED 2026-07-22 (Fable, the typed-rewrite): new pass
+  Ast/TupleCompare.gren (BareResolve → TupleCompare → NameSub) rewrites
+  comparison CALL SITES on positive tuple evidence only — signature
+  unification (argument patterns vs the type spine), tuple/list literals,
+  and tuple-returning projection lambdas. Rewrites: List.sort→sortWith with
+  a generated lexicographic comparator (nested tuples recurse, binders
+  uniquified per depth), sortBy→sortWith∘projection, minimum/maximum→head
+  of (flipped) sortWith, compare→comparator, </>/<=/>= → comparator==LT
+  style. Soundness: Elm's comparable constraint makes elementwise compare
+  correct for every non-tuple element; no-evidence sites are left alone
+  (never a wrong rewrite). Eval gained the compare builtin so P1 checks
+  the generated comparators behaviorally (8 new checks; tier 0 = 215).
+  Fixture package proves all 8 classes port + gren-verify.
+  REMAINS OPEN (D24b): tuple-typed Dict keys / Set members (type-level
+  encoding law) and comparable type-vars instantiated with tuples — both
+  still ledger as before; no behavior change on unproven sites.
 
 ---
 

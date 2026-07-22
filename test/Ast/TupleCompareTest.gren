@@ -1,0 +1,296 @@
+module Ast.TupleCompareTest exposing (tests)
+
+{-| D24: tuple-comparability typed rewrite.
+
+Structural checks prove the pass rewrites exactly on positive evidence and
+never without it; Eval checks prove the GENERATED comparators implement
+Elm's lexicographic tuple ordering (the behavior D24 lost).
+-}
+
+import Array exposing ( Array )
+import Ast.Eval as Eval exposing ( Outcome(..), Value(..) )
+import Ast.TupleCompare as TupleCompare exposing ( ElemShape(..) )
+import Ast.Types exposing
+    ( Declaration(..)
+    , Expr(..)
+    , File
+    , ModuleKind(..)
+    , Exposing(..)
+    , Pattern(..)
+    , TypeAnn(..)
+    )
+import Dict
+
+
+type alias Check =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array Check
+tests =
+    [ rewritesAnnotatedSort
+    , noRewriteWithoutEvidence
+    , rewritesSortByProjection
+    , rewritesOrderBinop
+    , comparatorFirstElementDecides
+    , comparatorTieBreaksOnSecond
+    , comparatorEqualTuples
+    , comparatorNestedTuple
+    ]
+
+
+ok : String -> Check
+ok name =
+    { name = name, passed = True, details = "" }
+
+
+fail : String -> String -> Check
+fail name details =
+    { name = name, passed = False, details = details }
+
+-- FIXTURE BUILDERS ------------------------------------------------------------
+
+
+fileWith : Maybe TypeAnn -> Array Pattern -> Expr -> File
+fileWith annotation arguments body =
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule
+        , moduleName = "Fixture"
+        , exposing_ = ExposeAll
+        }
+    , comments = []
+    , imports = []
+    , declarations =
+        [ DeclFunction
+            { name = "subject"
+            , documentation = Nothing
+            , signature =
+                Maybe.map (\ann -> { name = "subject", typeAnnotation = ann }) annotation
+            , arguments = arguments
+            , expression = body
+            }
+        ]
+    }
+
+
+subjectBody : File -> Maybe Expr
+subjectBody file =
+    when Array.get 0 file.declarations is
+        Just (DeclFunction fn) ->
+            Just fn.expression
+
+        _ ->
+            Nothing
+
+
+listOfTuple : TypeAnn
+listOfTuple =
+    TypeTyped
+        { ref = { moduleName = Nothing, name = "List" }
+        , arguments = [ TypeTuple [ intType, intType ] ]
+        }
+
+
+intType : TypeAnn
+intType =
+    TypeTyped { ref = { moduleName = Nothing, name = "Int" }, arguments = [] }
+
+
+listSort : Expr -> Expr
+listSort argument =
+    ExprApplication
+        [ ExprVar { moduleName = Just "List", name = "sort" }
+        , argument
+        ]
+
+
+pairsVar : Expr
+pairsVar =
+    ExprVar { moduleName = Nothing, name = "pairs" }
+
+-- STRUCTURAL ------------------------------------------------------------------
+
+
+{-| `subject : List (Int, Int) -> x ; subject pairs = List.sort pairs`
+must become `List.sortWith <comparator> pairs`.
+-}
+rewritesAnnotatedSort : Check
+rewritesAnnotatedSort =
+    let
+        file =
+            fileWith
+                (Just (TypeFunction { left = listOfTuple, right = listOfTuple }))
+                [ PatVar "pairs" ]
+                (listSort pairsVar)
+    in
+    when subjectBody (TupleCompare.apply file) is
+        Just (ExprApplication [ ExprVar { moduleName = Just "List", name = "sortWith" }, ExprLambda _, ExprVar { name = "pairs" } ]) ->
+            ok "rewritesAnnotatedSort"
+
+        other ->
+            fail "rewritesAnnotatedSort" ("got: " ++ Debug.toString other)
+
+
+{-| No annotation, no literal — `List.sort xs` must be left alone. -}
+noRewriteWithoutEvidence : Check
+noRewriteWithoutEvidence =
+    let
+        body =
+            listSort (ExprVar { moduleName = Nothing, name = "xs" })
+
+        file =
+            fileWith Nothing [ PatVar "xs" ] body
+    in
+    when subjectBody (TupleCompare.apply file) is
+        Just (ExprApplication [ ExprVar { name = "sort" }, ExprVar { name = "xs" } ]) ->
+            ok "noRewriteWithoutEvidence"
+
+        other ->
+            fail "noRewriteWithoutEvidence" ("got: " ++ Debug.toString other)
+
+
+{-| `List.sortBy (\r -> (r.a, r.b)) xs` becomes sortWith over the projection. -}
+rewritesSortByProjection : Check
+rewritesSortByProjection =
+    let
+        projection =
+            ExprLambda
+                { arguments = [ PatVar "r" ]
+                , expression =
+                    ExprTuple
+                        [ ExprAccess { record = ExprVar { moduleName = Nothing, name = "r" }, field = "a" }
+                        , ExprAccess { record = ExprVar { moduleName = Nothing, name = "r" }, field = "b" }
+                        ]
+                }
+
+        file =
+            fileWith Nothing
+                [ PatVar "xs" ]
+                (ExprApplication
+                    [ ExprVar { moduleName = Just "List", name = "sortBy" }
+                    , projection
+                    , ExprVar { moduleName = Nothing, name = "xs" }
+                    ]
+                )
+    in
+    when subjectBody (TupleCompare.apply file) is
+        Just (ExprApplication [ ExprVar { name = "sortWith" }, ExprLambda _, ExprVar { name = "xs" } ]) ->
+            ok "rewritesSortByProjection"
+
+        other ->
+            fail "rewritesSortByProjection" ("got: " ++ Debug.toString other)
+
+
+{-| `x < y` on annotated tuple args becomes `cmp x y == LT`. -}
+rewritesOrderBinop : Check
+rewritesOrderBinop =
+    let
+        tupleType =
+            TypeTuple [ intType, intType ]
+
+        boolType =
+            TypeTyped { ref = { moduleName = Nothing, name = "Bool" }, arguments = [] }
+
+        file =
+            fileWith
+                (Just
+                    (TypeFunction
+                        { left = tupleType
+                        , right = TypeFunction { left = tupleType, right = boolType }
+                        }
+                    )
+                )
+                [ PatVar "x", PatVar "y" ]
+                (ExprBinop
+                    { operator = "<"
+                    , left = ExprVar { moduleName = Nothing, name = "x" }
+                    , right = ExprVar { moduleName = Nothing, name = "y" }
+                    }
+                )
+    in
+    when subjectBody (TupleCompare.apply file) is
+        Just (ExprBinop { operator = "==", left = ExprApplication _, right = ExprVar { name = "LT" } }) ->
+            ok "rewritesOrderBinop"
+
+        other ->
+            fail "rewritesOrderBinop" ("got: " ++ Debug.toString other)
+
+-- BEHAVIOR (Eval oracle on generated comparators) -----------------------------
+
+
+tuple2 : Int -> Int -> Expr
+tuple2 a b =
+    ExprTuple [ ExprInt a, ExprInt b ]
+
+
+evalToOrder : String -> Expr -> String -> Check
+evalToOrder name expr expected =
+    when Eval.run Eval.emptyContext 10000 expr is
+        Done (VCtor { name = got }) ->
+            if got == expected then
+                ok name
+
+            else
+                fail name ("got " ++ got ++ ", want " ++ expected)
+
+        Done _ ->
+            fail name "non-ctor result"
+
+        Crashed message ->
+            fail name ("crashed: " ++ message)
+
+        Stuck reason ->
+            fail name ("stuck: " ++ reason)
+
+
+pairShape : Array ElemShape
+pairShape =
+    [ Prim, Prim ]
+
+
+compareWith : Array ElemShape -> Expr -> Expr -> Expr
+compareWith shape left right =
+    ExprApplication [ TupleCompare.comparatorFor shape 0, left, right ]
+
+
+comparatorFirstElementDecides : Check
+comparatorFirstElementDecides =
+    evalToOrder "comparatorFirstElementDecides"
+        (compareWith pairShape (tuple2 2 0) (tuple2 1 9))
+        "GT"
+
+
+comparatorTieBreaksOnSecond : Check
+comparatorTieBreaksOnSecond =
+    evalToOrder "comparatorTieBreaksOnSecond"
+        (compareWith pairShape (tuple2 1 2) (tuple2 1 3))
+        "LT"
+
+
+comparatorEqualTuples : Check
+comparatorEqualTuples =
+    evalToOrder "comparatorEqualTuples"
+        (compareWith pairShape (tuple2 4 4) (tuple2 4 4))
+        "EQ"
+
+
+{-| (1, (2, "a")) vs (1, (2, "b")) — recursion into the nested comparator. -}
+comparatorNestedTuple : Check
+comparatorNestedTuple =
+    let
+        nestedShape =
+            [ Prim, Nested [ Prim, Prim ] ]
+
+        value inner =
+            ExprTuple
+                [ ExprInt 1
+                , ExprTuple [ ExprInt 2, ExprString inner ]
+                ]
+    in
+    evalToOrder "comparatorNestedTuple"
+        (compareWith nestedShape (value "a") (value "b"))
+        "LT"

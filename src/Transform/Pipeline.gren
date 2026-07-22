@@ -30,6 +30,7 @@ import Ast.NameSub as AstNameSub
 import Ast.Print as AstPrint
 import Ast.RecordAlias as AstRecordAlias
 import Ast.BareResolve as AstBareResolve
+import Ast.TupleCompare as AstTupleCompare
 import Ast.Reserved as AstReserved
 import Ast.Types exposing (File)
 import Char
@@ -591,6 +592,7 @@ transformModuleViaAst registry packageRecordAliases packageCtorArities packageSo
                 lowered =
                     file
                         |> AstBareResolve.apply
+                        |> AstTupleCompare.apply
                         |> AstNameSub.apply registry
                         |> AstRecordAlias.apply packageRecordAliases
                         |> AstCtorLaw.apply packageCtorArities

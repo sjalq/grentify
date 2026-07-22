@@ -1,0 +1,532 @@
+module Ast.TupleCompare exposing
+    ( apply
+    , ElemShape(..)
+    , comparatorFor
+    , shapeOfTypeAnn
+    )
+
+{-| D24: Elm tuples are `comparable`; the port lowers them to records and Gren
+records are not. Any comparison-requiring call on tuple values therefore
+type-errors after the port. This pass rewrites those calls to explicit
+lexicographic comparators BEFORE NameSub, while Elm names, tuples, and
+signatures are still intact.
+
+Evidence law — rewrite ONLY on positive evidence of tuple-ness, never on
+guesses (a wrong rewrite is worse than a missing one):
+
+  - a literal `ExprTuple` argument, or a list literal containing one
+  - a variable whose type is known from the enclosing declaration's
+    signature (arguments unified positionally with the type spine)
+  - a `sortBy`/`minimum`/`maximum` projection lambda whose body is a
+    tuple literal
+
+Soundness of element comparison: the Elm source only compiled if every
+tuple element was itself `comparable`, so elementwise `compare` is correct
+for all non-tuple elements; nested tuples recurse into generated
+comparators. Type variables instantiated with tuples remain unsupported
+(same compile error as before this pass — no behavior change) and stay
+ledgerable under D24.
+
+Out of scope (D24b): tuple-typed Dict keys / Set members — those change
+types, not call sites, and need an encoding law.
+-}
+
+import Array exposing ( Array )
+import Ast.Types exposing
+    ( Declaration(..)
+    , Expr(..)
+    , File
+    , Pattern(..)
+    , TypeAnn(..)
+    )
+import Ast.Walk as Walk
+import Dict exposing ( Dict )
+
+
+{-| Shape of a tuple element: opaque comparable, or a nested tuple. -}
+type ElemShape
+    = Prim
+    | Nested (Array ElemShape)
+
+
+type alias Env =
+    { -- variable name -> its tuple shape
+      tupleVars : Dict String (Array ElemShape)
+    , -- variable name -> element shape of the list-of-tuples it holds
+      listVars : Dict String (Array ElemShape)
+    }
+
+
+apply : File -> File
+apply file =
+    { file
+        | declarations = Array.map applyDeclaration file.declarations
+    }
+
+
+applyDeclaration : Declaration -> Declaration
+applyDeclaration declaration =
+    when declaration is
+        DeclFunction fn ->
+            let
+                env =
+                    envFromSignature fn.signature fn.arguments
+            in
+            DeclFunction { fn | expression = rewrite env fn.expression }
+
+        _ ->
+            declaration
+
+
+{-| Unify the signature's function-type spine with the argument patterns:
+each `PatVar` whose positional type is a tuple (or list of tuples) enters
+the evidence environment. Elm forbids shadowing, so one name maps to one
+binding for the whole declaration.
+-}
+envFromSignature : Maybe { name : String, typeAnnotation : TypeAnn } -> Array Pattern -> Env
+envFromSignature signature arguments =
+    let
+        empty =
+            { tupleVars = Dict.empty, listVars = Dict.empty }
+    in
+    when signature is
+        Nothing ->
+            empty
+
+        Just sig ->
+            Array.foldl
+                (\arg state ->
+                    when state.spine is
+                        TypeFunction { left = left, right = right } ->
+                            { spine = right
+                            , env = bindPattern arg left state.env
+                            }
+
+                        _ ->
+                            state
+                )
+                { spine = sig.typeAnnotation, env = empty }
+                arguments
+                |> .env
+
+
+bindPattern : Pattern -> TypeAnn -> Env -> Env
+bindPattern pattern annotation env =
+    when pattern is
+        PatVar name ->
+            when shapeOfTypeAnn annotation is
+                Just shape ->
+                    { env | tupleVars = Dict.set name shape env.tupleVars }
+
+                Nothing ->
+                    when listElementShape annotation is
+                        Just shape ->
+                            { env | listVars = Dict.set name shape env.listVars }
+
+                        Nothing ->
+                            env
+
+        _ ->
+            env
+
+
+shapeOfTypeAnn : TypeAnn -> Maybe (Array ElemShape)
+shapeOfTypeAnn annotation =
+    when annotation is
+        TypeTuple elements ->
+            Just
+                (Array.map
+                    (\element ->
+                        when shapeOfTypeAnn element is
+                            Just nested ->
+                                Nested nested
+
+                            Nothing ->
+                                Prim
+                    )
+                    elements
+                )
+
+        _ ->
+            Nothing
+
+
+listElementShape : TypeAnn -> Maybe (Array ElemShape)
+listElementShape annotation =
+    when annotation is
+        TypeTyped { ref = ref, arguments = arguments } ->
+            if ref.name == "List" && (ref.moduleName == Nothing || ref.moduleName == Just "List") then
+                when Array.get 0 arguments is
+                    Just element ->
+                        shapeOfTypeAnn element
+
+                    Nothing ->
+                        Nothing
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
+
+-- EVIDENCE ON EXPRESSIONS -----------------------------------------------------
+
+
+shapeOfExpr : Env -> Expr -> Maybe (Array ElemShape)
+shapeOfExpr env expr =
+    when expr is
+        ExprTuple items ->
+            Just
+                (Array.map
+                    (\item ->
+                        when shapeOfExpr env item is
+                            Just nested ->
+                                Nested nested
+
+                            Nothing ->
+                                Prim
+                    )
+                    items
+                )
+
+        ExprVar { moduleName = Nothing, name = name } ->
+            Dict.get name env.tupleVars
+
+        _ ->
+            Nothing
+
+
+listShapeOfExpr : Env -> Expr -> Maybe (Array ElemShape)
+listShapeOfExpr env expr =
+    when expr is
+        ExprList items ->
+            Array.foldl
+                (\item found ->
+                    when found is
+                        Just _ ->
+                            found
+
+                        Nothing ->
+                            shapeOfExpr env item
+                )
+                Nothing
+                items
+
+        ExprVar { moduleName = Nothing, name = name } ->
+            Dict.get name env.listVars
+
+        _ ->
+            Nothing
+
+
+{-| A projection function whose result is provably a tuple:
+`\x -> ( ..., ... )` (possibly through nothing else — MVP).
+-}
+projectionShape : Env -> Expr -> Maybe (Array ElemShape)
+projectionShape env expr =
+    when expr is
+        ExprLambda { expression = body } ->
+            shapeOfExpr env body
+
+        _ ->
+            Nothing
+
+-- REWRITE ---------------------------------------------------------------------
+
+
+rewrite : Env -> Expr -> Expr
+rewrite env expr =
+    let
+        rewritten =
+            rewriteNode env expr
+    in
+    Walk.mapExprChildren (rewrite env) rewritten
+
+
+rewriteNode : Env -> Expr -> Expr
+rewriteNode env expr =
+    when expr is
+        ExprApplication parts ->
+            when { fn = Array.get 0 parts, arity = Array.length parts } is
+                { fn = Just (ExprVar ref), arity = 2 } ->
+                    rewriteUnaryListCall env ref parts expr
+
+                { fn = Just (ExprVar ref), arity = 3 } ->
+                    rewriteBinaryCall env ref parts expr
+
+                _ ->
+                    expr
+
+        ExprBinop { operator = operator, left = left, right = right } ->
+            when orderBinop operator is
+                Nothing ->
+                    expr
+
+                Just wanted ->
+                    when firstShape [ shapeOfExpr env left, shapeOfExpr env right ] is
+                        Nothing ->
+                            expr
+
+                        Just shape ->
+                            -- (a, b) < (c, d)  ==>  cmp a b == LT   (etc.)
+                            orderTest wanted (applyComparator shape 0 left right)
+
+        _ ->
+            expr
+
+
+{-| `List.sort xs` family — one list argument. -}
+rewriteUnaryListCall : Env -> Ast.Types.NamedRef -> Array Expr -> Expr -> Expr
+rewriteUnaryListCall env ref parts original =
+    when Array.get 1 parts is
+        Nothing ->
+            original
+
+        Just listArg ->
+            when listShapeOfExpr env listArg is
+                Nothing ->
+                    original
+
+                Just shape ->
+                    if isListFn ref "sort" then
+                        ExprApplication
+                            [ listVar "sortWith"
+                            , comparatorFor shape 0
+                            , listArg
+                            ]
+
+                    else if isListFn ref "minimum" then
+                        -- head of an ascending sortWith = the minimum
+                        ExprApplication
+                            [ listVar "head"
+                            , ExprApplication [ listVar "sortWith", comparatorFor shape 0, listArg ]
+                            ]
+
+                    else if isListFn ref "maximum" then
+                        ExprApplication
+                            [ listVar "head"
+                            , ExprApplication [ listVar "sortWith", flippedComparator shape, listArg ]
+                            ]
+
+                    else
+                        original
+
+
+{-| `List.sortBy f xs` / `compare a b` — two arguments. -}
+rewriteBinaryCall : Env -> Ast.Types.NamedRef -> Array Expr -> Expr -> Expr
+rewriteBinaryCall env ref parts original =
+    when { a = Array.get 1 parts, b = Array.get 2 parts } is
+        { a = Just first, b = Just second } ->
+            if isListFn ref "sortBy" then
+                when projectionShape env first is
+                    Nothing ->
+                        original
+
+                    Just shape ->
+                        -- sortBy f ==> sortWith (\x y -> cmp (f x) (f y))
+                        ExprApplication
+                            [ listVar "sortWith"
+                            , ExprLambda
+                                { arguments = [ PatVar "d24ByL", PatVar "d24ByR" ]
+                                , expression =
+                                    applyComparator shape
+                                        0
+                                        (ExprApplication [ first, bareVar "d24ByL" ])
+                                        (ExprApplication [ first, bareVar "d24ByR" ])
+                                }
+                            , second
+                            ]
+
+            else if isBasicsFn ref "compare" then
+                when firstShape [ shapeOfExpr env first, shapeOfExpr env second ] is
+                    Nothing ->
+                        original
+
+                    Just shape ->
+                        applyComparator shape 0 first second
+
+            else
+                original
+
+        _ ->
+            original
+
+-- COMPARATOR GENERATION -------------------------------------------------------
+
+
+{-| Lexicographic comparator lambda for a tuple shape, lowered-field aware:
+element i is read through `.first` / `.second` / … (the record lowering the
+printer applies to tuples). `depth` uniquifies binder names for nested
+tuple recursion (Gren forbids shadowing).
+
+    \d24L0 d24R0 ->
+        when compare d24L0.first d24R0.first is
+            EQ -> compare d24L0.second d24R0.second
+            d24O0_0 -> d24O0_0
+-}
+comparatorFor : Array ElemShape -> Int -> Expr
+comparatorFor shape depth =
+    let
+        leftName =
+            "d24L" ++ String.fromInt depth
+
+        rightName =
+            "d24R" ++ String.fromInt depth
+    in
+    ExprLambda
+        { arguments = [ PatVar leftName, PatVar rightName ]
+        , expression = comparatorBody shape depth (bareVar leftName) (bareVar rightName)
+        }
+
+
+{-| The comparator body applied to two already-named tuple values. -}
+comparatorBody : Array ElemShape -> Int -> Expr -> Expr -> Expr
+comparatorBody shape depth left right =
+    let
+        elementCompare index element =
+            let
+                access value =
+                    ExprAccess { record = value, field = fieldLabel index }
+            in
+            when element is
+                Prim ->
+                    ExprApplication [ bareVar "compare", access left, access right ]
+
+                Nested nested ->
+                    applyComparator nested (depth + 1) (access left) (access right)
+
+        indexed =
+            Array.indexedMap (\index element -> { index = index, element = element }) shape
+    in
+    when Array.popLast indexed is
+        Nothing ->
+            bareVar "EQ"
+
+        Just { last = last, initial = initial } ->
+            Array.foldr
+                (\entry deeper ->
+                    ExprCase
+                        { expression = elementCompare entry.index entry.element
+                        , cases =
+                            [ { pattern = PatNamed { ref = { moduleName = Nothing, name = "EQ" }, arguments = [] }
+                              , body = deeper
+                              }
+                            , { pattern = PatVar (orderName depth entry.index)
+                              , body = bareVar (orderName depth entry.index)
+                              }
+                            ]
+                        }
+                )
+                (elementCompare last.index last.element)
+                initial
+
+
+{-| Compare two tuple expressions with the generated comparator, inline. -}
+applyComparator : Array ElemShape -> Int -> Expr -> Expr -> Expr
+applyComparator shape depth left right =
+    ExprApplication [ comparatorFor shape depth, left, right ]
+
+
+flippedComparator : Array ElemShape -> Expr
+flippedComparator shape =
+    ExprLambda
+        { arguments = [ PatVar "d24FL", PatVar "d24FR" ]
+        , expression =
+            ExprApplication
+                [ comparatorFor shape 0
+                , bareVar "d24FR"
+                , bareVar "d24FL"
+                ]
+        }
+
+
+{-| `cmp a b == LT` (and friends) for the order binops. -}
+orderTest : String -> Expr -> Expr
+orderTest operator comparison =
+    let
+        equalTo ctor =
+            ExprBinop { operator = "==", left = comparison, right = bareVar ctor }
+
+        notEqualTo ctor =
+            ExprBinop { operator = "/=", left = comparison, right = bareVar ctor }
+    in
+    when operator is
+        "<" ->
+            equalTo "LT"
+
+        ">" ->
+            equalTo "GT"
+
+        "<=" ->
+            notEqualTo "GT"
+
+        _ ->
+            -- ">=" — the only remaining orderBinop
+            notEqualTo "LT"
+
+
+orderBinop : String -> Maybe String
+orderBinop operator =
+    if operator == "<" || operator == ">" || operator == "<=" || operator == ">=" then
+        Just operator
+
+    else
+        Nothing
+
+-- SMALL HELPERS ---------------------------------------------------------------
+
+
+isListFn : Ast.Types.NamedRef -> String -> Bool
+isListFn ref name =
+    ref.name == name && ref.moduleName == Just "List"
+
+
+isBasicsFn : Ast.Types.NamedRef -> String -> Bool
+isBasicsFn ref name =
+    ref.name == name && (ref.moduleName == Nothing || ref.moduleName == Just "Basics")
+
+
+firstShape : Array (Maybe (Array ElemShape)) -> Maybe (Array ElemShape)
+firstShape candidates =
+    Array.foldl
+        (\candidate found ->
+            when found is
+                Just _ ->
+                    found
+
+                Nothing ->
+                    candidate
+        )
+        Nothing
+        candidates
+
+
+orderName : Int -> Int -> String
+orderName depth index =
+    "d24O" ++ String.fromInt depth ++ "_" ++ String.fromInt index
+
+
+fieldLabel : Int -> String
+fieldLabel index =
+    when index is
+        0 ->
+            "first"
+
+        1 ->
+            "second"
+
+        2 ->
+            "third"
+
+        _ ->
+            "field" ++ String.fromInt index
+
+
+bareVar : String -> Expr
+bareVar name =
+    ExprVar { moduleName = Nothing, name = name }
+
+
+listVar : String -> Expr
+listVar name =
+    ExprVar { moduleName = Just "List", name = name }

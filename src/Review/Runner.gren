@@ -138,7 +138,7 @@ withCompileLock : Node.Platform -> ChildProcess.Permission -> Options -> Task Er
 withCompileLock platform childProcess options =
     when options.reviewAppCache is
         Nothing ->
-            invokeReview platform childProcess options
+            invokeReviewHealing platform childProcess options
 
         Just cacheRoot ->
             let
@@ -186,7 +186,7 @@ withCompileLock platform childProcess options =
                 |> Task.andThen
                     (\_ ->
                         seedReviewApp platform childProcess options
-                            |> Task.andThen (\_ -> invokeReview platform childProcess options)
+                            |> Task.andThen (\_ -> invokeReviewHealing platform childProcess options)
                             |> Task.andThen
                                 (\result ->
                                     saveReviewApp platform childProcess options
@@ -203,6 +203,44 @@ withCompileLock platform childProcess options =
                                         |> Task.onError (\_ -> Task.fail reviewError)
                                 )
                     )
+
+
+{-| D33 auto-heal: a kill mid-extraction can truncate compiler cache files
+inside the package's persistent elm-stuff (registry cache source trees keep
+it between runs). elm then errors with mixed art+JSON that elm-review's
+JSON.parse chokes on — deterministically, forever. On that signature, purge
+the package's elm-stuff and retry once.
+-}
+invokeReviewHealing : Node.Platform -> ChildProcess.Permission -> Options -> Task Error { extraction : Extraction, stdout : String }
+invokeReviewHealing platform childProcess options =
+    invokeReview platform childProcess options
+        |> Task.onError
+            (\error ->
+                if String.contains "is not valid JSON" (PortError.toString error) then
+                    purgeLocalElmStuff platform childProcess options
+                        |> Task.andThen (\_ -> invokeReview platform childProcess options)
+
+                else
+                    Task.fail error
+            )
+
+
+purgeLocalElmStuff : Node.Platform -> ChildProcess.Permission -> Options -> Task Error {}
+purgeLocalElmStuff platform childProcess options =
+    System.Process.run childProcess
+        { program = "rm"
+        , arguments =
+            [ "-rf"
+            , System.File.pathToString platform options.packageRoot ++ "/elm-stuff"
+            ]
+        , workingDirectory = "."
+        , environment = Dict.empty
+        , allowedExitCodes = [ 0 ]
+        , timeoutMilliseconds = 60 * 1000
+        , maximumOutputBytes = 4096
+        }
+        |> Task.map (\_ -> {})
+        |> Task.onError (\_ -> Task.succeed {})
 
 
 invokeReview : Node.Platform -> ChildProcess.Permission -> Options -> Task Error { extraction : Extraction, stdout : String }

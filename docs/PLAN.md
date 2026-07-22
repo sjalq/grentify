@@ -255,6 +255,14 @@ Coverage and pipeline:
   Runner.gren); released on success AND failure paths; canary 14/14 at -j4
   (90s — the serialization cost, refunded later by the extract cache which
   bypasses locked extraction on hit).
+- **D32 review-app seed/save raced outside the D30 lock** (found by gate v5,
+  FIXED 2026-07-22): seedReviewApp (shared→local cp -a) and saveReviewApp
+  (local→shared cp -a) ran outside the extraction lock, so a save could tear
+  a concurrent seed; the torn shared tree then poisoned EVERY later cold
+  package deterministically — gate v5 pure lost 23 consecutive packages
+  (179-202, all "is not valid JSON") plus 2 early windows; browser hit 2
+  before being stopped. Fix: seed → invoke → save all inside the lock;
+  poisoned review-app trees purged (extract-cache entries kept, 179 banked).
 - **D31 orphaned extraction lock after runner kill** (found + FIXED 2026-07-22):
   killing a suite runner leaves its child `elm-to-gren` processes alive AND
   leaves the D30 lock dir behind if a holder dies before release — every later

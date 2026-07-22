@@ -110,13 +110,7 @@ runFresh :
     -> Options
     -> Task Error { extraction : Extraction, stdout : String }
 runFresh platform childProcess options =
-    seedReviewApp platform childProcess options
-        |> Task.andThen (\_ -> withCompileLock platform childProcess options)
-        |> Task.andThen
-            (\result ->
-                saveReviewApp platform childProcess options
-                    |> Task.map (\_ -> result)
-            )
+    withCompileLock platform childProcess options
 
 
 logCached : Options -> ExtractCache.Coordinate -> Task x {}
@@ -133,8 +127,12 @@ logCached options coordinate =
 shared caches and race — elm emits non-JSON errors and elm-review crashes.
 One retry cannot escape a sustained contention window, so extraction is
 SERIALIZED machine-wide via an atomic mkdir spinlock next to the shared
-review-app cache. The extract cache (planned) makes most entries skip this
-entirely; correctness first.
+review-app cache. The extract cache makes most entries skip this entirely.
+
+D32: seed (shared→local) and save (local→shared) also run INSIDE the lock.
+Unlocked cp -a of the shared tree let a save tear a concurrent seed; the
+torn tree then poisoned every later cold package deterministically (gate
+v5: 23 consecutive "is not valid JSON" fails from package 179 on).
 -}
 withCompileLock : Node.Platform -> ChildProcess.Permission -> Options -> Task Error { extraction : Extraction, stdout : String }
 withCompileLock platform childProcess options =
@@ -187,7 +185,13 @@ withCompileLock platform childProcess options =
                 |> Task.mapError (\_ -> PortError.create "EXTRACT_LOCK" "Timed out waiting for the extraction lock.")
                 |> Task.andThen
                     (\_ ->
-                        invokeReview platform childProcess options
+                        seedReviewApp platform childProcess options
+                            |> Task.andThen (\_ -> invokeReview platform childProcess options)
+                            |> Task.andThen
+                                (\result ->
+                                    saveReviewApp platform childProcess options
+                                        |> Task.map (\_ -> result)
+                                )
                             |> Task.andThen
                                 (\result ->
                                     release |> Task.map (\_ -> result)

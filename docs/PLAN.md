@@ -704,7 +704,7 @@ no compiler in the loop.
 
 ### W5b — The universe
 
-- [ ] W5.6 [M5] D10: replace the walker. One resumable script
+- [x] W5.6 [M5] D10: replace the walker. One resumable script
       `scripts/walk-universe.cjs` (replacing the scripts/temp trio, which it deletes
       on landing): reads ONLY the committed snapshot; candidacy = "not kernel, not
       glsl, not broken-upstream", nothing else; every decision written as structured
@@ -712,6 +712,13 @@ no compiler in the loop.
       count of SourceEdit-based edits (feeds W6.4). Prove: tier 0 (candidacy
       classifier unit tests on fixture manifests) + dry-run walk of the first 20
       snapshot packages.
+      RESULT 2026-07-22: scripts/walk-universe.cjs landed (walker trio deleted).
+      Self-test 12 checks green; dry-run 20/20 candidates; live smoke 2/2 PASS
+      cold (~25s each) with structured records (status/platform/ms/moduleCount).
+      Dry runs never write the log; done-set skips DRY records; 50MB gz rotation.
+      Smoke records deleted (dirty-tree; ledger law). WALK NOT LAUNCHED — held
+      for human go/no-go. SourceEdit per-package counts: report lacks the field;
+      recorded as moduleCount for now, W6.4 will plumb the real counter.
 - [ ] W7.2 [M5] D16: node platform mapping table (gren-lang/node: HttpClient,
       FileSystem, Terminal, …) consuming `scripts/temp/gap-log.json` (then delete it);
       `--platform node` canary set (≥5 packages) added to tier 1 or 2. Sequenced

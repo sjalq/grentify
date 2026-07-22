@@ -48,7 +48,7 @@ isVolume m =
         || m.modules
         >= 200
         || m.totalBytes
-        >= 400000
+        >= 250000
 
 
 {-| Skip gren-format + collapse for volume catalogs.

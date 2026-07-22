@@ -2,7 +2,7 @@
  * Volume catalog detection for ecosystem suite budgets.
  *
  * Same thresholds as Port.Volume (src/Port/Volume.gren):
- *   maxModuleBytes >= 100_000  OR  modules >= 200  OR  totalBytes >= 400_000
+ *   maxModuleBytes >= 100_000  OR  modules >= 200  OR  totalBytes >= 250_000
  *
  * Used for adaptive timeouts and scale-vs-timeout classification.
  */
@@ -12,7 +12,10 @@ const path = require("node:path");
 const THRESHOLDS = {
   maxModuleBytes: 100_000,
   modules: 200,
-  totalBytes: 400_000,
+  // 250k: gate v5c found iso3166 (326k across ~25 flat lookup-table
+  // modules) aggregate-slow but under every threshold; the tables
+  // class needs the volume budget, not the 120s cap.
+  totalBytes: 250_000,
 };
 
 /** @typedef {{ modules: number, totalBytes: number, maxModuleBytes: number, volume: boolean, summary: string }} VolumeMetrics */

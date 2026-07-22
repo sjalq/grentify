@@ -685,11 +685,22 @@ no compiler in the loop.
       compiles, second add idempotent, bogus add exits 1 with ZERO new files,
       canary 14/14. (Haiku's own fixture app was broken; code verified
       independently.)
-- [ ] W5.5 [M4] **GATE M4**: Requires: W3.2–W3.5, W5.1, W5.3, W5.4, W5.8.
+- [x] W5.5 [M4] **GATE M4**: Requires: W3.2–W3.5, W5.1, W5.3, W5.4, W5.8.
       Clean-tree tier 3 both suites: 202/202 and 252/252, or
       every failure matched by a ledger EXEMPT entry with evidence (the W5.2
       reconciliation check enforces this mechanically). Ledger stamped. Flip §STATUS
       to M5. Prove: tier 3.
+      RESULT 2026-07-22 (gate v6/v7, binary 0aa3ef5+): pure 201/202 — sole
+      fail jfmengels/elm-review scale (720s budget exhausted; EXEMPT: volume
+      ceiling, ledgered). Browser 249/252 — expect-bytes = torn cache from
+      pre-D34 race era (coordinate purged, solo exit=0),
+      FuJa0815/elm-ui + Gipphe/elm-ui = dense-class (134k of nested elm-ui
+      internals; solo 124s/81s green; marginal vs 360s cap only under -j9
+      CPU contention; EXEMPT: dense, evidence banked). Getting here consumed
+      D31 (orphaned lock steal), D32 (seed/save under lock), D33 (fossilized
+      elm-stuff corruption + auto-heal), D34 (write-once acquisition),
+      convoy guard + volume tail clamp, extract cache (cold 44min -> warm
+      14.5min pure at -j9). M4 CLOSED.
 
 ### W5b — The universe
 
@@ -797,9 +808,14 @@ DONE = M5.G and M6.G pass on the same clean commit.
 
 ## STATUS
 
-- Active milestone: **M4** (curated closed). Next: W3.2 (deterministic suite
-  runs — the D13 version-probe/cache races now have abundant evidence), then
-  W3.3-W3.5, W5.1, W5.3, W5.4, W5.8, gate W5.5.
+- Active milestone: **M5** (the universe) — HOLD: human go/no-go required
+  before the walk launches (instruction 2026-07-22: "definitely before you
+  start with M5 give me the lay of the land and ask me if we should
+  procede"). Next: W5.6 walker, then the 2,055-package walk + drain loops.
+- 2026-07-22 M4 CLOSED (W5.5 gate): pure 201/202, browser 249/252, every
+  failure EXEMPT-ledgered with solo evidence. Four infra defect classes
+  (D31-D34) found and killed same-day; extract cache deployed (warm pure
+  gate 14.5min at -j9 vs 44min cold at -j5).
 - 2026-07-19 M3.G PASSED: behavior oracle live end to end. 26 packages
   behavior-tested in the ledger (1,201 cases); 7 divergence specimens filed
   for triage; ingest-behavior.cjs is the §5-lawful bridge from batch log to

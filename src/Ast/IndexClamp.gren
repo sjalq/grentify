@@ -1,0 +1,100 @@
+module Ast.IndexClamp exposing (apply)
+
+{-| D37: Elm's `List.take`/`List.drop` (and `String.left`/`String.dropLeft`)
+treat negative counts as zero; their Gren mappings (`takeFirst`/`dropFirst`)
+are `slice`-based, and `slice` reads negative indices from the END — so
+`take -1 [1,2,3]` ports to `[1,2]` instead of `[]`.
+
+Law: at saturated call sites whose count argument is not provably
+non-negative, wrap it as `max 0 n`. Non-negative literals (the vast
+majority) stay untouched; unsaturated partial applications are left
+alone (no call shape to wrap).
+
+Runs pre-NameSub: Elm names in, Elm names out (`max` is Basics-exposed).
+-}
+
+import Array exposing ( Array )
+import Ast.Types exposing
+    ( Declaration(..)
+    , Expr(..)
+    , File
+    )
+import Ast.Walk as Walk
+
+
+{-| `Module.function` pairs whose first argument is an element/character
+count with clamp-to-zero Elm semantics.
+-}
+clampedFunctions : Array { moduleName : String, name : String }
+clampedFunctions =
+    [ { moduleName = "List", name = "take" }
+    , { moduleName = "List", name = "drop" }
+    , { moduleName = "String", name = "left" }
+    , { moduleName = "String", name = "dropLeft" }
+    , { moduleName = "String", name = "right" }
+    , { moduleName = "String", name = "dropRight" }
+    ]
+
+
+apply : File -> File
+apply file =
+    { file
+        | declarations =
+            Array.map (Walk.mapDeclaration rewrite identity) file.declarations
+    }
+
+
+rewrite : Expr -> Expr
+rewrite expr =
+    Walk.mapExprChildren rewrite (rewriteNode expr)
+
+
+rewriteNode : Expr -> Expr
+rewriteNode expr =
+    when expr is
+        ExprApplication parts ->
+            when { fn = Array.get 0 parts, count = Array.get 1 parts } is
+                { fn = Just (ExprVar ref), count = Just count } ->
+                    if isClampedFunction ref && not (provablyNonNegative count) then
+                        ExprApplication
+                            (Array.set 1 (clamped count) parts)
+
+                    else
+                        expr
+
+                _ ->
+                    expr
+
+        _ ->
+            expr
+
+
+isClampedFunction : { moduleName : Maybe String, name : String } -> Bool
+isClampedFunction ref =
+    Array.any
+        (\candidate ->
+            ref.name == candidate.name && ref.moduleName == Just candidate.moduleName
+        )
+        clampedFunctions
+
+
+provablyNonNegative : Expr -> Bool
+provablyNonNegative expr =
+    when expr is
+        ExprInt n ->
+            n >= 0
+
+        ExprHex n ->
+            n >= 0
+
+        _ ->
+            False
+
+
+clamped : Expr -> Expr
+clamped count =
+    ExprApplication
+        [ ExprVar { moduleName = Nothing, name = "max" }
+        , ExprInt 0
+        , count
+        ]

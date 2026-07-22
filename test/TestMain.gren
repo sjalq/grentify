@@ -10,6 +10,7 @@ import Ast.PrintTest
 import Ast.ReservedTest
 import Ast.RecordAliasTest
 import Ast.TransformLawTest
+import Ast.IndexClampTest
 import Ast.TupleCompareTest
 import Elm.ManifestTest
 import Elm.PackageNameTest
@@ -95,6 +96,7 @@ allChecks =
     , Ast.RecordAliasTest.tests
     , Ast.TransformLawTest.tests
     , Ast.TupleCompareTest.tests
+    , Ast.IndexClampTest.tests
     , MappingSemanticsTest.tests
     , Mapping.Tests.checks
         |> Array.map

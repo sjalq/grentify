@@ -381,11 +381,15 @@ Coverage and pipeline:
   self-recursion reached through a multi-length dispatch; drain if the
   walk surfaces it.
 - **D37 negative-index take/drop divergence** (exposed by the D35
-  receipt, OPEN, small): list-extra's `splitAt` "handles negative
-  numbers correctly" fails — the ported take/drop mapping mishandles
-  negative n (Elm: take -1 == []). The last red case in list-extra
-  (218/219). Fix shape: clamp-to-zero semantics in the List.take/drop
-  → Array mapping (mappings/builtin.json or a wrapper).
+  receipt; FIXED same day, Fable): Gren's takeFirst/dropFirst are
+  slice-based and slice reads negative indices from the END, so
+  `take -1` ported to everything-but-last instead of Elm's `[]`.
+  Fix: micro-pass Ast/IndexClamp (pre-NameSub) wraps the count as
+  `max 0 n` at saturated List.take/drop and String.left/dropLeft/
+  right/dropRight call sites unless it is a provably non-negative
+  literal. Tier 0: 221 (5 new checks). RECEIPT: list-extra behavior
+  suite 219/219 — the original D24 victim is now fully green
+  (compile-dead -> 215 -> 218 -> 219 across D24a/D35/D37).
 
 ---
 

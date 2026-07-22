@@ -1,0 +1,145 @@
+module Ast.IndexClampTest exposing (tests)
+
+{-| D37: negative-count clamping for take/drop-family mappings. -}
+
+import Array exposing ( Array )
+import Ast.IndexClamp as IndexClamp
+import Ast.Types exposing
+    ( Declaration(..)
+    , Expr(..)
+    , File
+    , ModuleKind(..)
+    , Exposing(..)
+    , Pattern(..)
+    )
+
+
+type alias Check =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array Check
+tests =
+    [ clampsVariableCount
+    , leavesNonNegativeLiteral
+    , clampsNegativeLiteral
+    , leavesUnsaturated
+    , leavesUnrelatedFunctions
+    ]
+
+
+ok : String -> Check
+ok name =
+    { name = name, passed = True, details = "" }
+
+
+fail : String -> String -> Check
+fail name details =
+    { name = name, passed = False, details = details }
+
+
+fileWithBody : Expr -> File
+fileWithBody body =
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule
+        , moduleName = "Fixture"
+        , exposing_ = ExposeAll
+        }
+    , comments = []
+    , imports = []
+    , declarations =
+        [ DeclFunction
+            { name = "subject"
+            , documentation = Nothing
+            , signature = Nothing
+            , arguments = [ PatVar "n", PatVar "xs" ]
+            , expression = body
+            }
+        ]
+    }
+
+
+bodyOf : File -> Maybe Expr
+bodyOf file =
+    when Array.get 0 file.declarations is
+        Just (DeclFunction fn) ->
+            Just fn.expression
+
+        _ ->
+            Nothing
+
+
+takeCall : Expr -> Expr
+takeCall count =
+    ExprApplication
+        [ ExprVar { moduleName = Just "List", name = "take" }
+        , count
+        , ExprVar { moduleName = Nothing, name = "xs" }
+        ]
+
+
+clampsVariableCount : Check
+clampsVariableCount =
+    when bodyOf (IndexClamp.apply (fileWithBody (takeCall (ExprVar { moduleName = Nothing, name = "n" })))) is
+        Just (ExprApplication [ _, ExprApplication [ ExprVar { name = "max" }, ExprInt 0, ExprVar { name = "n" } ], _ ]) ->
+            ok "clampsVariableCount"
+
+        other ->
+            fail "clampsVariableCount" ("got: " ++ Debug.toString other)
+
+
+leavesNonNegativeLiteral : Check
+leavesNonNegativeLiteral =
+    when bodyOf (IndexClamp.apply (fileWithBody (takeCall (ExprInt 3)))) is
+        Just (ExprApplication [ _, ExprInt 3, _ ]) ->
+            ok "leavesNonNegativeLiteral"
+
+        other ->
+            fail "leavesNonNegativeLiteral" ("got: " ++ Debug.toString other)
+
+
+clampsNegativeLiteral : Check
+clampsNegativeLiteral =
+    when bodyOf (IndexClamp.apply (fileWithBody (takeCall (ExprNegation (ExprInt 1))))) is
+        Just (ExprApplication [ _, ExprApplication [ ExprVar { name = "max" }, ExprInt 0, ExprNegation (ExprInt 1) ], _ ]) ->
+            ok "clampsNegativeLiteral"
+
+        other ->
+            fail "clampsNegativeLiteral" ("got: " ++ Debug.toString other)
+
+
+leavesUnsaturated : Check
+leavesUnsaturated =
+    let
+        partial =
+            ExprApplication
+                [ ExprVar { moduleName = Just "List", name = "take" } ]
+    in
+    when bodyOf (IndexClamp.apply (fileWithBody partial)) is
+        Just (ExprApplication [ ExprVar { name = "take" } ]) ->
+            ok "leavesUnsaturated"
+
+        other ->
+            fail "leavesUnsaturated" ("got: " ++ Debug.toString other)
+
+
+leavesUnrelatedFunctions : Check
+leavesUnrelatedFunctions =
+    let
+        call =
+            ExprApplication
+                [ ExprVar { moduleName = Just "List", name = "map" }
+                , ExprVar { moduleName = Nothing, name = "n" }
+                , ExprVar { moduleName = Nothing, name = "xs" }
+                ]
+    in
+    when bodyOf (IndexClamp.apply (fileWithBody call)) is
+        Just (ExprApplication [ ExprVar { name = "map" }, ExprVar { name = "n" }, _ ]) ->
+            ok "leavesUnrelatedFunctions"
+
+        other ->
+            fail "leavesUnrelatedFunctions" ("got: " ++ Debug.toString other)

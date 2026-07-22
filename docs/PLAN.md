@@ -367,14 +367,25 @@ Coverage and pipeline:
   14/14, tier 0 216. Hang-class ledger entries from cold gates should be
   re-read as D36 queue victims.
 - **D35 deep-recursion stack overflow in ported code** (found by the
-  D24a list-extra receipt, OPEN): list-extra's 4 "stack safety" tests
-  (10k+ elements through intersperse/isInfixOf etc.) blow the node stack
-  in the ported build. Elm survives via its own list representation and
-  per-function accumulator styles; the port's output recursion is not
-  always stack-safe on giant inputs. Divergence class for the ledger
-  (behavior beyond ~10k-element recursion depth), not a blocker: 215/219
-  behavior cases pass. Fix shape when drained: accumulator/iterative
-  rewrite law for self-recursive functions, or Gren-side trampolining.
+  D24a list-extra receipt; FIXED 2026-07-22, Opus subagent + Fable QA):
+  PORT-INTRODUCED, not source-inherent. MatchCompile's chainTupleArms
+  lowered tuple/list matches into called fallthrough thunks (tf_N), so
+  a function's self-recursive call sat inside a called helper — out of
+  syntactic tail position — and Gren's TCO disengaged; isPrefixOf (and
+  via it isSuffixOf/isInfixOf) overflowed at ~6k depth. Fix: pass the
+  fallthrough continuation inline (duplication bounded by tuple-match
+  arity). RECEIPT (fresh CLI port, full suite): the three overflow
+  tests convert; list-extra 218/219. Latent same-shape instance noted:
+  the single-list multi-cons dispatch path (~MatchCompile:1508) keeps
+  fl_ thunks deliberately (print-explosion tradeoff) — only bites a
+  self-recursion reached through a multi-length dispatch; drain if the
+  walk surfaces it.
+- **D37 negative-index take/drop divergence** (exposed by the D35
+  receipt, OPEN, small): list-extra's `splitAt` "handles negative
+  numbers correctly" fails — the ported take/drop mapping mishandles
+  negative n (Elm: take -1 == []). The last red case in list-extra
+  (218/219). Fix shape: clamp-to-zero semantics in the List.take/drop
+  → Array mapping (mappings/builtin.json or a wrapper).
 
 ---
 

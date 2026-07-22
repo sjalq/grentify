@@ -3930,26 +3930,20 @@ chainTupleArms sole seed temps arms fail =
 
         Just { first = arm, rest = more } ->
             let
-                failName =
-                    "tf_" ++ String.fromInt seed
-
                 next =
                     chainTupleArms sole (seed + 1) temps more fail
-
-                matched =
-                    matchTupleArmColumns sole temps arm.pattern arm.body
-                        (ExprApplication [ var failName, ExprUnit ])
             in
-            ExprLet
-                { declarations =
-                    [ LetFunction
-                        { name = failName
-                        , arguments = [ PatAll ]
-                        , expression = next
-                        }
-                    ]
-                , expression = matched
-                }
+            -- Inline the fallthrough continuation directly rather than wrapping
+            -- it in a called local thunk (`let tf_ _ = next in ... tf_ {}`).
+            -- The thunk cascade pushed a tail-positioned self-recursive call in
+            -- the final arm out of the function's syntactic tail position (it
+            -- sat inside called helpers), so Gren could not eliminate the tail
+            -- call and deep inputs (>~6k) overflowed the node stack (D35).
+            -- Inlining keeps the recursive arm in genuine tail position, letting
+            -- Gren's TCO turn it into a loop. Gren is pure, so duplicating the
+            -- fallthrough expression at each mismatch branch is semantics-
+            -- preserving; tuple-list matches are small, bounding the copy count.
+            matchTupleArmColumns sole temps arm.pattern arm.body next
 
 
 matchTupleArmColumns :

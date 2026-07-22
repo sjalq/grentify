@@ -277,7 +277,30 @@ async function runSuite(options) {
       console.log(`[suite] degradation: pool reduced to -j${poolRef.current}`);
     }
   };
-  await mapPool(filtered.packages, poolRef, async (pkg, index) => {
+  // Convoy law (gate v5c browser): a volume package holds the extraction
+  // lock for its whole multi-minute budget; every normal package queued
+  // behind it starves out at the 120s cap (observed: 2 monsters -> 25+
+  // bogus hangs). Volume packages therefore run LAST, after the normal
+  // fleet clears. Cold sources that can't be pre-scanned count as normal.
+  const isVolumePkg = (pkg) => {
+    try {
+      const root = findCachedPackageRoot(cacheDir, pkg.name, pkg.version);
+      return Boolean(root && scanPackageDirectory(root).volume);
+    } catch {
+      return false;
+    }
+  };
+  const volumeTail = filtered.packages.filter(isVolumePkg);
+  const orderedPackages = [
+    ...filtered.packages.filter((p) => !volumeTail.includes(p)),
+    ...volumeTail,
+  ];
+  if (volumeTail.length > 0) {
+    console.log(
+      `[suite] convoy guard: ${volumeTail.length} volume package(s) deferred to the tail`,
+    );
+  }
+  await mapPool(orderedPackages, poolRef, async (pkg, index) => {
     if (stop) {
       return;
     }

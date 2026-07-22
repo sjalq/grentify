@@ -1,0 +1,141 @@
+module Review.RunnerTest exposing (tests)
+
+{-| Pure checks for the content-addressed extraction cache key math
+(`Review.ExtractCache`). The IO paths (digest, load, store) are exercised by the
+ecosystem harness; here we pin the decisions that must never regress: which
+inputs are cacheable, and how a coordinate + digest map to a file on disk.
+-}
+
+import Array exposing (Array)
+import Debug
+import FileSystem.Path as Path exposing (Path)
+import Review.ExtractCache as ExtractCache
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ disabledCachingYieldsNoKey
+    , localPathYieldsNoKey
+    , registryPackageYieldsKey
+    , keyCarriesCoordinateAndRoot
+    , coordinateLabelIsCanonical
+    , cacheFilePathLayout
+    , distinctDigestsDoNotCollide
+    ]
+
+
+cacheRoot : Path
+cacheRoot =
+    Path.fromPosixString "/home/user/.cache/elm-to-gren"
+
+
+exampleCoordinate : ExtractCache.Coordinate
+exampleCoordinate =
+    { author = "elm-community"
+    , name = "maybe-extra"
+    , version = "5.3.0"
+    }
+
+
+disabledCachingYieldsNoKey : TestResult
+disabledCachingYieldsNoKey =
+    ExtractCache.keyFor False cacheRoot exampleCoordinate (Just "https://example.com/pkg.zip")
+        |> isNothing
+        |> outcome
+            "--no-extract-cache disables the cache key even for a registry package"
+            "Expected Nothing when caching is disabled."
+
+
+localPathYieldsNoKey : TestResult
+localPathYieldsNoKey =
+    ExtractCache.keyFor True cacheRoot exampleCoordinate Nothing
+        |> isNothing
+        |> outcome
+            "a local-path source (no sourceUrl) is never cached"
+            "Expected Nothing when the source has no registry URL."
+
+
+registryPackageYieldsKey : TestResult
+registryPackageYieldsKey =
+    when ExtractCache.keyFor True cacheRoot exampleCoordinate (Just "https://example.com/pkg.zip") is
+        Just _ ->
+            outcome "an enabled registry package produces a cache key" "" True
+
+        Nothing ->
+            outcome "an enabled registry package produces a cache key" "Expected Just key." False
+
+
+keyCarriesCoordinateAndRoot : TestResult
+keyCarriesCoordinateAndRoot =
+    when ExtractCache.keyFor True cacheRoot exampleCoordinate (Just "https://example.com/pkg.zip") is
+        Just key ->
+            expectEqual
+                "the cache key carries the package coordinate and cache root verbatim"
+                { root = Path.toPosixString cacheRoot, coordinate = exampleCoordinate }
+                { root = Path.toPosixString key.cacheRoot, coordinate = key.coordinate }
+
+        Nothing ->
+            outcome "the cache key carries the package coordinate and cache root verbatim" "Expected Just key." False
+
+
+coordinateLabelIsCanonical : TestResult
+coordinateLabelIsCanonical =
+    ExtractCache.coordinateLabel exampleCoordinate
+        |> expectEqual "coordinateLabel renders author/name@version" "elm-community/maybe-extra@5.3.0"
+
+
+cacheFilePathLayout : TestResult
+cacheFilePathLayout =
+    ExtractCache.cacheFilePath cacheRoot exampleCoordinate "deadbeef"
+        |> Path.toPosixString
+        |> expectEqual
+            "cacheFilePath nests <author>__<name>__<version>__<digest>.json under extractions/"
+            "/home/user/.cache/elm-to-gren/extractions/elm-community__maybe-extra__5.3.0__deadbeef.json"
+
+
+distinctDigestsDoNotCollide : TestResult
+distinctDigestsDoNotCollide =
+    let
+        pathFor digest =
+            ExtractCache.cacheFilePath cacheRoot exampleCoordinate digest
+                |> Path.toPosixString
+    in
+    outcome
+        "a changed rule digest changes the cache file, so stale entries cannot be reused"
+        ("Both digests produced " ++ pathFor "aaaa")
+        (pathFor "aaaa" /= pathFor "bbbb")
+
+
+isNothing : Maybe a -> Bool
+isNothing maybe =
+    when maybe is
+        Nothing ->
+            True
+
+        Just _ ->
+            False
+
+
+expectEqual : String -> a -> a -> TestResult
+expectEqual name expected actual =
+    outcome name ("Expected " ++ Debug.toString expected ++ ", got " ++ Debug.toString actual) (expected == actual)
+
+
+outcome : String -> String -> Bool -> TestResult
+outcome name failureDetails passed =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            failureDetails
+    }

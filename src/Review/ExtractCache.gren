@@ -1,0 +1,328 @@
+module Review.ExtractCache exposing
+    ( Coordinate
+    , Key
+    , cacheFilePath
+    , coordinateLabel
+    , digestFor
+    , keyFor
+    , load
+    , store
+    )
+
+{-| Content-addressed cache of elm-review's extraction output for immutable
+registry packages.
+
+A registry package at a fixed `author/name@version` produces identical
+extraction JSON for a fixed rule set, so the shelled-out elm-review run can be
+skipped entirely on a repeat port. The cache key combines the package
+coordinate with a SHA-256 digest of the review-config sources, the elm-review
+CLI version marker, and the reviewed file set: any change to the rules or the
+review surface changes the digest and invalidates stale entries.
+
+Local-path inputs are mutable and are never cached (see `keyFor`).
+-}
+
+import Bytes exposing (Bytes)
+import Bytes.Decode as BytesDecode
+import Crypto
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Math
+import Port.Error as PortError
+import Review.Protocol as Protocol exposing (Extraction)
+import System.File
+import Task exposing (Task)
+
+
+{-| The immutable package identity an extraction belongs to.
+-}
+type alias Coordinate =
+    { author : String
+    , name : String
+    , version : String
+    }
+
+
+{-| Everything needed to locate a cached extraction for one package. `cacheRoot`
+is the tool's top-level cache directory; extractions live under its
+`extractions/` subdirectory.
+-}
+type alias Key =
+    { cacheRoot : Path
+    , coordinate : Coordinate
+    }
+
+
+{-| Build a cache key. Returns `Nothing` when caching is disabled
+(`--no-extract-cache`) or when the source is a local path (`sourceUrl` is
+`Nothing`): local sources are mutable and must always be re-extracted.
+-}
+keyFor : Bool -> Path -> Coordinate -> Maybe String -> Maybe Key
+keyFor enabled cacheRoot coordinate sourceUrl =
+    if not enabled then
+        Nothing
+
+    else
+        when sourceUrl is
+            Nothing ->
+                Nothing
+
+            Just _ ->
+                Just
+                    { cacheRoot = cacheRoot
+                    , coordinate = coordinate
+                    }
+
+
+{-| Human-readable `author/name@version` for progress notes.
+-}
+coordinateLabel : Coordinate -> String
+coordinateLabel coordinate =
+    coordinate.author ++ "/" ++ coordinate.name ++ "@" ++ coordinate.version
+
+
+{-| `<cacheRoot>/extractions/<author>__<name>__<version>__<digest>.json`.
+-}
+cacheFilePath : Path -> Coordinate -> String -> Path
+cacheFilePath cacheRoot coordinate digestHex =
+    Path.join
+        [ cacheRoot
+        , Path.fromPosixString "extractions"
+        , Path.fromPosixString (cacheFileName coordinate digestHex)
+        ]
+
+
+cacheFileName : Coordinate -> String -> String
+cacheFileName coordinate digestHex =
+    coordinate.author
+        ++ "__"
+        ++ coordinate.name
+        ++ "__"
+        ++ coordinate.version
+        ++ "__"
+        ++ digestHex
+        ++ ".json"
+
+
+{-| SHA-256 hex digest of the review-config sources, the elm-review CLI version
+marker, and the reviewed file set. Returns `""` when any ingredient is
+unreadable so the caller can fall back to a fresh, uncached extraction rather
+than reuse a possibly-stale entry.
+-}
+digestFor : FileSystem.Permission -> Path -> String -> Array String -> Task x String
+digestFor permission reviewConfig cliVersionMarker files =
+    System.File.listFilesRecursively permission reviewConfig
+        |> Task.andThen
+            (\paths ->
+                paths
+                    |> Array.keepIf isDigestSource
+                    |> Array.sortBy Path.toPosixString
+                    |> readSources permission
+            )
+        |> Task.andThen
+            (\entries ->
+                let
+                    canonical =
+                        [ "cli:" ++ cliVersionMarker
+                        , "files:" ++ String.join "," files
+                        ]
+                            ++ entries
+                            |> String.join "\n---extract-cache---\n"
+                in
+                sha256Hex canonical
+            )
+        |> Task.onError (\_ -> Task.succeed "")
+
+
+{-| Compiled artifacts and dependencies vary between machines and would make an
+otherwise-identical rule set digest differently; exclude them.
+-}
+isDigestSource : Path -> Bool
+isDigestSource path =
+    let
+        text =
+            Path.toPosixString path
+    in
+    not (String.contains "elm-stuff" text)
+        && not (String.contains "node_modules" text)
+
+
+readSources : FileSystem.Permission -> Array Path -> Task PortError.Error (Array String)
+readSources permission paths =
+    Array.foldl
+        (\path pending ->
+            pending
+                |> Task.andThen
+                    (\acc ->
+                        System.File.readText permission path
+                            |> Task.map
+                                (\contents ->
+                                    Array.pushLast
+                                        (Path.toPosixString path ++ "\n" ++ contents)
+                                        acc
+                                )
+                    )
+        )
+        (Task.succeed [])
+        paths
+
+
+sha256Hex : String -> Task x String
+sha256Hex input =
+    Crypto.getSecureContext
+        |> Task.andThen
+            (\context ->
+                Crypto.digest context Crypto.Sha256 (Bytes.fromString input)
+            )
+        |> Task.map (\digestBytes -> Maybe.withDefault "" (bytesToHex digestBytes))
+        |> Task.onError (\_ -> Task.succeed "")
+
+
+{-| Read a cached extraction. Returns `Nothing` on a cache miss or when the
+stored bytes fail to decode (schema drift, truncation): the caller re-extracts.
+-}
+load : FileSystem.Permission -> Path -> Task x (Maybe Extraction)
+load permission path =
+    System.File.readText permission path
+        |> Task.map
+            (\contents ->
+                when Protocol.decode contents is
+                    Ok extraction ->
+                        Just extraction
+
+                    Err _ ->
+                        Nothing
+            )
+        |> Task.onError (\_ -> Task.succeed Nothing)
+
+
+{-| Persist the raw extraction stdout, keyed by content digest. Writes to a
+unique sibling temp file then renames it into place so a concurrent writer
+never observes a partial file; identical racing writers simply adopt the
+winner. Output that does not decode is never stored, and any I/O failure is
+swallowed (the cache is an optimization, not a correctness dependency).
+-}
+store : FileSystem.Permission -> Path -> String -> Task x {}
+store permission path rawStdout =
+    when Protocol.decode rawStdout is
+        Err _ ->
+            Task.succeed {}
+
+        Ok _ ->
+            writeAtomic permission path rawStdout
+
+
+writeAtomic : FileSystem.Permission -> Path -> String -> Task x {}
+writeAtomic permission path contents =
+    freshUuid
+        |> Task.andThen
+            (\maybeUuid ->
+                when maybeUuid is
+                    Nothing ->
+                        Task.succeed {}
+
+                    Just uuid ->
+                        let
+                            tempPath =
+                                tempSibling path uuid
+                        in
+                        writeTemp permission tempPath contents
+                            |> Task.andThen
+                                (\wrote ->
+                                    if wrote then
+                                        renameInto permission path tempPath
+
+                                    else
+                                        Task.succeed {}
+                                )
+            )
+
+
+freshUuid : Task x (Maybe String)
+freshUuid =
+    Crypto.getSecureContext
+        |> Task.andThen Crypto.randomUuidV4
+        |> Task.map Just
+        |> Task.onError (\_ -> Task.succeed Nothing)
+
+
+writeTemp : FileSystem.Permission -> Path -> String -> Task x Bool
+writeTemp permission tempPath contents =
+    System.File.writeText permission tempPath contents
+        |> Task.map (\_ -> True)
+        |> Task.onError (\_ -> Task.succeed False)
+
+
+renameInto : FileSystem.Permission -> Path -> Path -> Task x {}
+renameInto permission destination tempPath =
+    -- `move new old` renames old -> new (atomic on POSIX). A racing writer that
+    -- already published the destination just wins; drop our temp and adopt it.
+    FileSystem.move permission destination tempPath
+        |> Task.map (\_ -> {})
+        |> Task.onError (\_ -> removeIfExists permission tempPath)
+
+
+tempSibling : Path -> String -> Path
+tempSibling path uuid =
+    let
+        parent =
+            Path.parentPath path
+                |> Maybe.withDefault Path.empty
+
+        name =
+            "." ++ Path.filenameWithExtension path ++ ".tmp-" ++ uuid
+    in
+    Path.join [ parent, Path.fromPosixString name ]
+
+
+removeIfExists : FileSystem.Permission -> Path -> Task x {}
+removeIfExists permission path =
+    System.File.exists permission path
+        |> Task.andThen
+            (\present ->
+                if present then
+                    FileSystem.remove permission { recursive = False } path
+                        |> Task.map (\_ -> {})
+
+                else
+                    Task.succeed {}
+            )
+        |> Task.onError (\_ -> Task.succeed {})
+
+
+bytesToHex : Bytes -> Maybe String
+bytesToHex bytes =
+    BytesDecode.decode
+        (BytesDecode.loop
+            { remaining = Bytes.length bytes, output = [] }
+            (\state ->
+                if state.remaining <= 0 then
+                    BytesDecode.succeed (BytesDecode.Done (String.join "" state.output))
+
+                else
+                    BytesDecode.unsignedInt8
+                        |> BytesDecode.map
+                            (\byte ->
+                                BytesDecode.Loop
+                                    { remaining = state.remaining - 1
+                                    , output = Array.pushLast (hexByte byte) state.output
+                                    }
+                            )
+            )
+        )
+        bytes
+
+
+hexByte : Int -> String
+hexByte value =
+    let
+        digits =
+            "0123456789abcdef"
+
+        high =
+            value // 16
+
+        low =
+            Math.modBy 16 value
+    in
+    String.slice high (high + 1) digits ++ String.slice low (low + 1) digits

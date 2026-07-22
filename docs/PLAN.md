@@ -255,6 +255,14 @@ Coverage and pipeline:
   Runner.gren); released on success AND failure paths; canary 14/14 at -j4
   (90s — the serialization cost, refunded later by the extract cache which
   bypasses locked extraction on hit).
+- **D31 orphaned extraction lock after runner kill** (found + FIXED 2026-07-22):
+  killing a suite runner leaves its child `elm-to-gren` processes alive AND
+  leaves the D30 lock dir behind if a holder dies before release — every later
+  worker spins the full 600s and fails EXTRACT_LOCK (canary poisoned 8/14 at
+  ~655s each). Fix: acquire loop steals locks older than 660s (mtime check —
+  longer than the 600s max legitimate hold), and EXTRACT_LOCK joined the
+  transient-retry signatures in suite.cjs. Ops lesson: kill process GROUPS,
+  and check `pgrep -f elm-to-gren` for orphans before relaunching suites.
 - **D26 review-app JS corrupted at compile time** (found via W5.3, OPEN,
   URGENT — currently breaks ~6/14 canary): one of the two elm-review compiled
   app variants (hash 22ef79…, selected per analyzed package's dep-set) is

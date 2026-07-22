@@ -22,6 +22,7 @@ import Mapping.Tests
 import MappingSemanticsTest
 import Node
 import Resolve.SolverTest
+import Review.RunnerTest
 import Stream.Log
 import Task exposing (Task)
 import Transform.LexicalTest
@@ -82,6 +83,7 @@ allChecks =
     , Transform.PipelineTest.tests
     , Transform.SourceEditTest.tests
     , Resolve.SolverTest.tests
+    , Review.RunnerTest.tests
     , Ast.BareResolveTest.tests
     , Ast.CtorLawTest.tests
     , Ast.EvalPropTest.tests

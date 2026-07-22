@@ -33,6 +33,10 @@ const TRANSIENT_RETRY_PATTERNS = [
   // warm-up races in a cold elm-home (observed 2026-07-21 gate run:
   // 26 instant exit-1s, all clean solo).
   /is not valid JSON/,
+  // Extraction-lock wait exhausted: a queued worker outlasted the 600s
+  // spin (stale-lock steal or a long cold-compile convoy). One retry
+  // lands after the queue drains.
+  /EXTRACT_LOCK/,
 ];
 
 /**

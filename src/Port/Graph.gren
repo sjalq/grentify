@@ -411,6 +411,8 @@ transformOne permissions options registry source =
 
                 Nothing ->
                     Nothing
+        , extractCache = Nothing
+        , logStream = Nothing
         , fileSystem = permissions.fileSystem
         }
         |> Task.andThen

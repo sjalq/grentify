@@ -80,6 +80,8 @@ run options =
                                             , files = []
                                             , offline = options.offline
                                             , reviewAppCache = Nothing
+                                            , extractCache = Nothing
+                                            , logStream = Nothing
                                             , fileSystem = options.fileSystem
                                             }
                                             |> Task.andThen (ensureNoGlobalErrors >> taskFromResult)

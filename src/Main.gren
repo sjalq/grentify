@@ -70,6 +70,7 @@ main =
                                                             , homeDirectory = homeDirectory
                                                             , applicationPath = environment.applicationPath
                                                             , toolVersion = version
+                                                            , logStream = Just environment.stderr
                                                             }
                                                     in
                                                     Cli.parse defaults arguments

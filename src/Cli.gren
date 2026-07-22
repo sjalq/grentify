@@ -41,6 +41,9 @@ type alias Options =
     , namespaceModules : Bool
     , vendor : Bool
     , withTests : Bool
+    , -- Reuse cached elm-review extraction output for immutable registry
+      -- packages. `--no-extract-cache` sets this False to force fresh runs.
+      extractCache : Bool
     }
 
 
@@ -61,6 +64,7 @@ type alias ParseState =
     , namespaceModules : Bool
     , vendor : Bool
     , withTests : Bool
+    , extractCache : Bool
     }
 
 
@@ -102,6 +106,7 @@ parse defaults rawArguments =
             , namespaceModules = selection.vendor
             , vendor = selection.vendor
             , withTests = False
+            , extractCache = True
             }
     in
     if selection.vendor then
@@ -162,6 +167,9 @@ parseArguments state arguments =
 
                 "--with-tests" ->
                     parseArguments { state | withTests = True } rest
+
+                "--no-extract-cache" ->
+                    parseArguments { state | extractCache = False } rest
 
                 "--json" ->
                     parseArguments { state | json = True } rest
@@ -300,6 +308,7 @@ finalize state =
                     , namespaceModules = state.namespaceModules
                     , vendor = state.vendor
                     , withTests = state.withTests
+                    , extractCache = state.extractCache
                     }
 
 
@@ -329,6 +338,7 @@ Options:
       --platform <platform>  auto, common, browser, or node (default: auto)
       --mapping <file>       Add or override mappings; may be repeated
       --offline              Use cached registry data only
+      --no-extract-cache     Ignore the elm-review extraction cache; re-extract
       --with-tests           Extract and transform root package tests separately
       --json                 Print the final report as JSON
   -h, --help                 Show this help

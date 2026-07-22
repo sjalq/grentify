@@ -96,6 +96,7 @@ main =
                                                                 , homeDirectory = homeDirectory
                                                                 , applicationPath = environment.applicationPath
                                                                 , toolVersion = "e2e-test"
+                                                                , logStream = Nothing
                                                                 }
                                                             , permissions =
                                                                 { fileSystem = fileSystemPermission
@@ -197,6 +198,8 @@ runScenario runtime spec =
             , json = False
             , namespaceModules = False
             , vendor = False
+            , withTests = False
+            , extractCache = True
             }
     in
     Orchestrator.run runtime.context runtime.permissions options

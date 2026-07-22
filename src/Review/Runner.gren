@@ -7,13 +7,17 @@ ports (and prove scripts) pay the ~3–20s compile once per rule version, not
 once per package tree.
 -}
 
+import Bytes exposing (Bytes)
 import ChildProcess
 import Dict
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Node
 import Port.Error as PortError exposing (Error)
+import Review.ExtractCache as ExtractCache
 import Review.Protocol as Protocol exposing (Extraction)
+import Stream exposing (Writable)
+import Stream.Log
 import System.File
 import System.Process
 import Task exposing (Task)
@@ -30,6 +34,12 @@ type alias Options =
     , -- Shared cache of elm-review's generated CLI app (cli/2.13.5 tree).
       -- Nothing disables seeding/saving.
       reviewAppCache : Maybe Path
+    , -- Content-addressed cache of the extraction result. `Just` for immutable
+      -- registry packages when caching is enabled; `Nothing` bypasses (local
+      -- paths, `--no-extract-cache`) and always shells out to elm-review.
+      extractCache : Maybe ExtractCache.Key
+    , -- Progress sink for the honest "(extract cached)" note on a cache hit.
+      logStream : Maybe (Writable Bytes)
     , fileSystem : FileSystem.Permission
     }
 
@@ -44,13 +54,79 @@ reviewCliRelative =
 
 run : Node.Platform -> ChildProcess.Permission -> Options -> Task Error Extraction
 run platform childProcess options =
+    when options.extractCache is
+        Nothing ->
+            -- Bypass: local-path input or caching disabled. Always shell out.
+            runFresh platform childProcess options
+                |> Task.map .extraction
+
+        Just key ->
+            ExtractCache.digestFor
+                options.fileSystem
+                options.reviewConfig
+                reviewCliRelative
+                options.files
+                |> Task.andThen
+                    (\digestHex ->
+                        if String.isEmpty digestHex then
+                            -- Digest ingredients unreadable: port without caching.
+                            runFresh platform childProcess options
+                                |> Task.map .extraction
+
+                        else
+                            let
+                                cachePath =
+                                    ExtractCache.cacheFilePath key.cacheRoot key.coordinate digestHex
+                            in
+                            ExtractCache.load options.fileSystem cachePath
+                                |> Task.andThen
+                                    (\cached ->
+                                        when cached is
+                                            Just extraction ->
+                                                -- Cache hit: return WITHOUT taking the D30
+                                                -- compile lock. Skipping serialization is the
+                                                -- entire point of the extract cache.
+                                                logCached options key.coordinate
+                                                    |> Task.map (\_ -> extraction)
+
+                                            Nothing ->
+                                                runFresh platform childProcess options
+                                                    |> Task.andThen
+                                                        (\result ->
+                                                            ExtractCache.store options.fileSystem cachePath result.stdout
+                                                                |> Task.map (\_ -> result.extraction)
+                                                        )
+                                    )
+                    )
+
+
+{-| Cold extraction: seed the shared review app, shell out under the D30 compile
+lock, then save the app. Returns the decoded extraction together with the raw
+(noise-stripped) stdout so a caller may persist it in the extraction cache.
+-}
+runFresh :
+    Node.Platform
+    -> ChildProcess.Permission
+    -> Options
+    -> Task Error { extraction : Extraction, stdout : String }
+runFresh platform childProcess options =
     seedReviewApp platform childProcess options
         |> Task.andThen (\_ -> withCompileLock platform childProcess options)
         |> Task.andThen
-            (\extraction ->
+            (\result ->
                 saveReviewApp platform childProcess options
-                    |> Task.map (\_ -> extraction)
+                    |> Task.map (\_ -> result)
             )
+
+
+logCached : Options -> ExtractCache.Coordinate -> Task x {}
+logCached options coordinate =
+    when options.logStream is
+        Nothing ->
+            Task.succeed {}
+
+        Just stream ->
+            Stream.Log.line stream (ExtractCache.coordinateLabel coordinate ++ " (extract cached)")
 
 
 {-| D30: concurrent elm-review invocations recompile dep-set variant apps in
@@ -60,7 +136,7 @@ SERIALIZED machine-wide via an atomic mkdir spinlock next to the shared
 review-app cache. The extract cache (planned) makes most entries skip this
 entirely; correctness first.
 -}
-withCompileLock : Node.Platform -> ChildProcess.Permission -> Options -> Task Error Extraction
+withCompileLock : Node.Platform -> ChildProcess.Permission -> Options -> Task Error { extraction : Extraction, stdout : String }
 withCompileLock platform childProcess options =
     when options.reviewAppCache is
         Nothing ->
@@ -76,9 +152,18 @@ withCompileLock platform childProcess options =
                         { program = "bash"
                         , arguments =
                             [ "-c"
-                            , "for i in $(seq 1 3000); do if mkdir '"
+                            , -- Steal locks older than 660s: a killed holder (harness
+                              -- reaping, ^C) never runs release, and a live one is bounded
+                              -- by the 600s extraction timeout plus release overhead.
+                              "for i in $(seq 1 3000); do if mkdir '"
                                 ++ lockDir
-                                ++ "' 2>/dev/null; then exit 0; fi; sleep 0.2; done; exit 1"
+                                ++ "' 2>/dev/null; then exit 0; fi; m=$(stat -f %m '"
+                                ++ lockDir
+                                ++ "' 2>/dev/null || stat -c %Y '"
+                                ++ lockDir
+                                ++ "' 2>/dev/null || echo 0); n=$(date +%s); if [ \"$m\" -gt 0 ] && [ $((n - m)) -gt 660 ]; then rmdir '"
+                                ++ lockDir
+                                ++ "' 2>/dev/null; fi; sleep 0.2; done; exit 1"
                             ]
                         , workingDirectory = "."
                         , environment = Dict.empty
@@ -104,8 +189,8 @@ withCompileLock platform childProcess options =
                     (\_ ->
                         invokeReview platform childProcess options
                             |> Task.andThen
-                                (\extraction ->
-                                    release |> Task.map (\_ -> extraction)
+                                (\result ->
+                                    release |> Task.map (\_ -> result)
                                 )
                             |> Task.onError
                                 (\reviewError ->
@@ -116,7 +201,7 @@ withCompileLock platform childProcess options =
                     )
 
 
-invokeReview : Node.Platform -> ChildProcess.Permission -> Options -> Task Error Extraction
+invokeReview : Node.Platform -> ChildProcess.Permission -> Options -> Task Error { extraction : Extraction, stdout : String }
 invokeReview platform childProcess options =
     let
         baseArguments =
@@ -163,9 +248,13 @@ invokeReview platform childProcess options =
         }
         |> Task.andThen
             (\output ->
-                when Protocol.decode (dropLeadingNoise output.stdout) is
+                let
+                    cleaned =
+                        dropLeadingNoise output.stdout
+                in
+                when Protocol.decode cleaned is
                     Ok extraction ->
-                        Task.succeed extraction
+                        Task.succeed { extraction = extraction, stdout = cleaned }
 
                     Err error ->
                         let

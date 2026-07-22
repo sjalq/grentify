@@ -38,7 +38,9 @@ import Port.Error as PortError exposing (Error)
 import Port.Plan as Plan
 import Resolve.Online
 import Resolve.Solver as Solver exposing (Resolution)
+import Review.ExtractCache as ExtractCache
 import Review.Runner
+import Stream exposing (Writable)
 import System.File
 import System.Process
 import Task exposing (Task)
@@ -54,6 +56,9 @@ type alias Context =
     , homeDirectory : Path
     , applicationPath : Path
     , toolVersion : String
+    , -- Progress sink for per-package notes (e.g. "(extract cached)"). Kept off
+      -- stdout so `--json` reports stay clean; wired to stderr by the CLI.
+      logStream : Maybe (Writable Bytes.Bytes)
     }
 
 
@@ -158,7 +163,7 @@ run context permissions cliOptions =
                                                                         else
                                                                             registryForRoot
                                                                 in
-                                                                transformSources context permissions cache cliOptions.offline cliOptions.namespaceModules assets transformRegistry resolution cliOptions.withTests sources
+                                                                transformSources context permissions cache cliOptions.offline cliOptions.namespaceModules cliOptions.extractCache assets transformRegistry resolution cliOptions.withTests sources
                                                             )
                                                         |> Task.andThen
                                                             (\drafts ->
@@ -305,13 +310,14 @@ transformSources
     -> Path
     -> Bool
     -> Bool
+    -> Bool
     -> Assets
     -> Registry
     -> Resolution
     -> Bool
     -> Dict String Acquire.PackageSource
     -> Task Error (Dict String Draft)
-transformSources context permissions cache offline namespaceModules assets registry resolution withTests sources =
+transformSources context permissions cache offline namespaceModules extractCacheEnabled assets registry resolution withTests sources =
     let
         elmHome =
             Path.join [ cache, Path.fromPosixString "elm-home" ]
@@ -346,7 +352,7 @@ transformSources context permissions cache offline namespaceModules assets regis
                                                         ("Acquired source set is missing " ++ key ++ ".")
 
                                             Just source ->
-                                                transformOne context permissions elmHome reviewAppCache offline namespaceModules assets registry source withTests (key == rootName)
+                                                transformOne context permissions cache elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry source withTests (key == rootName)
                                                     |> Task.map (\draft -> Dict.set key draft drafts)
                                     )
                         )
@@ -359,6 +365,8 @@ transformOne
     -> Permissions
     -> Path
     -> Path
+    -> Path
+    -> Bool
     -> Bool
     -> Bool
     -> Assets
@@ -367,7 +375,7 @@ transformOne
     -> Bool
     -> Bool
     -> Task Error Draft
-transformOne context permissions elmHome reviewAppCache offline namespaceModules assets registry source withTests isRoot =
+transformOne context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry source withTests isRoot =
     let
         -- Determine which directories to review: src only, or src + tests
         includeTests =
@@ -379,6 +387,18 @@ transformOne context permissions elmHome reviewAppCache offline namespaceModules
 
             else
                 [ "src" ]
+
+        -- Registry packages (sourceUrl = Just) are immutable and cacheable;
+        -- local-path inputs (Nothing) are mutable and always bypass.
+        extractCache =
+            ExtractCache.keyFor
+                extractCacheEnabled
+                cacheRoot
+                { author = PackageName.author source.manifest.name
+                , name = PackageName.project source.manifest.name
+                , version = Semver.versionToString source.manifest.version
+                }
+                source.sourceUrl
     in
     Task.map2
         (\extraction sourceFiles -> { extraction = extraction, sourceFiles = sourceFiles })
@@ -391,6 +411,8 @@ transformOne context permissions elmHome reviewAppCache offline namespaceModules
             , files = reviewFiles
             , offline = offline
             , reviewAppCache = Just reviewAppCache
+            , extractCache = extractCache
+            , logStream = context.logStream
             , fileSystem = permissions.fileSystem
             }
         )

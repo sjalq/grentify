@@ -50,6 +50,8 @@ tests =
     , charLiteralWithControlCharEmitsUnicodeEscape
     -- Operators in record fields must print with parentheses (not bare)
     , operatorInRecordFieldParenthesized
+    -- W5.1d: the giant embedded-docs record literal stays single-line + valid
+    , embeddedDocsRecordStaysSingleLine
     ]
 
 
@@ -967,6 +969,77 @@ operatorInRecordFieldParenthesized =
     in
     outcome
         "operator in record field prints parenthesized"
+        ok
+        ("printed:\n" ++ printed)
+
+
+{-| W5.1d "UNFINISHED RECORD": the ElmCore embedded-docs specimen is a list of
+deeply nested record literals whose string fields hold multi-line doc comments
+and whose `tipe` fields are constructor-applied records. Gren records are always
+one line, so the body must render as a single physical line: string newlines
+escaped to `\n`, nested constructor payloads parenthesized inline. A raw newline
+inside the record braces is exactly the layout Gren rejects with UNFINISHED
+RECORD, so the body must contain none.
+-}
+embeddedDocsRecordStaysSingleLine : TestResult
+embeddedDocsRecordStaysSingleLine =
+    let
+        tipe =
+            -- `Elm.Type.Type String (List Type)` lowered to a multi-arg ctor:
+            -- the printer emits `Type ({ first = …, second = … })`.
+            ExprApplication
+                [ ExprVar { moduleName = Nothing, name = "Type" }
+                , ExprString "Array.Array"
+                , ExprList
+                    [ ExprApplication
+                        [ ExprVar { moduleName = Nothing, name = "Var" }
+                        , ExprString "a"
+                        ]
+                    ]
+                ]
+
+        body =
+            ExprList
+                [ ExprRecord
+                    [ { name = "name", value = ExprString "Array" }
+                    , { name = "comment", value = ExprString " Fast arrays.\n\n# Arrays\n@docs Array\n" }
+                    , { name = "aliases", value = ExprList [] }
+                    , { name = "values"
+                      , value =
+                            ExprList
+                                [ ExprRecord
+                                    [ { name = "name", value = ExprString "append" }
+                                    , { name = "tipe", value = tipe }
+                                    ]
+                                ]
+                      }
+                    ]
+                ]
+
+        printed =
+            printExprBinding "dependencyModules" body
+
+        recordBody =
+            -- Everything the printer emitted for the RHS, minus the leading
+            -- indent and trailing newline, so only interior breaks remain.
+            when Array.last (String.split "dependencyModules =" printed) is
+                Just tail ->
+                    String.trim tail
+
+                Nothing ->
+                    printed
+
+        ok =
+            -- The whole record body is one physical line (no raw newline that
+            -- Gren would reject with UNFINISHED RECORD).
+            not (String.contains "\n" recordBody)
+                -- Doc-comment newlines survived as escapes, not raw breaks.
+                && String.contains "\\n\\n# Arrays" printed
+                -- Nested constructor payload is parenthesized inline.
+                && String.contains "Type ({ first = " printed
+    in
+    outcome
+        "embedded-docs record literal stays single-line and valid"
         ok
         ("printed:\n" ++ printed)
 

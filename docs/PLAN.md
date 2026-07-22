@@ -629,7 +629,7 @@ no compiler in the loop.
             BLOCKED: this is one site of D24 (tuple-as-Dict-key needs the
             type-directed rewrite); resolving it here would be a one-off
             hack. Closes with D24.
-      - [ ] W5.1d UNFINISHED RECORD (1 site): printer layout breaks inside
+      - [x] W5.1d UNFINISHED RECORD (1 site): printer layout breaks inside
             the giant embedded-docs record literal (the original "embedded
             docs" suspicion — actually the smallest class).
             PARTIAL: operator-as-value now prints parenthesized ((<|) not
@@ -637,6 +637,16 @@ no compiler in the loop.
             ElmCore site STILL fails; the true empty-print there is
             unidentified. Needs the emitted line 21 cut at the parse
             position (staging retention or a doc-record minimal specimen).
+            RESOLVED 2026-07-22 (Opus subagent, Fable-QA'd): does NOT
+            reproduce on current build. The demanded line-21 cut was taken
+            (143,695-char single line) and it PARSES — gren make on the
+            captured ElmCore.gren exits 0 against faithful stubs; the
+            residual "off in the body" message is a stub TYPE MISMATCH,
+            not a parse error. Covered by existing laws: records print
+            single-line, string newlines escape to \n, block values get
+            the D25 own-line treatment. Regression guard added:
+            embeddedDocsRecordStaysSingleLine (tier 0 now 207 checks).
+            elm-review@2.16.6's remaining suite failure is purely scale.
       - [x] W5.1e (surfaced by the deeper port; original framing WRONG —
             helper emission was innocent, proven by two green CtorLawTest
             regressions): real bug = D28, MatchCompile's ctor-embedded

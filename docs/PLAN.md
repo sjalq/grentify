@@ -352,6 +352,21 @@ Coverage and pipeline:
   suite went from 0 tests ran (compile-dead) to 215/219 passing.
   The 4 fails are list-extra's own "stack safety" 10k-recursion tests
   (RangeError) — a NEW distinct class, filed as D35.
+- **D41 MatchCompile leaked nested list patterns inside ctor-arg heads**
+  (found by the unbounded elm-css hub seed 2026-07-23; FIXED same day,
+  Fable): a cons arm whose head is a ctor pattern with nested list/cons
+  ARGUMENTS — elm-css's `(MediaRule mq (first :: rest)) :: []` in
+  extendLastSelector/concatMapLastStyleBlock — went through
+  compileListCasePeel → finishLastHead/matchHeads → bindIrrefutable →
+  matchNamed, which re-emits the ORIGINAL pattern into a raw two-arm
+  case; the nested list patterns inside the ctor arguments survived to
+  Print (AST_UNPORTED_LIST `case{named:MediaRule|_}`). The fully
+  recursive path (matchNamedPattern's temps peel) existed but was
+  unreachable from those two sites. Fix: both sites divert to
+  matchPattern when `patternHasUnportedList headPat` (behavior for
+  list-free heads unchanged). Proofs: tier 0 243 incl. 2 new checks
+  (reduced extendLastSelector fixture compiles residue-free, no
+  shadowing); elm-css E2E receipt due with the leg-8 drain rebuild.
 - **D39 generated helpers used bare Basics names** (found by gate v8
   browser, FIXED 2026-07-22, Fable): IndexClamp emitted bare `max` and
   TupleCompare bare `compare`; a module-local binding of either name

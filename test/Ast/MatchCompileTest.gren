@@ -39,6 +39,8 @@ tests =
     [ compilesWithoutShadowing
     , keepsSelfCallInTailPosition
     , duplicatesTheContinuation
+    , ctorHeadNestedConsCompiles
+    , ctorHeadNestedConsNoShadowing
     ]
 
 
@@ -152,6 +154,114 @@ compiledBody =
 
 
 
+{-| D41: cons arm whose HEAD is a ctor pattern with nested list/cons arguments
+(the rtfeldman/elm-css `extendLastSelector` shape):
+
+    case declarations of
+        [] -> declarations
+        (MediaRule mq ((StyleBlock only [] properties) :: [])) :: [] -> e1
+        (MediaRule mq (first :: rest)) :: [] -> e2
+        first :: rest -> e3
+
+`finishLastHead` used to route the ctor head through `bindIrrefutable` →
+`matchNamed`, which re-emits the ORIGINAL pattern into a raw two-arm case —
+the nested list patterns inside the ctor arguments survive to Print
+(AST_UNPORTED_LIST `case{named:MediaRule|_}`).
+-}
+d41Fixture : File
+d41Fixture =
+    let
+        mediaRule args =
+            PatNamed
+                { ref = { moduleName = Nothing, name = "MediaRule" }
+                , arguments = args
+                }
+
+        styleBlockPat =
+            PatNamed
+                { ref = { moduleName = Nothing, name = "StyleBlock" }
+                , arguments = [ PatVar "only", PatList [], PatVar "properties" ]
+                }
+
+        consEnd head =
+            PatCons { head = head, tail = PatList [] }
+
+        body =
+            ExprCase
+                { expression = bare "declarations"
+                , cases =
+                    [ { pattern = PatList []
+                      , body = bare "declarations"
+                      }
+                    , { pattern =
+                            consEnd
+                                (mediaRule
+                                    [ PatVar "mq", consEnd styleBlockPat ])
+                      , body = ExprApplication [ bare "e1", bare "only" ]
+                      }
+                    , { pattern =
+                            consEnd
+                                (mediaRule
+                                    [ PatVar "mq"
+                                    , PatCons
+                                        { head = PatVar "first"
+                                        , tail = PatVar "rest"
+                                        }
+                                    ])
+                      , body =
+                            ExprApplication
+                                [ bare "e2", bare "first", bare "rest" ]
+                      }
+                    , { pattern =
+                            PatCons
+                                { head = PatVar "first", tail = PatVar "rest" }
+                      , body =
+                            ExprApplication
+                                [ bare "e3", bare "first", bare "rest" ]
+                      }
+                    ]
+                }
+    in
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule
+        , moduleName = "Fixture"
+        , exposing_ = ExposeAll
+        }
+    , comments = []
+    , imports = []
+    , declarations =
+        [ DeclFunction
+            { name = "extendLast"
+            , documentation = Nothing
+            , signature = Nothing
+            , arguments = [ PatVar "declarations" ]
+            , expression = body
+            }
+        ]
+    }
+
+
+d41Compiled : File
+d41Compiled =
+    let
+        lowered =
+            CtorLaw.apply (CtorLaw.collectFromFile d41Fixture) d41Fixture
+    in
+    MatchCompile.compile Dict.empty lowered
+
+
+d41CompiledBody : Maybe Expr
+d41CompiledBody =
+    when Array.get 0 d41Compiled.declarations is
+        Just (DeclFunction fn) ->
+            Just fn.expression
+
+        _ ->
+            Nothing
+
+
+
 -- CHECKS ----------------------------------------------------------------------
 
 
@@ -189,6 +299,34 @@ keepsSelfCallInTailPosition =
 and duplicate the continuation, so the `leftX` binder family must appear more
 than once (original + at least one freshened copy).
 -}
+ctorHeadNestedConsCompiles : Check
+ctorHeadNestedConsCompiles =
+    if MatchCompile.hasUnportedListPatterns d41Compiled then
+        fail "ctorHeadNestedConsCompiles"
+            ("nested list patterns inside ctor-arg heads survived MatchCompile: "
+                ++ MatchCompile.unportedListSummary d41Compiled
+            )
+
+    else
+        ok "ctorHeadNestedConsCompiles"
+
+
+ctorHeadNestedConsNoShadowing : Check
+ctorHeadNestedConsNoShadowing =
+    when d41CompiledBody is
+        Just body ->
+            if hasNestedShadowing Dict.empty body then
+                fail "ctorHeadNestedConsNoShadowing"
+                    "D41 compile introduced Gren SHADOWING"
+
+            else
+                ok "ctorHeadNestedConsNoShadowing"
+
+        Nothing ->
+            fail "ctorHeadNestedConsNoShadowing"
+                "no compiled `extendLast` declaration"
+
+
 duplicatesTheContinuation : Check
 duplicatesTheContinuation =
     when compiledBody is

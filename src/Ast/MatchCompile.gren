@@ -1950,7 +1950,16 @@ matchHeads sole seed scope headExpr tailExpr heads rest body fail =
                     afterHead =
                         wrapLet tailB.name tailExpr continue
                 in
-                bindIrrefutable sole headPat headExpr afterHead fail
+                -- Ctor heads with nested list/cons arguments must go through
+                -- the recursive matcher; bindIrrefutable/matchNamed re-emits
+                -- the original pattern raw and the nested list patterns
+                -- survive to Print (D41, elm-css extendLastSelector).
+                if patternHasUnportedList headPat then
+                    matchPattern sole (seed + 90) tailTB.scope headPat headExpr
+                        afterHead fail
+
+                else
+                    bindIrrefutable sole headPat headExpr afterHead fail
 
 
 finishLastHead :
@@ -1986,7 +1995,14 @@ finishLastHead sole seed scope headExpr tailExpr headPat rest body fail =
                             fail
 
                 _ ->
-                    bindIrrefutable sole headPat headExpr after fail
+                    -- Same D41 law as matchHeads: nested list patterns inside
+                    -- a ctor head need the recursive matcher.
+                    if patternHasUnportedList headPat then
+                        matchPattern sole (seed + 70) scope headPat headExpr
+                            after fail
+
+                    else
+                        bindIrrefutable sole headPat headExpr after fail
     in
     when rest is
         PatVar restName ->

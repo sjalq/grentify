@@ -28,6 +28,7 @@ only for hand-crafted / legacy extractions without an encoded AST.
 
 import Array exposing (Array)
 import Ast.Decode as AstDecode
+import Ast.CtorHome as AstCtorHome
 import Ast.CtorLaw as AstCtorLaw
 import Ast.MatchCompile as AstMatchCompile
 import Ast.NameSub as AstNameSub
@@ -400,6 +401,10 @@ transform registry depMaps extraction sources =
                     packageKeyEvidence =
                         collectPackageKeyEvidence extraction.modules
 
+                    -- D46 evidence (Elm names): ctor name -> declaring modules.
+                    packageCtorHomes =
+                        collectPackageCtorHomes extraction.modules
+
                     packageRecordAliases =
                         collectPackageRecordAliases registry extraction.modules
 
@@ -443,6 +448,7 @@ transform registry depMaps extraction sources =
                                             |> Result.andThen
                                                 (transformModule registry
                                                     packageTupleReturns
+                                                    packageCtorHomes
                                                     packageKeyEvidence
                                                     packageRecordAliases
                                                     packageCtorArities
@@ -568,6 +574,30 @@ collectPackageKeyEvidence modules =
         |> AstKeyEncode.collectEvidence
 
 
+{-| D46 evidence: ctor name -> declaring modules, package-wide (Elm names,
+BareResolve only — CtorHome consumes this pre-NameSub).
+-}
+collectPackageCtorHomes :
+    Array Protocol.ModuleExtraction
+    -> AstCtorHome.Homes
+collectPackageCtorHomes modules =
+    Array.mapAndKeepJust
+        (\moduleExtraction ->
+            moduleExtraction.ast
+                |> Maybe.andThen
+                    (\astValue ->
+                        when AstDecode.decode astValue is
+                            Err _ ->
+                                Nothing
+
+                            Ok file ->
+                                Just (AstBareResolve.apply file)
+                    )
+        )
+        modules
+        |> AstCtorHome.collectHomes
+
+
 {-| `"Module.Ctor"` → arity (≥ 2), from every AST in the package.
 -}
 collectPackageCtorArities :
@@ -661,6 +691,7 @@ foldNamedAsts registry modules collect acc =
 transformModule :
     Registry
     -> Dict String (Array AstTupleCompare.ElemShape)
+    -> AstCtorHome.Homes
     -> AstKeyEncode.Evidence
     -> Dict String (Array String)
     -> Dict String Int
@@ -669,7 +700,7 @@ transformModule :
     -> SourceFile
     -> Protocol.ModuleExtraction
     -> Result Error TransformedModule
-transformModule registry packageTupleReturns packageKeyEvidence packageRecordAliases packageCtorArities packageSoleCtors packageReservedExports input extraction =
+transformModule registry packageTupleReturns packageCtorHomes packageKeyEvidence packageRecordAliases packageCtorArities packageSoleCtors packageReservedExports input extraction =
     toGrenSourcePath input.path
         |> Result.andThen
             (\outputPath ->
@@ -700,6 +731,7 @@ transformModule registry packageTupleReturns packageKeyEvidence packageRecordAli
                     Just astValue ->
                         transformModuleViaAst registry
                             packageTupleReturns
+                            packageCtorHomes
                             packageKeyEvidence
                             packageRecordAliases
                             packageCtorArities
@@ -715,6 +747,7 @@ transformModule registry packageTupleReturns packageKeyEvidence packageRecordAli
 transformModuleViaAst :
     Registry
     -> Dict String (Array AstTupleCompare.ElemShape)
+    -> AstCtorHome.Homes
     -> AstKeyEncode.Evidence
     -> Dict String (Array String)
     -> Dict String Int
@@ -725,7 +758,7 @@ transformModuleViaAst :
     -> String
     -> Decode.Value
     -> Result Error TransformedModule
-transformModuleViaAst registry packageTupleReturns packageKeyEvidence packageRecordAliases packageCtorArities packageSoleCtors packageReservedExports input extraction outputPath astValue =
+transformModuleViaAst registry packageTupleReturns packageCtorHomes packageKeyEvidence packageRecordAliases packageCtorArities packageSoleCtors packageReservedExports input extraction outputPath astValue =
     when AstDecode.decode astValue is
         Err decodeError ->
             Err <|
@@ -741,6 +774,7 @@ transformModuleViaAst registry packageTupleReturns packageKeyEvidence packageRec
                 lowered =
                     file
                         |> AstBareResolve.apply
+                        |> AstCtorHome.apply packageCtorHomes
                         |> AstIndexClamp.apply
                         |> AstTupleCompare.apply packageTupleReturns
                         |> AstKeyEncode.apply packageKeyEvidence

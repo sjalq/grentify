@@ -1,0 +1,190 @@
+module Ast.CtorHome exposing ( Homes, apply, collectHomes )
+
+{-| D46: re-point constructor references whose recorded module does not
+declare them.
+
+The extractor resolves refs with elm-review's ModuleNameLookupTable. When
+a name is exposed by one import as a TYPE (alias) and by another as an
+open CONSTRUCTOR — elm-review's own `Review.Rule.ReviewError` (alias)
+vs `Review.Error.ReviewError.ReviewError (..)` — the table answers with
+the type's module for argument patterns, and the emitted ref
+(`Rule.ReviewError` as a pattern ctor) fails Gren with NAMING ERROR.
+
+Evidence law (D23 spirit — repair only with knowledge held exactly):
+a capitalized ref `M.N` in ctor position (pattern, or expression var)
+is re-pointed only when BOTH hold:
+
+1. module M is known in this package's extraction set and does NOT
+   declare a constructor N, and
+2. exactly ONE module among this file's imports (or the file itself)
+   declares constructor N.
+
+Unknown modules (dependencies), ambiguous homes, and declared-as-stated
+refs are never touched. Runs after BareResolve, before NameSub (Elm
+module names).
+-}
+
+import Array exposing ( Array )
+import Char
+import Ast.Types exposing
+    ( Declaration(..)
+    , Expr(..)
+    , File
+    , Pattern(..)
+    )
+import Ast.Walk as Walk
+import Dict exposing ( Dict )
+
+
+type alias Homes =
+    { -- ctor name -> modules in this package declaring it
+      byCtor : Dict String (Array String)
+    , -- module name -> {} for every module in the extraction set
+      knownModules : Dict String {}
+    }
+
+
+collectHomes : Array File -> Homes
+collectHomes files =
+    Array.foldl
+        (\file acc ->
+            let
+                moduleName =
+                    file.moduleDefinition.moduleName
+
+                withModule =
+                    { acc
+                        | knownModules = Dict.set moduleName {} acc.knownModules
+                    }
+            in
+            Array.foldl
+                (\declaration inner ->
+                    when declaration is
+                        DeclCustomType custom ->
+                            Array.foldl
+                                (\ctor deeper ->
+                                    { deeper
+                                        | byCtor =
+                                            Dict.update ctor.name
+                                                (\existing ->
+                                                    when existing is
+                                                        Just modules ->
+                                                            Just (Array.pushLast moduleName modules)
+
+                                                        Nothing ->
+                                                            Just [ moduleName ]
+                                                )
+                                                deeper.byCtor
+                                    }
+                                )
+                                inner
+                                custom.constructors
+
+                        _ ->
+                            inner
+                )
+                withModule
+                file.declarations
+        )
+        { byCtor = Dict.empty, knownModules = Dict.empty }
+        files
+
+
+apply : Homes -> File -> File
+apply homes file =
+    if Dict.isEmpty homes.byCtor then
+        file
+
+    else
+        let
+            importable =
+                Dict.set file.moduleDefinition.moduleName {}
+                    (Array.foldl
+                        (\importDef acc -> Dict.set importDef.moduleName {} acc)
+                        Dict.empty
+                        file.imports
+                    )
+
+            fixRef ref =
+                when ref.moduleName is
+                    Nothing ->
+                        ref
+
+                    Just written ->
+                        if declaresCtor homes written ref.name then
+                            ref
+
+                        else if not (Dict.member written homes.knownModules) then
+                            -- dependency or unknown module: no evidence
+                            ref
+
+                        else
+                            when soleImportedHome homes importable ref.name is
+                                Just home ->
+                                    { ref | moduleName = Just home }
+
+                                Nothing ->
+                                    ref
+
+            fixPattern pattern =
+                when pattern is
+                    PatNamed { ref = ref, arguments = args } ->
+                        PatNamed
+                            { ref = fixRef ref
+                            , arguments = Array.map fixPattern args
+                            }
+
+                    _ ->
+                        Walk.mapPatternChildren fixPattern pattern
+
+            fixExpr expr =
+                when expr is
+                    ExprVar ref ->
+                        if isCtorName ref.name then
+                            ExprVar (fixRef ref)
+
+                        else
+                            expr
+
+                    _ ->
+                        Walk.mapExprChildrenWithPatterns fixExpr fixPattern expr
+        in
+        { file
+            | declarations =
+                Array.map (Walk.mapDeclaration fixExpr fixPattern)
+                    file.declarations
+        }
+
+
+declaresCtor : Homes -> String -> String -> Bool
+declaresCtor homes moduleName ctorName =
+    Dict.get ctorName homes.byCtor
+        |> Maybe.withDefault []
+        |> Array.any (\home -> home == moduleName)
+
+
+{-| The single importable module declaring this ctor, if unambiguous. -}
+soleImportedHome : Homes -> Dict String {} -> String -> Maybe String
+soleImportedHome homes importable ctorName =
+    let
+        candidates =
+            Dict.get ctorName homes.byCtor
+                |> Maybe.withDefault []
+                |> Array.keepIf (\home -> Dict.member home importable)
+    in
+    when { count = Array.length candidates, first = Array.first candidates } is
+        { count = 1, first = Just home } ->
+            Just home
+
+        _ ->
+            Nothing
+
+
+isCtorName : String -> Bool
+isCtorName name =
+    when String.popFirst name is
+        Just { first = first } ->
+            Char.isUpper first
+
+        Nothing ->
+            False

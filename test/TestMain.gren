@@ -11,6 +11,7 @@ import Ast.ReservedTest
 import Ast.RecordAliasTest
 import Ast.TransformLawTest
 import Ast.IndexClampTest
+import Ast.CtorHomeTest
 import Ast.KeyEncodeTest
 import Ast.MatchCompileTest
 import Ast.TupleCompareTest
@@ -103,6 +104,7 @@ allChecks =
     , Ast.IndexClampTest.tests
     , Ast.MatchCompileTest.tests
     , Ast.KeyEncodeTest.tests
+    , Ast.CtorHomeTest.tests
     , MappingSemanticsTest.tests
     , Mapping.Tests.checks
         |> Array.map

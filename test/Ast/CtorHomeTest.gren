@@ -1,0 +1,218 @@
+module Ast.CtorHomeTest exposing (tests)
+
+{-| D46: ctor refs whose recorded module does not declare them are
+re-pointed to the sole importable declaring module — never guessed.
+The elm-review shape: `Rule.ReviewError` (type-alias module) vs the
+real ctor in `Review.Error.ReviewError`.
+-}
+
+import Array exposing ( Array )
+import Ast.CtorHome as CtorHome
+import Ast.Types exposing
+    ( Declaration(..)
+    , Exposing(..)
+    , Expr(..)
+    , File
+    , ModuleKind(..)
+    , Pattern(..)
+    )
+import Dict
+
+
+type alias Check =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array Check
+tests =
+    [ repointsPatternToDeclaringModule
+    , leavesDeclaredRefAlone
+    , leavesUnknownModuleAlone
+    , repointsExprCtor
+    , leavesAmbiguousAlone
+    ]
+
+
+ok : String -> Check
+ok name =
+    { name = name, passed = True, details = "" }
+
+
+fail : String -> String -> Check
+fail name details =
+    { name = name, passed = False, details = details }
+
+
+moduleWith : String -> Array String -> Array Declaration -> File
+moduleWith name imports declarations =
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule, moduleName = name, exposing_ = ExposeAll }
+    , comments = []
+    , imports =
+        Array.map
+            (\m -> { moduleName = m, alias = Nothing, exposing_ = Nothing })
+            imports
+    , declarations = declarations
+    }
+
+
+ctorModule : String -> String -> File
+ctorModule moduleName ctorName =
+    moduleWith moduleName
+        []
+        [ DeclCustomType
+            { name = ctorName
+            , documentation = Nothing
+            , generics = []
+            , constructors = [ { name = ctorName, arguments = [] } ]
+            }
+        ]
+
+
+{-| `Review.Rule` exists in the package but declares no ReviewError ctor;
+`Review.Error.ReviewError` declares it. Test file imports both.
+-}
+homes : CtorHome.Homes
+homes =
+    CtorHome.collectHomes
+        [ moduleWith "Review.Rule" [] []
+        , ctorModule "Review.Error.ReviewError" "ReviewError"
+        , testFile
+        ]
+
+
+badRef : Ast.Types.NamedRef
+badRef =
+    { moduleName = Just "Review.Rule", name = "ReviewError" }
+
+
+testFile : File
+testFile =
+    moduleWith "Review.Test"
+        [ "Review.Rule", "Review.Error.ReviewError" ]
+        [ DeclFunction
+            { name = "check"
+            , documentation = Nothing
+            , signature = Nothing
+            , arguments =
+                [ PatNamed { ref = badRef, arguments = [ PatVar "err" ] } ]
+            , expression = ExprVar badRef
+            }
+        ]
+
+
+appliedCheck : Maybe { pattern : Maybe Pattern, body : Expr }
+appliedCheck =
+    when Array.first (CtorHome.apply homes testFile).declarations is
+        Just (DeclFunction fn) ->
+            Just { pattern = Array.first fn.arguments, body = fn.expression }
+
+        _ ->
+            Nothing
+
+
+repointsPatternToDeclaringModule : Check
+repointsPatternToDeclaringModule =
+    when appliedCheck is
+        Just { pattern = Just (PatNamed { ref = { moduleName = Just "Review.Error.ReviewError" } }) } ->
+            ok "repointsPatternToDeclaringModule"
+
+        other ->
+            fail "repointsPatternToDeclaringModule" ("got: " ++ Debug.toString other)
+
+
+repointsExprCtor : Check
+repointsExprCtor =
+    when appliedCheck is
+        Just { body = ExprVar { moduleName = Just "Review.Error.ReviewError" } } ->
+            ok "repointsExprCtor"
+
+        other ->
+            fail "repointsExprCtor" ("got: " ++ Debug.toString other)
+
+
+leavesDeclaredRefAlone : Check
+leavesDeclaredRefAlone =
+    let
+        goodFile =
+            moduleWith "Consumer"
+                [ "Review.Error.ReviewError" ]
+                [ DeclFunction
+                    { name = "check"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprVar { moduleName = Just "Review.Error.ReviewError", name = "ReviewError" }
+                    }
+                ]
+    in
+    when Array.first (CtorHome.apply homes goodFile).declarations is
+        Just (DeclFunction { expression = ExprVar { moduleName = Just "Review.Error.ReviewError" } }) ->
+            ok "leavesDeclaredRefAlone"
+
+        other ->
+            fail "leavesDeclaredRefAlone" ("got: " ++ Debug.toString other)
+
+
+{-| A ref into a module NOT in the extraction set (a dependency) is
+never touched, whatever it names.
+-}
+leavesUnknownModuleAlone : Check
+leavesUnknownModuleAlone =
+    let
+        depFile =
+            moduleWith "Consumer"
+                [ "Review.Error.ReviewError" ]
+                [ DeclFunction
+                    { name = "check"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprVar { moduleName = Just "Elm.Syntax.Node", name = "ReviewError" }
+                    }
+                ]
+    in
+    when Array.first (CtorHome.apply homes depFile).declarations is
+        Just (DeclFunction { expression = ExprVar { moduleName = Just "Elm.Syntax.Node" } }) ->
+            ok "leavesUnknownModuleAlone"
+
+        other ->
+            fail "leavesUnknownModuleAlone" ("got: " ++ Debug.toString other)
+
+
+{-| Two importable modules declaring the same ctor: no repair. -}
+leavesAmbiguousAlone : Check
+leavesAmbiguousAlone =
+    let
+        ambiguousHomes =
+            CtorHome.collectHomes
+                [ moduleWith "Review.Rule" [] []
+                , ctorModule "Home.A" "ReviewError"
+                , ctorModule "Home.B" "ReviewError"
+                ]
+
+        file =
+            moduleWith "Consumer"
+                [ "Review.Rule", "Home.A", "Home.B" ]
+                [ DeclFunction
+                    { name = "check"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprVar { moduleName = Just "Review.Rule", name = "ReviewError" }
+                    }
+                ]
+    in
+    when Array.first (CtorHome.apply ambiguousHomes file).declarations is
+        Just (DeclFunction { expression = ExprVar { moduleName = Just "Review.Rule" } }) ->
+            ok "leavesAmbiguousAlone"
+
+        other ->
+            fail "leavesAmbiguousAlone" ("got: " ++ Debug.toString other)

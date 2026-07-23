@@ -352,6 +352,20 @@ Coverage and pipeline:
   suite went from 0 tests ran (compile-dead) to 215/219 passing.
   The 4 fails are list-extra's own "stack safety" 10k-recursion tests
   (RangeError) — a NEW distinct class, filed as D35.
+- **D46 extractor mis-qualifies ctor refs shadowed by type exposings**
+  (found by the post-D45b elm-review verify 2026-07-23: Review.Test's
+  bare `(ReviewError err)` pattern arrived as `Rule.ReviewError` —
+  elm-review's own ModuleNameLookupTable answers with the TYPE-alias
+  module (Review.Rule) instead of the ctor's home
+  (Review.Error.ReviewError) when both imports expose the name; FIXED
+  same day, Fable, host-side per the D23 law "the extraction is the
+  lie; repair with knowledge held exactly"): new Ast.CtorHome pass
+  after BareResolve — package-wide ctor→declaring-modules index; a
+  capitalized ref whose recorded module is KNOWN in the package but
+  does not declare the ctor re-points to the SOLE importable declaring
+  module. Unknown (dependency) modules, ambiguous homes, and
+  declared-as-stated refs never touched. Tier 0: 260 incl. 5 CtorHome
+  checks. E2E receipt: elm-review rerun in flight.
 - **D45b cross-package sole ctors got dead wildcards → Gren compiler
   panic** (found by the post-D45 elm-review verify 2026-07-23: staging
   snapshot + module bisect landed on `when h is (Node.Node {…}) -> …;

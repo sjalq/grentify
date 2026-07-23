@@ -177,9 +177,15 @@ buildManifest options =
 
 
 {-| Gren rejects nested `local:` deps unless the root also declares the same
-local package. For the root package only, surface every generated sibling
-(even if only transitive in the Elm graph) so nested local paths resolve
-compatibly (e.g. elm-review → elm-syntax → structured-writer).
+local package. EVERY package manifest surfaces every generated sibling (even
+if only transitive in the Elm graph) so nested local paths resolve compatibly
+(e.g. elm-review → elm-syntax → structured-writer).
+
+D47: vendored packages verify standalone (`gren docs` in their own
+directory), where each acts as its own root — so the hoist must apply to
+all of them, not just the workspace root. A vendored elm-review whose
+manifest omitted structured-writer failed the solver with INDIRECT LOCAL
+DEPENDENCY even though every pointer was layout-consistent.
 -}
 hoistTransitiveLocals
     : { source : Manifest
@@ -191,11 +197,7 @@ hoistTransitiveLocals
     -> Dict String Dependency
     -> Result Error (Dict String Dependency)
 hoistTransitiveLocals options dependencies =
-    if options.identity.elmName /= options.rootElmName then
-        Ok dependencies
-
-    else
-        Dict.foldl
+    Dict.foldl
             (\_ local accumulated ->
                 accumulated
                     |> Result.andThen

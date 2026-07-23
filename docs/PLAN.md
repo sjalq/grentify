@@ -352,6 +352,18 @@ Coverage and pipeline:
   suite went from 0 tests ran (compile-dead) to 215/219 passing.
   The 4 fails are list-extra's own "stack safety" 10k-recursion tests
   (RangeError) — a NEW distinct class, filed as D35.
+- **D47 vendored packages missing transitive local-dep declarations**
+  (found banking elm-review as a ported dep 2026-07-23: gren's solver
+  rejected the tree with INDIRECT LOCAL DEPENDENCY on
+  structured-writer even though every pointer was layout-consistent;
+  captured via 0.1s APFS-clone staging snapshots after 1s snapshots
+  lost the cleanup race twice; FIXED same day, Fable): gren requires
+  the verifying root to declare every transitive local dep, and
+  vendored packages verify standalone as their own roots — but
+  Plan.hoistTransitiveLocals only hoisted for the workspace root.
+  Fix: hoist for every package manifest; sibling-relativization
+  rewrites the added entries like any other. Receipt: elm-review-debug
+  port + elm-review banking, in flight.
 - **D46 extractor mis-qualifies ctor refs shadowed by type exposings**
   (found by the post-D45b elm-review verify 2026-07-23: Review.Test's
   bare `(ReviewError err)` pattern arrived as `Rule.ReviewError` —

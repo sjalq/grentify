@@ -352,6 +352,20 @@ Coverage and pipeline:
   suite went from 0 tests ran (compile-dead) to 215/219 passing.
   The 4 fails are list-extra's own "stack safety" 10k-recursion tests
   (RangeError) — a NEW distinct class, filed as D35.
+- **D48 ported-cache hits served re-printed bytes, not the verified
+  entry** (found chasing the D47 receipt 2026-07-23: with elm-review
+  finally banked, the dependent's workspace staged an UNFORMATTED
+  re-print of it — one string literal corrupted to raw newlines
+  (`"\n\n{-|"`) — while the hit path skipped format AND verify on the
+  assumption of byte fidelity; the root verify then died with gren's
+  opaque PROBLEM BUILDING DEPENDENCIES; FIXED same day, Fable): the
+  law is that the entry's verified bytes ARE the artifact. Hit
+  packages now get their src/ replaced by a native `cp -a` of the
+  entry (replaceSrcFromEntry) in both the workspace and add flows;
+  the re-plan still owns gren.json. The module-record re-emission
+  path that corrupted remains unexplained upstream of the fix —
+  root-cause it when the walk is done (the fix makes it unreachable
+  for cached serves). Receipt: elm-review-debug rerun in flight.
 - **D47 vendored packages missing transitive local-dep declarations**
   (found banking elm-review as a ported dep 2026-07-23: gren's solver
   rejected the tree with INDIRECT LOCAL DEPENDENCY on

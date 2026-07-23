@@ -617,6 +617,49 @@ logPortedCached context coordinate =
             Stream.Log.line stream (PortedCache.coordinateLabel coordinate ++ " (ported cached)")
 
 
+{-| D48: overwrite a staged package's src/ with the ported-cache entry's
+VERIFIED bytes. The entry passed gren verification exactly as stored;
+byte-for-byte copy is the only faithful way to serve it (the module-record
+route re-printed and corrupted).
+-}
+replaceSrcFromEntry : Context -> Permissions -> Path -> Path -> Task Error {}
+replaceSrcFromEntry context permissions cachePath packageDir =
+    let
+        entrySrc =
+            Path.join [ cachePath, Path.fromPosixString "src" ]
+
+        destSrc =
+            Path.join [ packageDir, Path.fromPosixString "src" ]
+    in
+    removePath permissions.fileSystem destSrc
+        |> Task.andThen
+            (\_ -> System.File.ensureDirectory permissions.fileSystem destSrc)
+        |> Task.andThen
+            (\_ ->
+                System.Process.run permissions.childProcess
+                    { program = "cp"
+                    , arguments =
+                        [ "-a"
+                        , System.File.pathToString context.platform entrySrc ++ "/."
+                        , System.File.pathToString context.platform destSrc
+                        ]
+                    , workingDirectory = System.File.pathToString context.platform packageDir
+                    , environment = Dict.empty
+                    , allowedExitCodes = [ 0 ]
+                    , timeoutMilliseconds = 60 * 1000
+                    , maximumOutputBytes = 1024 * 1024
+                    }
+                    |> Task.map (\_ -> {})
+                    |> Task.mapError
+                        (\error ->
+                            PortError.create "PORTED_CACHE_INVALID"
+                                ("Could not copy verified ported entry src: "
+                                    ++ PortError.message error
+                                )
+                        )
+            )
+
+
 {-| D45: recover a ported-cache-served dependency's ctor arities from its
 cached extraction. Never fails — every miss degrades to an empty map (the
 dependent then behaves exactly as before D45 for this dep's ctors).
@@ -1166,10 +1209,13 @@ prepareOnePackage context permissions assets rootIdentity planned staging packag
             package.sourcePackage
     in
     when Dict.get elmName planned.portedCacheHits is
-        Just _ ->
-            -- Cache hit: modules were loaded from a previously verified tree;
-            -- gren.json was re-planned for this resolution. Skip format+verify.
-            Task.succeed {}
+        Just cachePath ->
+            -- Cache hit: gren.json was re-planned for this resolution, but the
+            -- MODULE BYTES must be the entry's verified bytes — D48: routing
+            -- them through module records re-emitted an unformatted reprint
+            -- with corrupted string literals, unverified because this skip
+            -- assumed byte fidelity. Serve src/ by native copy instead.
+            replaceSrcFromEntry context permissions cachePath dir
 
         Nothing ->
             maybeFormatPackage context.platform permissions.fileSystem permissions.childProcess assets.formatExecutable dir
@@ -1992,9 +2038,9 @@ writeVendored context permissions assets packagesRoot planned packages =
                                                 |> Task.andThen
                                                     (\_ ->
                                                         when Dict.get elmName planned.portedCacheHits is
-                                                            Just _ ->
-                                                                -- Hit: modules already verified under this digest.
-                                                                Task.succeed {}
+                                                            Just cachePath ->
+                                                                -- Hit: serve the entry's verified bytes (D48).
+                                                                replaceSrcFromEntry context permissions cachePath directory
 
                                                             Nothing ->
                                                                 maybeFormatPackage context.platform

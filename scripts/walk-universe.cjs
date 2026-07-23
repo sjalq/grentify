@@ -70,7 +70,7 @@ const EXEMPT_SIGNATURES = [
   { pattern: /\[glsl\||GLSL/, reason: "glsl:source" },
   { pattern: /effect module/i, reason: "effect-module:source" },
   {
-    pattern: /SOURCE_CLONE_FAILED|ARCHIVE_INVALID|SOURCE_MANIFEST_MISMATCH|couldn't find a compatible version|NO_ELM_SOURCES/,
+    pattern: /SOURCE_CLONE_FAILED|ARCHIVE_INVALID|SOURCE_MANIFEST_MISMATCH|SOURCE_INVALID|DOWNLOAD_FAILED|couldn't find a compatible version|NO_ELM_SOURCES/,
     reason: "broken-upstream:unfetchable",
   },
 ];

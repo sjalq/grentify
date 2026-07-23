@@ -167,7 +167,7 @@ transformModules options registry extraction =
             )
             (Task.succeed [])
         |> Task.andThen
-            (\sources -> TransformPipeline.transform registry Dict.empty extraction sources |> taskFromResult)
+            (\sources -> TransformPipeline.transform registry TransformPipeline.emptyDepMaps extraction sources |> taskFromResult)
 
 
 emit

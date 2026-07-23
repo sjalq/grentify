@@ -3,9 +3,12 @@ module Transform.Pipeline exposing
     , SourceFile
     , TransformResult
     , TransformedModule
+    , DepMaps
     , collectMappingEdits
     , collectPackageCtorArities
+    , collectPackageSoleCtors
     , convertEditKind
+    , emptyDepMaps
     , ensureModuleImports
     , toGrenSourcePath
     , transform
@@ -85,9 +88,25 @@ type alias TransformResult =
     , diagnostics : Array Diagnostic
     , requiredAdapters : Array String
     , detectedPlatform : String
-    , -- D45: this package's multi-arg ctor arities (post-NameSub keys),
-      -- exported so dependents recordify PARTIAL applications of them.
-      ctorArities : Dict String Int
+    , -- D45/D45b: this package's cross-package-relevant maps (post-NameSub
+      -- keys), exported so dependents recordify PARTIAL ctor applications
+      -- and treat dep sole ctors as irrefutable (no dead `_` arm — the
+      -- redundant wildcard on a record-payload sole ctor panics Gren 0.6.6).
+      depExports : DepMaps
+    }
+
+
+{-| Cross-package knowledge a dependency exports to its dependents. -}
+type alias DepMaps =
+    { ctorArities : Dict String Int
+    , soleCtors : Dict String {}
+    }
+
+
+emptyDepMaps : DepMaps
+emptyDepMaps =
+    { ctorArities = Dict.empty
+    , soleCtors = Dict.empty
     }
 
 
@@ -361,8 +380,8 @@ importEdit registry fact =
             )
 
 
-transform : Registry -> Dict String Int -> Protocol.Extraction -> Array SourceFile -> Result Error TransformResult
-transform registry depCtorArities extraction sources =
+transform : Registry -> DepMaps -> Protocol.Extraction -> Array SourceFile -> Result Error TransformResult
+transform registry depMaps extraction sources =
     validateExtraction extraction sources
         |> Result.andThen
             (\_ ->
@@ -392,10 +411,14 @@ transform registry depCtorArities extraction sources =
                     -- CtorLaw recordifies partial applications of
                     -- cross-package ctors (elm-syntax's Node etc.).
                     packageCtorArities =
-                        Dict.foldl Dict.set depCtorArities ownCtorArities
+                        Dict.foldl Dict.set depMaps.ctorArities ownCtorArities
 
+                    -- D45b: dependency sole ctors merged the same way, so
+                    -- MatchCompile destructures them without the dead `_`
+                    -- arm that panics Gren 0.6.6 on record payloads.
                     packageSoleCtors =
-                        collectPackageSoleCtors registry extraction.modules
+                        Dict.foldl Dict.set depMaps.soleCtors
+                            (collectPackageSoleCtors registry extraction.modules)
 
                     -- Reserved renames escape per-module, so a caller must not
                     -- re-decide a callee's exported name; collect every
@@ -451,8 +474,12 @@ transform registry depCtorArities extraction sources =
                             , diagnostics = diagnostics
                             , requiredAdapters = requiredAdapters
                             , detectedPlatform = aggregatePlatform transformedModules
-                            , ctorArities =
-                                collectPackageCtorArities registry extraction.modules
+                            , depExports =
+                                { ctorArities =
+                                    collectPackageCtorArities registry extraction.modules
+                                , soleCtors =
+                                    collectPackageSoleCtors registry extraction.modules
+                                }
                             }
                         )
             )

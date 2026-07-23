@@ -101,9 +101,9 @@ type alias Draft =
       portedCacheHit : Maybe Path
     , -- Just after a cache miss for a cacheable package; store after verify.
       portedCachePending : Maybe PortedCache.Pending
-    , -- D45: this package's multi-arg ctor arities, fed to dependents so
-      -- they recordify PARTIAL applications of cross-package ctors.
-      ctorArities : Dict String Int
+    , -- D45/D45b: this package's exported cross-package maps (ctor
+      -- arities + sole ctors), fed to every dependent's transform.
+      depExports : Pipeline.DepMaps
     }
 
 
@@ -370,17 +370,21 @@ transformSources context permissions cache offline namespaceModules extractCache
                                                 -- D45: deps transform before dependents
                                                 -- (resolution.order), so each package sees
                                                 -- every prior package's ctor arities.
-                                                transformOne context permissions cache elmHome reviewAppCache offline namespaceModules extractCacheEnabled portedCacheEnabled platformLabel assets registry state.depArities source withTests (key == rootName)
+                                                transformOne context permissions cache elmHome reviewAppCache offline namespaceModules extractCacheEnabled portedCacheEnabled platformLabel assets registry state.depMaps source withTests (key == rootName)
                                                     |> Task.map
                                                         (\draft ->
                                                             { drafts = Dict.set key draft state.drafts
-                                                            , depArities =
-                                                                Dict.foldl Dict.set state.depArities draft.ctorArities
+                                                            , depMaps =
+                                                                { ctorArities =
+                                                                    Dict.foldl Dict.set state.depMaps.ctorArities draft.depExports.ctorArities
+                                                                , soleCtors =
+                                                                    Dict.foldl Dict.set state.depMaps.soleCtors draft.depExports.soleCtors
+                                                                }
                                                             }
                                                         )
                                     )
                         )
-                        (Task.succeed { drafts = Dict.empty, depArities = Dict.empty })
+                        (Task.succeed { drafts = Dict.empty, depMaps = Pipeline.emptyDepMaps })
                     |> Task.map .drafts
             )
 
@@ -398,12 +402,12 @@ transformOne
     -> String
     -> Assets
     -> Registry
-    -> Dict String Int
+    -> Pipeline.DepMaps
     -> Acquire.PackageSource
     -> Bool
     -> Bool
     -> Task Error Draft
-transformOne context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled portedCacheEnabled platformLabel assets registry depCtorArities source withTests isRoot =
+transformOne context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled portedCacheEnabled platformLabel assets registry depMaps source withTests isRoot =
     let
         coordinate =
             { author = PackageName.author source.manifest.name
@@ -420,14 +424,14 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
     in
     when portedKey is
         Nothing ->
-            transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depCtorArities source withTests isRoot Nothing
+            transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps source withTests isRoot Nothing
 
         Just key ->
             PortedCache.digestFor permissions.fileSystem mappingsDirectory context.toolVersion platformLabel namespaceModules
                 |> Task.andThen
                     (\digestHex ->
                         if String.isEmpty digestHex then
-                            transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depCtorArities source withTests isRoot Nothing
+                            transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps source withTests isRoot Nothing
 
                         else
                             let
@@ -448,13 +452,13 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
                                                                         -- D45: the transform was skipped, so recover
                                                                         -- this dep's ctor arities from the cached
                                                                         -- extraction (soft-degrade to empty).
-                                                                        cachedCtorArities permissions extractCacheEnabled cacheRoot assets registry coordinate source
-                                                                            |> Task.map (\arities -> { draft | ctorArities = arities })
+                                                                        cachedDepExports permissions extractCacheEnabled cacheRoot assets registry coordinate source
+                                                                            |> Task.map (\exports -> { draft | depExports = exports })
                                                                     )
                                                                 |> Task.onError
                                                                     (\_ ->
                                                                         -- Corrupt/incomplete entry: soft-miss and re-port.
-                                                                        transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depCtorArities source withTests isRoot
+                                                                        transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps source withTests isRoot
                                                                             (Just
                                                                                 { cacheRoot = key.cacheRoot
                                                                                 , coordinate = key.coordinate
@@ -465,7 +469,7 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
                                                         )
 
                                             Nothing ->
-                                                transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depCtorArities source withTests isRoot
+                                                transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps source withTests isRoot
                                                     (Just
                                                         { cacheRoot = key.cacheRoot
                                                         , coordinate = key.coordinate
@@ -490,13 +494,13 @@ transformFresh
     -> Bool
     -> Assets
     -> Registry
-    -> Dict String Int
+    -> Pipeline.DepMaps
     -> Acquire.PackageSource
     -> Bool
     -> Bool
     -> Maybe PortedCache.Pending
     -> Task Error Draft
-transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depCtorArities source withTests isRoot pendingStore =
+transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps source withTests isRoot pendingStore =
     let
         -- Determine which directories to review: src only, or src + tests
         includeTests =
@@ -540,7 +544,7 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
         (readSources permissions.fileSystem source includeTests)
         |> Task.andThen
             (\inputs ->
-                Pipeline.transform registry depCtorArities inputs.extraction inputs.sourceFiles
+                Pipeline.transform registry depMaps inputs.extraction inputs.sourceFiles
                     |> resultTask identity
             )
         |> Task.andThen
@@ -595,7 +599,7 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
                                             , detectedPlatform = detectedPlatform
                                             , portedCacheHit = Nothing
                                             , portedCachePending = pendingStore
-                                            , ctorArities = transformed.ctorArities
+                                            , depExports = transformed.depExports
                                             }
                                         )
                             )
@@ -617,7 +621,7 @@ logPortedCached context coordinate =
 cached extraction. Never fails — every miss degrades to an empty map (the
 dependent then behaves exactly as before D45 for this dep's ctors).
 -}
-cachedCtorArities :
+cachedDepExports :
     Permissions
     -> Bool
     -> Path
@@ -625,11 +629,11 @@ cachedCtorArities :
     -> Registry
     -> PortedCache.Coordinate
     -> Acquire.PackageSource
-    -> Task x (Dict String Int)
-cachedCtorArities permissions extractCacheEnabled cacheRoot assets registry coordinate source =
+    -> Task x Pipeline.DepMaps
+cachedDepExports permissions extractCacheEnabled cacheRoot assets registry coordinate source =
     when ExtractCache.keyFor extractCacheEnabled cacheRoot coordinate source.sourceUrl is
         Nothing ->
-            Task.succeed Dict.empty
+            Task.succeed Pipeline.emptyDepMaps
 
         Just key ->
             Review.Runner.loadCachedExtraction permissions.fileSystem assets.review [ "src" ] key
@@ -637,12 +641,16 @@ cachedCtorArities permissions extractCacheEnabled cacheRoot assets registry coor
                     (\maybeExtraction ->
                         when maybeExtraction is
                             Just extraction ->
-                                Pipeline.collectPackageCtorArities registry extraction.modules
+                                { ctorArities =
+                                    Pipeline.collectPackageCtorArities registry extraction.modules
+                                , soleCtors =
+                                    Pipeline.collectPackageSoleCtors registry extraction.modules
+                                }
 
                             Nothing ->
-                                Dict.empty
+                                Pipeline.emptyDepMaps
                     )
-                |> Task.onError (\_ -> Task.succeed Dict.empty)
+                |> Task.onError (\_ -> Task.succeed Pipeline.emptyDepMaps)
 
 
 {-| Rebuild a Draft from a previously verified ported src/ tree so planning and
@@ -691,7 +699,7 @@ materializeDraftFromCache permission source cachePath expectedDigest =
                                                     , portedCacheHit = Just cachePath
                                                     , portedCachePending = Nothing
                                                     , -- caller overlays from the extract cache (D45)
-                                                      ctorArities = Dict.empty
+                                                      depExports = Pipeline.emptyDepMaps
                                                     }
                                         )
             )

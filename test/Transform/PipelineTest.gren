@@ -40,7 +40,7 @@ tests =
 
 transformsCompilerBackedFixture : TestResult
 transformsCompilerBackedFixture =
-    when Pipeline.transform registry Dict.empty fixtureExtraction [ { path = fixturePath, source = fixtureSource } ] is
+    when Pipeline.transform registry Pipeline.emptyDepMaps fixtureExtraction [ { path = fixturePath, source = fixtureSource } ] is
         Err error ->
             outcome "pipeline transforms the simple fixture" False (PortError.toString error)
 
@@ -84,7 +84,7 @@ transformsCompilerBackedFixture =
 
 appliesRealStructuralFixtureExtraction : TestResult
 appliesRealStructuralFixtureExtraction =
-    when Pipeline.transform registry Dict.empty structuralExtraction [ { path = structuralPath, source = structuralSource } ] is
+    when Pipeline.transform registry Pipeline.emptyDepMaps structuralExtraction [ { path = structuralPath, source = structuralSource } ] is
         Err error ->
             outcome "pipeline applies the real structural fixture extraction" False (PortError.toString error)
 
@@ -160,7 +160,7 @@ mapsExposedAdaptersWithoutTouchingComments =
                         base.modules
             }
     in
-    when Pipeline.transform registry Dict.empty extraction [ { path = path, source = source } ] is
+    when Pipeline.transform registry Pipeline.emptyDepMaps extraction [ { path = path, source = source } ] is
         Err error ->
             outcome "adapter mappings preserve protected regions" False (PortError.toString error)
 
@@ -225,7 +225,7 @@ detectsMappedAdapterImports =
                         base.modules
             }
     in
-    when Pipeline.transform registry Dict.empty extraction [ { path = path, source = source } ] is
+    when Pipeline.transform registry Pipeline.emptyDepMaps extraction [ { path = path, source = source } ] is
         Err error ->
             outcome "mapped adapter imports are detected" False (PortError.toString error)
 
@@ -260,7 +260,7 @@ appliesDecodedReviewProtocol =
             outcome "decoded review protocol drives the pipeline" False (PortError.toString error)
 
         Ok extraction ->
-            when Pipeline.transform registry Dict.empty extraction [ { path = "src/ProtocolFixture.elm", source = source } ] is
+            when Pipeline.transform registry Pipeline.emptyDepMaps extraction [ { path = "src/ProtocolFixture.elm", source = source } ] is
                 Err error ->
                     outcome "decoded review protocol drives the pipeline" False (PortError.toString error)
 
@@ -313,7 +313,7 @@ appliesAndClassifiesReviewEdits =
             , diagnostics = []
             }
     in
-    when Pipeline.transform registry Dict.empty extraction [ { path = path, source = source } ] is
+    when Pipeline.transform registry Pipeline.emptyDepMaps extraction [ { path = path, source = source } ] is
         Err error ->
             outcome "review edits are classified and applied" False (PortError.toString error)
 
@@ -436,9 +436,9 @@ rejectsInvalidExtractionData =
             }
 
         failures =
-            [ Pipeline.transform registry Dict.empty badKind [ { path = path, source = source } ]
-            , Pipeline.transform registry Dict.empty wrongName [ { path = path, source = source } ]
-            , Pipeline.transform registry Dict.empty invalidSeverity [ { path = path, source = source } ]
+            [ Pipeline.transform registry Pipeline.emptyDepMaps badKind [ { path = path, source = source } ]
+            , Pipeline.transform registry Pipeline.emptyDepMaps wrongName [ { path = path, source = source } ]
+            , Pipeline.transform registry Pipeline.emptyDepMaps invalidSeverity [ { path = path, source = source } ]
             ]
 
         allRejected =
@@ -454,7 +454,7 @@ rejectsInvalidExtractionData =
                 failures
 
         rangeRejected =
-            when Pipeline.transform registry Dict.empty invalidRange [ { path = path, source = source } ] is
+            when Pipeline.transform registry Pipeline.emptyDepMaps invalidRange [ { path = path, source = source } ] is
                 Err error ->
                     PortError.code error == "SOURCE_EDIT_INVALID"
 
@@ -504,15 +504,15 @@ reportsUnsupportedRuntimeBoundaries =
 
         -- Port modules pass through (application ports). Kernel/effect stay hard errors.
         portCodes =
-            diagnosticCodes (Pipeline.transform registry Dict.empty (extractionFor portPath "Ports") [ { path = portPath, source = portSource } ])
+            diagnosticCodes (Pipeline.transform registry Pipeline.emptyDepMaps (extractionFor portPath "Ports") [ { path = portPath, source = portSource } ])
 
         kernelCodes =
-            diagnosticCodes (Pipeline.transform registry Dict.empty kernelExtraction [ { path = kernelPath, source = kernelSource } ])
+            diagnosticCodes (Pipeline.transform registry Pipeline.emptyDepMaps kernelExtraction [ { path = kernelPath, source = kernelSource } ])
 
         effectMessages =
             diagnosticMessages
                 (Pipeline.transform registry
-                    Dict.empty
+                    Pipeline.emptyDepMaps
                     (extractionFor effectPath "Effects")
                     [ { path = effectPath, source = effectSource } ]
                 )

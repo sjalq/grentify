@@ -352,6 +352,20 @@ Coverage and pipeline:
   suite went from 0 tests ran (compile-dead) to 215/219 passing.
   The 4 fails are list-extra's own "stack safety" 10k-recursion tests
   (RangeError) — a NEW distinct class, filed as D35.
+- **D45b cross-package sole ctors got dead wildcards → Gren compiler
+  panic** (found by the post-D45 elm-review verify 2026-07-23: staging
+  snapshot + module bisect landed on `when h is (Node.Node {…}) -> …;
+  _ -> fl {}` in Compute/Rule/Test/FailureMessage — a redundant `_`
+  arm on elm-syntax's single-ctor record-payload Node, the exact known
+  Map.! panic shape; FIXED same day, Fable): packageSoleCtors was
+  package-local like the arity map, so MatchCompile treated dep sole
+  ctors as refutable and emitted the fail arm. Fix: the D45 channel
+  generalized to Pipeline.DepMaps {ctorArities, soleCtors}; dep sole
+  ctors merge under the package's own; isSoleCtor's bare-name fallback
+  makes alias qualifiers a non-issue. RecordAlias/Reserved still
+  package-local (no evidence; fix on evidence). Walk note: prior
+  "gren-verify" failures of elm-syntax dependents may be this panic —
+  recheck at drain. Tier 0: 255.
 - **D45 cross-package partial ctor applications never recordified**
   (found by the D24b/D42-fixed elm-review diagnostic 2026-07-23 — its
   LAST failing module, Compute, uses `Array.map (Node.Node

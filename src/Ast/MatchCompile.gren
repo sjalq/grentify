@@ -3131,6 +3131,29 @@ isCtorEmbeddedCase arms =
         && Array.all ctorArmOk arms
         && not (ctorShadows arms)
         && ctorGroupsRespectOtherColumnLaw arms
+        -- D49: the peer-fallback machinery (ctorOpenListFallbackArm and
+        -- friends) identifies the list column as ARGUMENT 0. A list column
+        -- at any other index (elm-css's `Selector sequence [] pseudo`, list
+        -- in slot 1) makes the scan match the WRONG arm — the first arm
+        -- becomes its own non-empty fallback, re-emitting its body with a
+        -- shadowing rebind. Route those to compileGeneralCase, which
+        -- compiles each arm independently (correct since D41).
+        && not (Array.any armHasNonFirstListColumn arms)
+
+
+armHasNonFirstListColumn : CaseArm -> Bool
+armHasNonFirstListColumn arm =
+    when stripAs arm.pattern is
+        PatNamed { arguments = args } ->
+            Array.indexedFoldl
+                (\index arg found ->
+                    found || (index > 0 && isListShape (stripAs arg))
+                )
+                False
+                args
+
+        _ ->
+            False
 
 
 {-| Law: a ctor's list-column merge (the `collapsibleCtorNames` fast path

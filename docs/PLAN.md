@@ -352,6 +352,19 @@ Coverage and pipeline:
   suite went from 0 tests ran (compile-dead) to 215/219 passing.
   The 4 fails are list-extra's own "stack safety" 10k-recursion tests
   (RangeError) — a NEW distinct class, filed as D35.
+- **D49 ctor-embedded list merge misfires when the list column is not
+  argument 0** (found banking elm-css 2026-07-23: Css.Structure failed
+  gren-verify with transform-introduced SHADOWING — `Selector sequence
+  [] pseudo`'s merged peel bound `sequence` twice AND re-emitted arm
+  1's body as its own non-empty fallback, dropping arm 2's semantics;
+  FIXED same day, Fable): the peer-fallback machinery
+  (ctorOpenListFallbackArm et al) identifies the list column as
+  argument 0 — a single-arg-ctor-era assumption newly violated by the
+  multi-arg shapes D41 unlocked. Fix: isCtorEmbeddedCase disqualifies
+  any arm with a list-shaped pattern at index > 0, routing to
+  compileGeneralCase (correct per-arm since D41). Tier 0: 262 incl.
+  no-shadow + both-arm-bodies checks on the reduced elm-css shape.
+  Receipt: elm-css@17.1.1 root port + dependent bank, in flight.
 - **D48 ported-cache hits served re-printed bytes, not the verified
   entry** (found chasing the D47 receipt 2026-07-23: with elm-review
   finally banked, the dependent's workspace staged an UNFORMATTED

@@ -41,6 +41,8 @@ tests =
     , duplicatesTheContinuation
     , ctorHeadNestedConsCompiles
     , ctorHeadNestedConsNoShadowing
+    , nonFirstListColumnNoShadowing
+    , nonFirstListColumnKeepsBothArms
     ]
 
 
@@ -262,6 +264,114 @@ d41CompiledBody =
 
 
 
+{-| D49: sole-ctor arms whose LIST column is not argument 0 (elm-css's
+`Selector sequence [] pseudo` / `Selector first tuples pseudo`) must not
+enter the ctor-embedded merge — its peer scan assumes the list lives in
+slot 0 and made arm 1 its own fallback, re-emitting arm 1's body with a
+shadowing rebind and dropping arm 2's body from the peel path.
+-}
+d49Fixture : File
+d49Fixture =
+    let
+        selector args =
+            PatNamed
+                { ref = { moduleName = Nothing, name = "Selector" }
+                , arguments = args
+                }
+
+        body =
+            ExprCase
+                { expression = bare "selector"
+                , cases =
+                    [ { pattern =
+                            selector
+                                [ PatVar "sequence", PatList [], PatVar "pseudo" ]
+                      , body = ExprApplication [ bare "emptyArm", bare "sequence" ]
+                      }
+                    , { pattern =
+                            selector
+                                [ PatVar "firstSelector", PatVar "tuples", PatVar "pseudo" ]
+                      , body =
+                            ExprApplication
+                                [ bare "consArm", bare "firstSelector", bare "tuples" ]
+                      }
+                    ]
+                }
+    in
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule
+        , moduleName = "Fixture"
+        , exposing_ = ExposeAll
+        }
+    , comments = []
+    , imports = []
+    , declarations =
+        [ DeclCustomType
+            { name = "Selector"
+            , documentation = Nothing
+            , generics = []
+            , constructors =
+                [ { name = "Selector", arguments = [] } ]
+            }
+        , DeclFunction
+            { name = "append"
+            , documentation = Nothing
+            , signature = Nothing
+            , arguments = [ PatVar "selector" ]
+            , expression = body
+            }
+        ]
+    }
+
+
+d49CompiledBody : Maybe Expr
+d49CompiledBody =
+    let
+        lowered =
+            CtorLaw.apply (CtorLaw.collectFromFile d49Fixture) d49Fixture
+
+        compiled =
+            MatchCompile.compile
+                (Dict.set "Selector" {} Dict.empty)
+                lowered
+    in
+    when Array.get 1 compiled.declarations is
+        Just (DeclFunction fn) ->
+            Just fn.expression
+
+        _ ->
+            Nothing
+
+
+exprMentions : String -> Expr -> Bool
+exprMentions wanted expr =
+    when expr is
+        ExprVar { name = name } ->
+            name == wanted
+
+        ExprCase { expression = scrutinee, cases = arms } ->
+            exprMentions wanted scrutinee
+                || Array.any (\arm -> exprMentions wanted arm.body) arms
+
+        ExprLet { declarations = decls, expression = inner } ->
+            exprMentions wanted inner
+                || Array.any
+                    (\d ->
+                        when d is
+                            LetFunction fn ->
+                                exprMentions wanted fn.expression
+
+                            LetDestructure { expression = e } ->
+                                exprMentions wanted e
+                    )
+                    decls
+
+        _ ->
+            Array.any (exprMentions wanted) (childExprs expr)
+
+
+
 -- CHECKS ----------------------------------------------------------------------
 
 
@@ -325,6 +435,36 @@ ctorHeadNestedConsNoShadowing =
         Nothing ->
             fail "ctorHeadNestedConsNoShadowing"
                 "no compiled `extendLast` declaration"
+
+
+nonFirstListColumnNoShadowing : Check
+nonFirstListColumnNoShadowing =
+    when d49CompiledBody is
+        Just body ->
+            if hasNestedShadowing Dict.empty body then
+                fail "nonFirstListColumnNoShadowing"
+                    "compile introduced Gren SHADOWING (D49 merge misfire)"
+
+            else
+                ok "nonFirstListColumnNoShadowing"
+
+        Nothing ->
+            fail "nonFirstListColumnNoShadowing" "no compiled declaration"
+
+
+nonFirstListColumnKeepsBothArms : Check
+nonFirstListColumnKeepsBothArms =
+    when d49CompiledBody is
+        Just body ->
+            if exprMentions "emptyArm" body && exprMentions "consArm" body then
+                ok "nonFirstListColumnKeepsBothArms"
+
+            else
+                fail "nonFirstListColumnKeepsBothArms"
+                    "an arm body was dropped by the ctor-embedded merge"
+
+        Nothing ->
+            fail "nonFirstListColumnKeepsBothArms" "no compiled declaration"
 
 
 duplicatesTheContinuation : Check

@@ -352,6 +352,23 @@ Coverage and pipeline:
   suite went from 0 tests ran (compile-dead) to 215/219 passing.
   The 4 fails are list-extra's own "stack safety" 10k-recursion tests
   (RangeError) — a NEW distinct class, filed as D35.
+- **D24b tuple-keyed Dict/Set encoding — FIXED for the proven classes**
+  (2026-07-23, Fable; unit-proven, elm-review E2E receipt due with the
+  leg-8 drain rebuild): new Ast.KeyEncode pass after TupleCompare
+  (pre-NameSub). R1 alias law: a tuple alias whose every package
+  occurrence is a Dict/Set key or a literal-tail return becomes String,
+  constructions wrapped in an injective length-prefixed encoder
+  (elm-review RangeLike — fixes all its Dict sites through the alias).
+  R2 inline law: `Dict (enc, enc) v` in signatures/record fields
+  becomes `Dict String v`; keys encoded at proven call sites
+  (signature-typed vars, proven field accesses — elm-review
+  suppressions). Unproven sites unchanged (fail at verify exactly as
+  before — never a wrong rewrite; encoded-vs-record can never unify so
+  no silent corruption). STILL OPEN under D24b: Dict.fromList /
+  Dict.toList key round-trips, unannotated dict flows, tuple keys with
+  non-concrete element types, cross-package boundary drift when a
+  dependent constructs keys for a rewritten signature. Tier 0: 253
+  checks incl. Eval injectivity oracles.
 - **D41 MatchCompile leaked nested list patterns inside ctor-arg heads**
   (found by the unbounded elm-css hub seed 2026-07-23; FIXED same day,
   Fable): a cons arm whose head is a ctor pattern with nested list/cons

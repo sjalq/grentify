@@ -364,7 +364,7 @@ Coverage and pipeline:
   any arm with a list-shaped pattern at index > 0, routing to
   compileGeneralCase (correct per-arm since D41). Tier 0: 262 incl.
   no-shadow + both-arm-bodies checks on the reduced elm-css shape.
-  Receipt: elm-css@17.1.1 root port + dependent bank, in flight.
+  RECEIPT LANDED: elm-css@17.1.1 ports clean as root (EXIT=0) AND BrianHicks/elm-css-reset ports end-to-end off it (EXIT=0), banking elm-css in the shared ported cache — the elm-css family unlock is complete.
 - **D48 ported-cache hits served re-printed bytes, not the verified
   entry** (found chasing the D47 receipt 2026-07-23: with elm-review
   finally banked, the dependent's workspace staged an UNFORMATTED

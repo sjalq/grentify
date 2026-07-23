@@ -109,6 +109,7 @@ function rotateIfNeeded() {
 
 function loadDoneSet() {
   const done = new Set();
+  const timeoutCounts = new Map();
   const readLines = (buf) => {
     for (const line of buf.toString("utf8").split("\n")) {
       if (!line.trim()) continue;
@@ -116,10 +117,12 @@ function loadDoneSet() {
         const rec = JSON.parse(line);
         const starved =
           rec.status === "working-failure" && rec.reason === "timeout";
+        const coordinate = `${rec.name}@${rec.version}`;
+        if (starved) {
+          timeoutCounts.set(coordinate, (timeoutCounts.get(coordinate) || 0) + 1);
+        }
         if (rec.name && rec.version && rec.status !== "DRY-CANDIDATE" && !starved) {
-          // Timeouts are usually queue starvation, not verdicts —
-          // they re-run on resume.
-          done.add(`${rec.name}@${rec.version}`);
+          done.add(coordinate);
         }
       } catch {
         /* tolerate torn tail line */
@@ -132,7 +135,7 @@ function loadDoneSet() {
     n += 1;
   }
   if (fs.existsSync(walkLogPath)) readLines(fs.readFileSync(walkLogPath));
-  return done;
+  return { done, timeoutCounts };
 }
 
 function appendRecord(record) {
@@ -345,7 +348,7 @@ async function main() {
   const snapshot = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
   const stamp = gitStamp(root);
   rotateIfNeeded();
-  const done = loadDoneSet();
+  const { done, timeoutCounts } = loadDoneSet();
 
   let entries = snapshot.packages;
   if (opts.only) {
@@ -365,6 +368,14 @@ async function main() {
     }
     pending.push(entry);
   }
+  // Repeat-timeout packages go LAST: re-queuing them first made every
+  // fleet spend its opening hour re-burning 900s on the same megamodule
+  // pathologicals and look dead at the first heartbeat.
+  pending.sort((a, b) => {
+    const ta = timeoutCounts.get(`${a.name}@${a.version}`) || 0;
+    const tb = timeoutCounts.get(`${b.name}@${b.version}`) || 0;
+    return ta - tb;
+  });
 
   console.log(
     `[walk] commit=${stamp.short} dirty=${stamp.dirty} snapshot=${snapshot.packages.length} selected=${entries.length} done=${skippedDone} pending=${pending.length} -j${opts.concurrency}${opts.dryRun ? " DRY-RUN" : ""}`,

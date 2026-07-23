@@ -606,8 +606,24 @@ transformModule registry packageTupleReturns packageRecordAliases packageCtorAri
                 -- Edit path remains only for hand-crafted extractions without AST.
                 when extraction.ast is
                     Nothing ->
-                        transformModuleViaEdits registry input extraction outputPath
-                            |> Result.map (withTransformPath input extraction "fallback:no-ast")
+                        -- D40: the edit fallback tokenizes the raw source with
+                        -- per-char persistent-array access; on generated
+                        -- megamodules (elm-unicode's 2.5MB Unicode.elm) that
+                        -- melts for hours and walked packages recorded as
+                        -- hangs. Large no-AST modules fail fast and honestly.
+                        if String.count input.source > 300000 then
+                            Err <|
+                                PortError.create "AST_UNPORTED"
+                                    ("Module "
+                                        ++ extraction.moduleName
+                                        ++ " has no extractor AST and is too large for the edit fallback ("
+                                        ++ String.fromInt (String.count input.source)
+                                        ++ " bytes)."
+                                    )
+
+                        else
+                            transformModuleViaEdits registry input extraction outputPath
+                                |> Result.map (withTransformPath input extraction "fallback:no-ast")
 
                     Just astValue ->
                         transformModuleViaAst registry

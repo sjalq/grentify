@@ -518,6 +518,9 @@ fetchString permission url =
         |> HttpClient.withTimeout (60 * 1000)
         |> HttpClient.withHeader "accept" "application/json"
         |> HttpClient.withHeader "accept-encoding" "gzip"
+        -- package.elm-lang.org rejects UA-less requests with 406 (observed
+        -- mid-walk 2026-07-23); identify honestly like Acquire.Registry.
+        |> HttpClient.withHeader "user-agent" "elm-to-gren/0.1 (Gren acquisition provider)"
         |> HttpClient.expectString
         |> HttpClient.send permission
         |> Task.mapError
@@ -530,8 +533,9 @@ fetchString permission url =
 fetchBytes : HttpClient.Permission -> String -> Task Error Bytes
 fetchBytes permission url =
     HttpClient.get url
-        |> HttpClient.withTimeout (5 * 60 * 1000)
+        |> HttpClient.withTimeout (2 * 60 * 1000)
         |> HttpClient.withHeader "accept" "application/zip"
+        |> HttpClient.withHeader "user-agent" "elm-to-gren/0.1 (Gren acquisition provider)"
         |> HttpClient.expectBytes
         |> HttpClient.send permission
         |> Task.mapError

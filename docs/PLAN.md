@@ -352,6 +352,19 @@ Coverage and pipeline:
   suite went from 0 tests ran (compile-dead) to 215/219 passing.
   The 4 fails are list-extra's own "stack safety" 10k-recursion tests
   (RangeError) — a NEW distinct class, filed as D35.
+- **D42 oversized single-line list bodies break Gren's parser** (found
+  by the elm-review hub seed 2026-07-23; FIXED same day, Opus subagent +
+  Fable QA): NOT an escaping bug — Gren 0.6.6's parser aborts with
+  UNFINISHED RECORD once one physical line accumulates a few thousand
+  record fields. Print rendered embedded-docs module tables
+  (Review.Test.Dependencies.ElmCore) as one 161KB line. Fix: top-level
+  list bodies wider than 4000 chars wrap comma-leading, one element per
+  line, element interiors still single-line (raw newlines inside record
+  braces are the separate hazard W5.1d actually hit). Normal output
+  unchanged. Proofs: FAIL-before/PASS-after regression checks, real
+  ElmCore.gren parses (longest line 31KB), tier 0 255. Residual: a
+  single element exceeding the ceiling on its own line would need
+  context-aware indentation — ledgered, no known specimen.
 - **D24b tuple-keyed Dict/Set encoding — FIXED for the proven classes**
   (2026-07-23, Fable; unit-proven, elm-review E2E receipt due with the
   leg-8 drain rebuild): new Ast.KeyEncode pass after TupleCompare

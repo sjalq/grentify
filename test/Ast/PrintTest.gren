@@ -52,6 +52,10 @@ tests =
     , operatorInRecordFieldParenthesized
     -- W5.1d: the giant embedded-docs record literal stays single-line + valid
     , embeddedDocsRecordStaysSingleLine
+    -- D42: an oversized top-level doc-table list wraps one record per line so no
+    -- single physical line trips Gren 0.6.6's UNFINISHED RECORD parser ceiling.
+    , oversizedTopLevelListWrapsPerRecord
+    , smallTopLevelListStaysInline
     ]
 
 
@@ -1040,6 +1044,92 @@ embeddedDocsRecordStaysSingleLine =
     in
     outcome
         "embedded-docs record literal stays single-line and valid"
+        ok
+        ("printed:\n" ++ printed)
+
+
+{-| D42 "UNFINISHED RECORD": Gren 0.6.6's parser aborts a record/list literal once
+a single physical line accumulates too many record fields. The embedded-docs
+module table (elm/core's ElmCore) rendered the whole `[ { .. }, { .. }, .. ]`
+inline and blew past that ceiling. The relief is to break the OUTER list one
+element per line while each record interior stays single-line (a raw newline
+inside record braces is a separate UNFINISHED RECORD). This builds a top-level
+list whose inline form exceeds the width guard and asserts it wrapped, with every
+record still intact on one line.
+-}
+oversizedTopLevelListWrapsPerRecord : TestResult
+oversizedTopLevelListWrapsPerRecord =
+    let
+        pad =
+            String.repeat 1200 "x"
+
+        mkRecord index =
+            ExprRecord
+                [ { name = "name", value = ExprString ("m" ++ String.fromInt index) }
+                , { name = "comment", value = ExprString pad }
+                ]
+
+        body =
+            ExprList (Array.map mkRecord (Array.initialize 5 0 (\i -> i)))
+
+        printed =
+            printExprBinding "dependencyModules" body
+
+        -- The exact single-line render of element 0; if it appears verbatim, the
+        -- record interior did not gain a raw newline.
+        record0Inline =
+            "{ name = \"m0\", comment = \"" ++ pad ++ "\" }"
+
+        longestLine =
+            printed
+                |> String.split "\n"
+                |> Array.map String.count
+                |> Array.foldl (\len acc -> if len > acc then len else acc) 0
+
+        ok =
+            -- Outer list wrapped: subsequent elements are comma-led on their own
+            -- indented lines (this is false before the fix, where all is one line).
+            String.contains "\n    , { name = \"m1\"" printed
+                -- First element opens inline right after the `[ `.
+                && String.contains "[ { name = \"m0\"" printed
+                -- Each record interior stays single-line and intact.
+                && String.contains record0Inline printed
+                -- No physical line carries the whole table anymore.
+                && longestLine < 4000
+
+    in
+    outcome
+        "oversized top-level list wraps one record per line"
+        ok
+        ("longestLine="
+            ++ String.fromInt longestLine
+            ++ " contains-m1-break="
+            ++ (if String.contains "\n    , { name = \"m1\"" printed then "yes" else "no")
+        )
+
+
+{-| Guard the other side of the D42 fix: a small top-level list must NOT wrap, so
+existing inline layouts (and the single-record embedded-docs specimen) are
+unchanged. Below the width guard the list stays on one line.
+-}
+smallTopLevelListStaysInline : TestResult
+smallTopLevelListStaysInline =
+    let
+        body =
+            ExprList
+                [ ExprRecord [ { name = "name", value = ExprString "a" } ]
+                , ExprRecord [ { name = "name", value = ExprString "b" } ]
+                ]
+
+        printed =
+            printExprBinding "small" body
+
+        ok =
+            not (String.contains "\n    , " printed)
+                && String.contains "[{ name = \"a\" }, { name = \"b\" }]" printed
+    in
+    outcome
+        "small top-level list stays inline"
         ok
         ("printed:\n" ++ printed)
 

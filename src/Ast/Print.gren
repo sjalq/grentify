@@ -264,7 +264,20 @@ printDeclaration locals declaration =
                                     fn.arguments)
 
                 body =
-                    printExpr locals 0 fn.expression
+                    when fn.expression is
+                        ExprList items ->
+                            let
+                                inline =
+                                    printExpr locals 0 fn.expression
+                            in
+                            if Array.length items > 1 && String.count inline > maxInlineListWidth then
+                                printMultilineList locals items
+
+                            else
+                                inline
+
+                        _ ->
+                            printExpr locals 0 fn.expression
             in
             docs
                 ++ signature
@@ -1222,6 +1235,36 @@ printEmbeddedExpr locals value =
 
     else
         rendered
+
+
+{-| Gren 0.6.6's parser rejects a record/list literal once a single physical line
+accumulates too many record fields (empirically a few thousand): it aborts with
+`UNFINISHED RECORD` pointing at the outermost record. The embedded-docs specimens
+(e.g. elm/core's ElmCore) render the whole `[ { .. }, { .. }, .. ]` module table
+inline, blowing past that ceiling.
+
+Records must still stay single-line (a raw newline INSIDE record braces is a
+separate UNFINISHED RECORD), so the safe relief is to break the OUTER list only:
+each element (one module record) keeps its interior inline but lands on its own
+physical line. This width guards the decision; it sits far below the parser's
+breaking point yet above any ordinary top-level list, so normal output is
+unchanged and only oversized doc tables wrap.
+-}
+maxInlineListWidth : Int
+maxInlineListWidth =
+    4000
+
+
+{-| Comma-leading multi-line list. Elements render inline (single-line records),
+so only the list-level separators are newlines. Valid Gren, and each element line
+stays under the single-line parser ceiling. Continuation lines are aligned by the
+caller's `indentBlock`.
+-}
+printMultilineList : Dict String {} -> Array Expr -> String
+printMultilineList locals items =
+    "[ "
+        ++ String.join "\n, " (Array.map (printEmbeddedExpr locals) items)
+        ++ "\n]"
 
 
 escapeString : String -> String

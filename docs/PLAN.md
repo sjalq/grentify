@@ -1063,6 +1063,44 @@ DONE = M5.G and M6.G pass on the same clean commit.
 
 ---
 
+## M5 CLOSED — UNIVERSE WALK COMPLETE (2026-07-24 05:50 SAST)
+
+Fable validation stamp. Every one of the 2,055 registry coordinates
+(full elm-package.org snapshot) carries a final verdict under
+latest-verdict-wins accounting; ground truth is the append-only
+test/ecosystem/walk-log.jsonl (+ gz rotations).
+
+    PASS                       1,220
+    EXEMPT (structural)          301   kernel / effect / glsl /
+                                       broken-upstream
+    EXEMPT:scale (2x timeout)    138
+    REAL FAILURES                396
+       type-mismatch 82 | exit-1 62 | naming 59 | gren-verify 41
+       dep-cascade 31 | unfinished 18 | timeout(1x) 99
+       arity 2 | shadowing 2
+
+    Pass rate over non-exempt candidates: 1,220 / 1,616 = 75.5%
+    (sample-walk baseline before the D41-D49 campaign: ~65%)
+
+Final-leg methodology: consolidated drain (2026-07-23 23:30 cutover)
+re-ran 739 coordinates (88 never-walked + 402 prior failures + 249
+prior timeouts) on the dist carrying D41/D24b/D42/D43/D45/D45b/D46/
+D47/D48/D49, 5 shards, 300s budgets, all four heavyweight hub
+families (elm-review, elm-css, elm-syntax, elm-ui) served from the
+shared ported cache. 2x-timeout => EXEMPT:scale per the standing law.
+
+Cascade attribution: 31 failures are blocked-by-dependency; top
+sources elmcraft/core-extra@2.3.0 (13), zwilias/elm-rosetree@1.5.0
+(7), folkertdev/elm-flate@2.0.6 (4) — core-extra is the next hub-fix
+candidate by leverage.
+
+Open items carried forward (see register): D44 digest hardening +
+cache prune (release prep), D40a extractor megamodule ASTs,
+scanCodeTokens linearization, D24b residual key classes, D45b
+RecordAlias/Reserved siblings, collapse-script idempotency,
+elm-markdown melt triage, and the 396-failure histogram as the
+evidence base for the next fix campaign.
+
 ## STATUS
 
 - 2026-07-22 GATE v9 (commit 06d128a, post D35-D39): pure 201/202

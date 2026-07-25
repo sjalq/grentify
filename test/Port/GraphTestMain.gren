@@ -128,6 +128,7 @@ checkDependencyStrategies =
         registry =
             MappingRegistry.fromDocument
                 { schemaVersion = 1
+                , versionedPackages = []
                 , packages =
                     [ GrenAnalogue (details "test/analogue" "test/analogue")
                     , Absorbed (details "test/absorbed" "gren-lang/core")

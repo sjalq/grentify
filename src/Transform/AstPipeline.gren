@@ -1,0 +1,187 @@
+module Transform.AstPipeline exposing
+    ( Evidence
+    , Output
+    , Prepared
+    , finish
+    , moduleNameOf
+    , prepare
+    , reservedExportsOf
+    , run
+    )
+
+{-| Typed semantic phases for the resolved-AST translation path.
+
+The wrapper types prevent accidental phase reordering: name resolution must
+finish before semantic normalization, representation lowering before pattern
+compilation, and reserved-name finalization before printing.
+-}
+
+import Array exposing (Array)
+import Ast.BareResolve as BareResolve
+import Ast.CtorHome as CtorHome
+import Ast.CtorLaw as CtorLaw
+import Ast.IndexClamp as IndexClamp
+import Ast.KeyEncode as KeyEncode
+import Ast.MatchCompile as MatchCompile
+import Ast.NameSub as NameSub
+import Ast.Print as Print
+import Ast.RecordAlias as RecordAlias
+import Ast.Reserved as Reserved
+import Ast.TupleCompare as TupleCompare
+import Ast.Types exposing (File)
+import Dict exposing (Dict)
+import Mapping.Types exposing (Registry)
+
+
+type alias Evidence =
+    { tupleReturns : Dict String (Array TupleCompare.ElemShape)
+    , constructorHomes : CtorHome.Homes
+    , keyEvidence : KeyEncode.Evidence
+    , recordAliases : Dict String (Array String)
+    , constructorArities : Dict String Int
+    , soleConstructors : Dict String {}
+    , reservedExports : Dict String String
+    }
+
+
+type alias Output =
+    { file : File
+    , source : String
+    , unportedListSummary : Maybe String
+    , hasUnportedMarker : Bool
+    }
+
+
+type ResolvedAst
+    = ResolvedAst File
+
+
+type NormalizedAst
+    = NormalizedAst File
+
+
+type LoweredAst
+    = LoweredAst File
+
+
+type CompiledAst
+    = CompiledAst File
+
+
+type FinalizedAst
+    = FinalizedAst File
+
+
+{-| A module carried through every phase up to (but not including)
+reserved-name finalization.
+
+The package-wide reserved-export table can only be known once EVERY module has
+been lowered, but the final pass needs that table. The old shape ran the whole
+lowering prefix twice: once through a `collectReservedExports` approximation
+(which skipped CtorHome, IndexClamp, TupleCompare and KeyEncode, so it did not
+even agree with the real prefix), and once for real. `Prepared` is that prefix
+computed ONCE: `prepare` produces it, `reservedExportsOf` reads the table off
+it, `finish` completes it.
+-}
+type Prepared
+    = Prepared { file : File, renames : Dict String String }
+
+
+prepare : Registry -> Evidence -> File -> Prepared
+prepare registry evidence file =
+    let
+        (CompiledAst compiled) =
+            file
+                |> resolve evidence
+                |> normalize evidence
+                |> lower registry evidence
+                |> compilePatterns evidence
+    in
+    Prepared { file = compiled, renames = Reserved.renameMap compiled }
+
+
+moduleNameOf : Prepared -> String
+moduleNameOf (Prepared prepared) =
+    prepared.file.moduleDefinition.moduleName
+
+
+reservedExportsOf : Prepared -> Dict String String
+reservedExportsOf (Prepared prepared) =
+    Reserved.exportRenamesFrom prepared.file prepared.renames
+
+
+finish : Dict String String -> Prepared -> Output
+finish reservedExports (Prepared prepared) =
+    prepared.file
+        |> Reserved.applyWith reservedExports prepared.renames
+        |> FinalizedAst
+        |> render
+
+
+run : Registry -> Evidence -> File -> Output
+run registry evidence file =
+    file
+        |> resolve evidence
+        |> normalize evidence
+        |> lower registry evidence
+        |> compilePatterns evidence
+        |> finalize evidence
+        |> render
+
+
+resolve : Evidence -> File -> ResolvedAst
+resolve evidence file =
+    file
+        |> BareResolve.apply
+        |> CtorHome.apply evidence.constructorHomes
+        |> ResolvedAst
+
+
+normalize : Evidence -> ResolvedAst -> NormalizedAst
+normalize evidence (ResolvedAst file) =
+    file
+        |> IndexClamp.apply
+        |> TupleCompare.apply evidence.tupleReturns
+        |> KeyEncode.apply evidence.keyEvidence
+        |> NormalizedAst
+
+
+lower : Registry -> Evidence -> NormalizedAst -> LoweredAst
+lower registry evidence (NormalizedAst file) =
+    file
+        |> NameSub.apply registry
+        |> RecordAlias.apply evidence.recordAliases
+        |> CtorLaw.apply evidence.constructorArities
+        |> LoweredAst
+
+
+compilePatterns : Evidence -> LoweredAst -> CompiledAst
+compilePatterns evidence (LoweredAst file) =
+    file
+        |> MatchCompile.compile evidence.soleConstructors
+        |> CompiledAst
+
+
+finalize : Evidence -> CompiledAst -> FinalizedAst
+finalize evidence (CompiledAst file) =
+    file
+        |> Reserved.apply evidence.reservedExports
+        |> FinalizedAst
+
+
+render : FinalizedAst -> Output
+render (FinalizedAst file) =
+    let
+        source =
+            Print.print file
+    in
+    { file = file
+    , source = source
+    , unportedListSummary =
+        if MatchCompile.hasUnportedListPatterns file then
+            Just (MatchCompile.unportedListSummary file)
+
+        else
+            Nothing
+    , hasUnportedMarker = String.contains "unported-cons-pattern" source
+    }

@@ -1,0 +1,17 @@
+module Mapping.Adapter.Source.JsonEncode exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Json.Encode exposing (object)
+
+import Array exposing (Array)
+import Json.Encode exposing (Value)
+import Json.Encode as Encode
+
+
+object : Array { first : String, second : Value } -> Value
+object pairs =
+    Encode.object (Array.map (\\pair -> { key = pair.first, value = pair.second }) pairs)
+"""
+

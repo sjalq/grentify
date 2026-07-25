@@ -1,0 +1,19 @@
+module Mapping.Adapter.Source.JsonDecode exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Json.Decode exposing (keyValuePairs)
+
+import Array exposing (Array)
+import Json.Decode exposing (Decoder)
+import Json.Decode as Decode
+
+
+keyValuePairs : Decoder a -> Decoder (Array { first : String, second : a })
+keyValuePairs decoder =
+    Decode.map
+        (Array.map (\\pair -> { first = pair.key, second = pair.value }))
+        (Decode.keyValuePairs decoder)
+"""
+

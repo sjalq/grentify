@@ -11,7 +11,11 @@ module Mapping.Types exposing
     , PlatformInferenceError(..)
     , Registry
     , TranspileDetails
+    , TranslationGuarantee(..)
+    , VersionedPackageMapping
     , adapterIdName
+    , guaranteeName
+    , weakestGuarantee
     , mappingElmPackage
     , mappingGrenPackage
     , mappingKind
@@ -21,6 +25,7 @@ module Mapping.Types exposing
     )
 
 import Dict exposing (Dict)
+import Elm.Semver exposing (Range)
 
 
 type Platform
@@ -46,6 +51,61 @@ type MappingKind
     = GrenAnalogueKind
     | AbsorbedKind
     | TranspileKind
+
+
+{-| The semantic promise made by a translation rule.
+
+`Exact` keeps both representation and behavior. `RepresentationChange` keeps
+behavior through a different Gren representation. `Approximate` intentionally
+loses some source behavior and must be diagnosed. `Unsupported` has no safe
+translation and must remain a hard diagnostic.
+-}
+type TranslationGuarantee
+    = Exact
+    | RepresentationChange
+    | Approximate
+    | Unsupported
+
+
+guaranteeName : TranslationGuarantee -> String
+guaranteeName guarantee =
+    when guarantee is
+        Exact ->
+            "exact"
+
+        RepresentationChange ->
+            "representation-change"
+
+        Approximate ->
+            "approximate"
+
+        Unsupported ->
+            "unsupported"
+
+
+weakestGuarantee : TranslationGuarantee -> TranslationGuarantee -> TranslationGuarantee
+weakestGuarantee left right =
+    if guaranteeRank left >= guaranteeRank right then
+        left
+
+    else
+        right
+
+
+guaranteeRank : TranslationGuarantee -> Int
+guaranteeRank guarantee =
+    when guarantee is
+        Exact ->
+            0
+
+        RepresentationChange ->
+            1
+
+        Approximate ->
+            2
+
+        Unsupported ->
+            3
 
 
 type alias ModuleMapping =
@@ -145,6 +205,13 @@ mappingPlatform mapping =
 type alias MappingDocument =
     { schemaVersion : Int
     , packages : Array PackageMapping
+    , versionedPackages : Array VersionedPackageMapping
+    }
+
+
+type alias VersionedPackageMapping =
+    { elmVersionRange : Range
+    , mapping : PackageMapping
     }
 
 
@@ -160,6 +227,7 @@ type alias Registry =
     { packageOrder : Array String
     , packages : Dict String PackageMapping
     , modules : Dict String ModuleMapping
+    , versionedPackages : Array VersionedPackageMapping
     }
 
 

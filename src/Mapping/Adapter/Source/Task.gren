@@ -1,0 +1,20 @@
+module Mapping.Adapter.Source.Task exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Task exposing (map4, map5)
+
+import Task exposing (Task)
+
+
+map4 : (a -> b -> c -> d -> value) -> Task error a -> Task error b -> Task error c -> Task error d -> Task error value
+map4 fn ta tb tc td =
+    Task.andMap td (Task.map3 fn ta tb tc)
+
+
+map5 : (a -> b -> c -> d -> e -> value) -> Task error a -> Task error b -> Task error c -> Task error d -> Task error e -> Task error value
+map5 fn ta tb tc td te =
+    Task.andMap te (map4 fn ta tb tc td)
+"""
+

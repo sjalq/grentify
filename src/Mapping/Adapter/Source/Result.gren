@@ -1,0 +1,20 @@
+module Mapping.Adapter.Source.Result exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Result exposing (map4, map5)
+
+import Result exposing (Result)
+
+
+map4 : (a -> b -> c -> d -> value) -> Result error a -> Result error b -> Result error c -> Result error d -> Result error value
+map4 fn ra rb rc rd =
+    Result.andMap rd (Result.map3 fn ra rb rc)
+
+
+map5 : (a -> b -> c -> d -> e -> value) -> Result error a -> Result error b -> Result error c -> Result error d -> Result error e -> Result error value
+map5 fn ra rb rc rd re =
+    Result.andMap re (map4 fn ra rb rc rd)
+"""
+

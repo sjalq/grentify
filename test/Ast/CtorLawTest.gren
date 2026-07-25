@@ -316,7 +316,11 @@ fifoRealLoweringChainStillEmitsHelper =
     let
         emptyRegistry : Registry
         emptyRegistry =
-            { packageOrder = [], packages = Dict.empty, modules = Dict.empty }
+            { packageOrder = []
+            , packages = Dict.empty
+            , modules = Dict.empty
+            , versionedPackages = []
+            }
 
         lowered =
             fifoFixtureFile

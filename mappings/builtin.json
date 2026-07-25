@@ -561,5 +561,43 @@
         }
       ]
     }
+  ],
+  "versionedPackages": [
+    {
+      "elmVersionRange": "1.0.0 <= v < 2.0.0",
+      "mapping": {
+        "kind": "absorbed",
+        "elmPackage": "elm/http",
+        "grenPackage": "gren-lang/browser",
+        "grenVersion": "6.0.2",
+        "platform": "browser",
+        "modules": [
+          {
+            "source": "Http",
+            "target": "Http",
+            "values": {
+              "get": "ElmToGren.Compat.Http.get",
+              "post": "ElmToGren.Compat.Http.post",
+              "request": "ElmToGren.Compat.Http.request",
+              "send": "ElmToGren.Compat.Http.send",
+              "toTask": "ElmToGren.Compat.Http.toTask",
+              "expectJson": "ElmToGren.Compat.Http.expectJson",
+              "expectString": "ElmToGren.Compat.Http.expectString",
+              "BadUrl": "ElmToGren.Compat.Http.BadUrl",
+              "Timeout": "ElmToGren.Compat.Http.Timeout",
+              "NetworkError": "ElmToGren.Compat.Http.NetworkError",
+              "BadStatus": "ElmToGren.Compat.Http.BadStatus",
+              "BadPayload": "ElmToGren.Compat.Http.BadPayload"
+            },
+            "types": {
+              "Request": "ElmToGren.Compat.Http.Request",
+              "Expect": "ElmToGren.Compat.Http.Expect",
+              "Error": "ElmToGren.Compat.Http.Error",
+              "Response": "ElmToGren.Compat.Http.Response"
+            }
+          }
+        ]
+      }
+    }
   ]
 }

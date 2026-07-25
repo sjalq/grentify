@@ -1,4 +1,4 @@
-module Verify.Package exposing (verify)
+module Verify.Package exposing (ConsumerVerdict(..), verify, verifyConsumer)
 
 import ChildProcess
 import Dict
@@ -52,6 +52,88 @@ verify platform permission options =
         runGren docsArgs [ 0 ]
             |> Task.map (\_ -> {})
             |> Task.mapError verifyFailed
+
+
+{-| D51: what `add` is allowed to fail on.
+
+An `add` is sound when the vendored tree compiles and the consumer's manifest
+resolves. Whether the consumer's OWN modules compile is the consumer's
+business: an application is very often mid-edit at exactly the moment a
+dependency is added, and rolling the install back for an unrelated
+pre-existing error makes the tool unusable when it is most needed.
+
+So: errors implicating the manifest or the vendored tree stay fatal (they are
+ours), and errors confined to the consumer's own modules are reported and
+carried, never fatal.
+
+-}
+type ConsumerVerdict
+    = ConsumerVerified
+    | ConsumerSourceErrors String
+
+
+{-| Compile the consumer application after publication. Distinguishes "our
+install is broken" from "their code does not currently compile".
+
+Discriminator: a `--report=json` run emits `{"type":"compile-errors"}` for
+module-level problems and `{"type":"error"}` for manifest/dependency problems
+(MISSING INDIRECT DEPENDENCIES, PROBLEM BUILDING DEPENDENCIES, corrupt
+packages). Only the former, and only when no failing path lies inside the
+vendored tree, is the consumer's own business.
+
+-}
+verifyConsumer
+    : Node.Platform
+    -> ChildProcess.Permission
+    ->
+        { applicationDirectory : Path
+        , grenExecutable : String
+        , vendorDirectory : String
+        }
+    -> Task Error ConsumerVerdict
+verifyConsumer platform permission options =
+    System.Process.run permission
+        { program = options.grenExecutable
+        , arguments = [ "make", "Main", "--output=/dev/null", "--report=json" ]
+        , workingDirectory = System.File.pathToString platform options.applicationDirectory
+        , environment = Dict.empty
+        , allowedExitCodes = [ 0, 1 ]
+        , timeoutMilliseconds = 10 * 60 * 1000
+        , maximumOutputBytes = 64 * 1024 * 1024
+        }
+        |> Task.andThen
+            (\output ->
+                if output.exitCode == 0 then
+                    Task.succeed ConsumerVerified
+
+                else
+                    let
+                        text =
+                            String.trim (output.stdout ++ "\n" ++ output.stderr)
+
+                        isModuleLevel =
+                            String.contains "\"type\":\"compile-errors\"" text
+
+                        touchesVendoredTree =
+                            String.contains options.vendorDirectory text
+                    in
+                    if isModuleLevel && not touchesVendoredTree then
+                        Task.succeed (ConsumerSourceErrors text)
+
+                    else if isModuleLevel then
+                        Task.fail
+                            (verifyFailed (PortError.create "GREN_VERIFY_FAILED" text))
+
+                    else
+                        -- Not a module-level report: the manifest itself does
+                        -- not resolve. Frequently a gap that pre-dates the add
+                        -- (a hand-edited gren.json missing indirects), so name
+                        -- that possibility instead of implying a bad port.
+                        Task.fail
+                            (PortError.create "GREN_VERIFY_FAILED" text
+                                |> PortError.withHint "The application manifest does not resolve. If gren.json was hand-edited, run `gren make` first to see what it is missing; the add was rolled back and changed nothing."
+                            )
+            )
 
 
 verifyFailed : Error -> Error

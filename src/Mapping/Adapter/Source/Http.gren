@@ -1,0 +1,193 @@
+module Mapping.Adapter.Source.Http exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Http exposing
+    ( Request
+    , Expect
+    , Error(..)
+    , Response
+    , get
+    , post
+    , request
+    , send
+    , toTask
+    , expectString
+    , expectJson
+    )
+
+import Array exposing (Array)
+import Dict exposing (Dict)
+import Http
+import Json.Decode as Decode
+import Maybe exposing (Maybe(..))
+import Result exposing (Result(..))
+import Task exposing (Task)
+
+
+{-| elm/http 1.x error surface (Response body on BadStatus/BadPayload).
+-}
+type Error
+    = BadUrl String
+    | Timeout
+    | NetworkError
+    | BadStatus (Response String)
+    | BadPayload { message : String, response : Response String }
+
+
+type alias Response body =
+    { url : String
+    , status : { code : Int, message : String }
+    , headers : Dict String String
+    , body : body
+    }
+
+
+type Expect a
+    = ExpectJson (Decode.Decoder a)
+
+
+type Request a
+    = Request
+        { method : String
+        , headers : Array Http.Header
+        , url : String
+        , body : Http.Body
+        , expect : Expect a
+        , timeout : Maybe Float
+        }
+
+
+expectString : Expect String
+expectString =
+    ExpectJson Decode.string
+
+
+expectJson : Decode.Decoder a -> Expect a
+expectJson decoder =
+    ExpectJson decoder
+
+
+get : String -> Decode.Decoder a -> Request a
+get url decoder =
+    request
+        { method = "GET"
+        , headers = []
+        , url = url
+        , body = Http.emptyBody
+        , expect = expectJson decoder
+        , timeout = Nothing
+        , withCredentials = False
+        }
+
+
+post : String -> Http.Body -> Decode.Decoder a -> Request a
+post url body decoder =
+    request
+        { method = "POST"
+        , headers = []
+        , url = url
+        , body = body
+        , expect = expectJson decoder
+        , timeout = Nothing
+        , withCredentials = False
+        }
+
+
+request :
+    { method : String
+    , headers : Array Http.Header
+    , url : String
+    , body : Http.Body
+    , expect : Expect a
+    , timeout : Maybe Float
+    , withCredentials : Bool
+    }
+    -> Request a
+request config =
+    Request
+        { method = config.method
+        , headers = config.headers
+        , url = config.url
+        , body = config.body
+        , expect = config.expect
+        , timeout = config.timeout
+        }
+
+
+send : (Result Error a -> msg) -> Request a -> Cmd msg
+send toMsg (Request config) =
+    let
+        (ExpectJson decoder) =
+            config.expect
+    in
+    Http.request
+        { method = config.method
+        , headers = config.headers
+        , url = config.url
+        , body = config.body
+        , expect =
+            Http.expectStringResponse toMsg (interpretResponse decoder)
+        , timeout = config.timeout
+        , tracker = Nothing
+        }
+
+
+toTask : Request a -> Task Error a
+toTask (Request config) =
+    let
+        (ExpectJson decoder) =
+            config.expect
+    in
+    Http.task
+        { method = config.method
+        , headers = config.headers
+        , url = config.url
+        , body = config.body
+        , resolver = Http.stringResolver (interpretResponse decoder)
+        , timeout = config.timeout
+        }
+
+
+interpretResponse : Decode.Decoder a -> Http.Response String -> Result Error a
+interpretResponse decoder response =
+    when response is
+        Http.BadUrl_ url ->
+            Err (BadUrl url)
+
+        Http.Timeout_ ->
+            Err Timeout
+
+        Http.NetworkError_ ->
+            Err NetworkError
+
+        Http.BadStatus_ { metadata, body } ->
+            Err
+                (BadStatus
+                    { url = metadata.url
+                    , status = { code = metadata.statusCode, message = metadata.statusText }
+                    , headers = metadata.headers
+                    , body = body
+                    }
+                )
+
+        Http.GoodStatus_ { metadata, body } ->
+            when Decode.decodeString decoder body is
+                Ok value ->
+                    Ok value
+
+                Err decodeError ->
+                    Err
+                        (BadPayload
+                            { message = Decode.errorToString decodeError
+                            , response =
+                                { url = metadata.url
+                                , status = { code = metadata.statusCode, message = metadata.statusText }
+                                , headers = metadata.headers
+                                , body = body
+                                }
+                            }
+                        )
+"""
+

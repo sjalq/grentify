@@ -74,11 +74,17 @@ flowchart TD
    No AST → range edits + catalog + lexical only.
 4. **Emit** workspace (`port`) or `.elm-to-gren/packages/` + `gren.json` (`add`).
 5. **Format** with vendored [gilramir/gren-format](https://github.com/gilramir/gren-format)
-   unless **volume** (any of: ≥200 modules, ≥400KB total, ≥100KB single module).
+   unless **volume** (any of: ≥200 modules, ≥250KB total, ≥100KB single module).
    Volume skip also skips record-pattern collapse.
 6. **Verify** with the real Gren binary:
    - applications: `gren make Main --output=/dev/null`
-   - packages: try `gren make Main`; on non-zero, `gren docs --output=/dev/null`
+   - packages: `gren docs --output=/dev/null`
+   - `add`: the vendored package is verified as a package, and failing that
+     rolls the whole publication back. The consumer application is then
+     compiled too, but errors confined to **your** modules are reported and
+     the install is kept — an app is usually mid-edit exactly when a
+     dependency is added. Manifest-level failures, and any error inside
+     `.elm-to-gren/packages`, still roll back.
 
 ### What ports / what does not
 

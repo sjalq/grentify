@@ -1,0 +1,28 @@
+module Mapping.Adapter.Source.Expect exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Expect exposing (true, false)
+
+import Expect
+
+
+true : String -> Bool -> Expect.Expectation
+true message condition =
+    if condition then
+        Expect.pass
+
+    else
+        Expect.fail message
+
+
+false : String -> Bool -> Expect.Expectation
+false message condition =
+    if condition then
+        Expect.fail message
+
+    else
+        Expect.pass
+"""
+

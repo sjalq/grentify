@@ -1,0 +1,32 @@
+module Mapping.Adapter.Source.HtmlKeyed exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Html.Keyed exposing (node, ol, ul)
+
+import Array exposing (Array)
+import Html exposing (Attribute, Html)
+import Html.Keyed as Keyed
+
+
+keyedChildren : Array { first : String, second : Html msg } -> Array { key : String, node : Html msg }
+keyedChildren entries =
+    Array.map (\\entry -> { key = entry.first, node = entry.second }) entries
+
+
+node : String -> Array (Attribute msg) -> Array { first : String, second : Html msg } -> Html msg
+node tag attributes entries =
+    Keyed.node tag attributes (keyedChildren entries)
+
+
+ol : Array (Attribute msg) -> Array { first : String, second : Html msg } -> Html msg
+ol attributes entries =
+    Keyed.ol attributes (keyedChildren entries)
+
+
+ul : Array (Attribute msg) -> Array { first : String, second : Html msg } -> Html msg
+ul attributes entries =
+    Keyed.ul attributes (keyedChildren entries)
+"""
+

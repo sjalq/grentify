@@ -1,0 +1,59 @@
+module Mapping.Adapter.Source.Browser exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Browser exposing (element, document, application)
+
+import Browser
+import Html exposing (Html)
+
+
+teaPair : { first : model, second : Cmd msg } -> { model : model, command : Cmd msg }
+teaPair pair =
+    { model = pair.first, command = pair.second }
+
+
+element :
+    { init : flags -> { first : model, second : Cmd msg }
+    , view : model -> Html msg
+    , update : msg -> model -> { first : model, second : Cmd msg }
+    , subscriptions : model -> Sub msg
+    }
+    -> Program flags model msg
+element config =
+    Browser.element
+        { init = \\flags -> teaPair (config.init flags)
+        , view = config.view
+        , update = \\msg model -> teaPair (config.update msg model)
+        , subscriptions = config.subscriptions
+        }
+
+
+document :
+    { init : flags -> { first : model, second : Cmd msg }
+    , view : model -> Browser.Document msg
+    , update : msg -> model -> { first : model, second : Cmd msg }
+    , subscriptions : model -> Sub msg
+    }
+    -> Program flags model msg
+document config =
+    Browser.document
+        { init = \\flags -> teaPair (config.init flags)
+        , view = config.view
+        , update = \\msg model -> teaPair (config.update msg model)
+        , subscriptions = config.subscriptions
+        }
+
+
+application config =
+    Browser.application
+        { init = \\flags url key -> teaPair (config.init flags url key)
+        , view = config.view
+        , update = \\msg model -> teaPair (config.update msg model)
+        , subscriptions = config.subscriptions
+        , onUrlRequest = config.onUrlRequest
+        , onUrlChange = config.onUrlChange
+        }
+"""
+

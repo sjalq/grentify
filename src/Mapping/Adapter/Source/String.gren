@@ -1,0 +1,35 @@
+module Mapping.Adapter.Source.String exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.String exposing (concat, uncons, append)
+
+import Array exposing (Array)
+import Maybe exposing (Maybe(..))
+import String
+
+
+concat : Array String -> String
+concat strings =
+    String.join "" strings
+
+
+{-| Elm `String.append a b == a ++ b`. Gren's `String.append` flips its
+arguments to be pipe-friendly, so restore Elm order with `++`.
+-}
+append : String -> String -> String
+append lhs rhs =
+    lhs ++ rhs
+
+
+uncons : String -> Maybe { first : Char, second : String }
+uncons string =
+    when String.popFirst string is
+        Just { first, rest } ->
+            Just { first = first, second = rest }
+
+        Nothing ->
+            Nothing
+"""
+

@@ -1,0 +1,37 @@
+module Mapping.Adapter.Source.VirtualDomHandler exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.VirtualDom.Handler exposing (mayPreventDefault, mayStopPropagation)
+
+import Json.Decode as Decode
+import VirtualDom exposing (Handler(..))
+
+
+mayPreventDefault : Decode.Decoder { first : msg, second : Bool } -> Handler msg
+mayPreventDefault decoder =
+    VirtualDom.MayPreventDefault
+        (Decode.map
+            (\\pair ->
+                { message = pair.first
+                , preventDefault = pair.second
+                }
+            )
+            decoder
+        )
+
+
+mayStopPropagation : Decode.Decoder { first : msg, second : Bool } -> Handler msg
+mayStopPropagation decoder =
+    VirtualDom.MayStopPropagation
+        (Decode.map
+            (\\pair ->
+                { message = pair.first
+                , stopPropagation = pair.second
+                }
+            )
+            decoder
+        )
+"""
+

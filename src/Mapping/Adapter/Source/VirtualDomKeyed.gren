@@ -1,0 +1,26 @@
+module Mapping.Adapter.Source.VirtualDomKeyed exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.VirtualDom.Keyed exposing (keyedNode, keyedNodeNS)
+
+import Array exposing (Array)
+import VirtualDom exposing (Attribute, Node)
+
+
+keyedChildren : Array { first : String, second : Node msg } -> Array { key : String, node : Node msg }
+keyedChildren entries =
+    Array.map (\\entry -> { key = entry.first, node = entry.second }) entries
+
+
+keyedNode : String -> Array (Attribute msg) -> Array { first : String, second : Node msg } -> Node msg
+keyedNode tag attributes entries =
+    VirtualDom.keyedNode tag attributes (keyedChildren entries)
+
+
+keyedNodeNS : String -> String -> Array (Attribute msg) -> Array { first : String, second : Node msg } -> Node msg
+keyedNodeNS namespace tag attributes entries =
+    VirtualDom.keyedNodeNS namespace tag attributes (keyedChildren entries)
+"""
+

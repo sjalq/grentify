@@ -5,6 +5,9 @@ module Mapping.Adapter exposing
     , all
     , generate
     , generateFromRequirements
+    , guarantee
+    , guaranteeForModule
+    , guaranteeForTarget
     , moduleName
     , normalize
     , requiredForModules
@@ -13,7 +16,32 @@ module Mapping.Adapter exposing
 
 import Array
 import Dict exposing (Dict)
-import Mapping.Types exposing (AdapterId(..), GeneratedModule, ModuleMapping, adapterIdName)
+import Mapping.Adapter.Source.Array as ArraySource
+import Mapping.Adapter.Source.Basics as BasicsSource
+import Mapping.Adapter.Source.Browser as BrowserSource
+import Mapping.Adapter.Source.BytesEncode as BytesEncodeSource
+import Mapping.Adapter.Source.Char as CharSource
+import Mapping.Adapter.Source.Dict as DictSource
+import Mapping.Adapter.Source.Expect as ExpectSource
+import Mapping.Adapter.Source.HtmlAttributes as HtmlAttributesSource
+import Mapping.Adapter.Source.HtmlEvents as HtmlEventsSource
+import Mapping.Adapter.Source.HtmlKeyed as HtmlKeyedSource
+import Mapping.Adapter.Source.Http as HttpSource
+import Mapping.Adapter.Source.JsonDecode as JsonDecodeSource
+import Mapping.Adapter.Source.JsonEncode as JsonEncodeSource
+import Mapping.Adapter.Source.List as ListSource
+import Mapping.Adapter.Source.Markdown as MarkdownSource
+import Mapping.Adapter.Source.Maybe as MaybeSource
+import Mapping.Adapter.Source.Random as RandomSource
+import Mapping.Adapter.Source.Result as ResultSource
+import Mapping.Adapter.Source.Set as SetSource
+import Mapping.Adapter.Source.String as StringSource
+import Mapping.Adapter.Source.SvgKeyed as SvgKeyedSource
+import Mapping.Adapter.Source.Task as TaskSource
+import Mapping.Adapter.Source.Tuple as TupleSource
+import Mapping.Adapter.Source.VirtualDomHandler as VirtualDomHandlerSource
+import Mapping.Adapter.Source.VirtualDomKeyed as VirtualDomKeyedSource
+import Mapping.Types exposing (AdapterId(..), GeneratedModule, ModuleMapping, TranslationGuarantee(..), adapterIdName, weakestGuarantee)
 import Maybe exposing (Maybe(..))
 import Result exposing (Result(..))
 
@@ -86,6 +114,127 @@ adapterIdForTarget target =
                     |> Array.findFirst (\adapterId -> moduleName adapterId == foundModule)
                     |> Maybe.map .value
             )
+
+
+{-| Semantic guarantee for generating an adapter module as a whole.
+
+Most adapters preserve behavior while reshaping Elm values to Gren values.
+Markdown is intentionally incomplete and therefore approximate.
+-}
+guarantee : AdapterId -> TranslationGuarantee
+guarantee adapterId =
+    when adapterId is
+        MarkdownAdapter ->
+            Approximate
+
+        ArrayAdapter ->
+            RepresentationChange
+
+        BasicsAdapter ->
+            RepresentationChange
+
+        BrowserAdapter ->
+            RepresentationChange
+
+        BytesEncodeAdapter ->
+            RepresentationChange
+
+        CharAdapter ->
+            RepresentationChange
+
+        DictAdapter ->
+            RepresentationChange
+
+        ExpectAdapter ->
+            RepresentationChange
+
+        HtmlAttributesAdapter ->
+            RepresentationChange
+
+        HtmlEventsAdapter ->
+            RepresentationChange
+
+        HtmlKeyedAdapter ->
+            RepresentationChange
+
+        HttpAdapter ->
+            RepresentationChange
+
+        JsonDecodeAdapter ->
+            RepresentationChange
+
+        JsonEncodeAdapter ->
+            RepresentationChange
+
+        ListAdapter ->
+            RepresentationChange
+
+        MaybeAdapter ->
+            RepresentationChange
+
+        RandomAdapter ->
+            RepresentationChange
+
+        ResultAdapter ->
+            RepresentationChange
+
+        SetAdapter ->
+            RepresentationChange
+
+        StringAdapter ->
+            RepresentationChange
+
+        SvgKeyedAdapter ->
+            RepresentationChange
+
+        TaskAdapter ->
+            RepresentationChange
+
+        TupleAdapter ->
+            RepresentationChange
+
+        VirtualDomHandlerAdapter ->
+            RepresentationChange
+
+        VirtualDomKeyedAdapter ->
+            RepresentationChange
+
+
+{-| Classify every mapping target. Direct Gren targets are exact; compatibility
+targets inherit their adapter promise, with symbol-level overrides where an
+adapter contains both preserving and approximate operations.
+-}
+guaranteeForTarget : String -> TranslationGuarantee
+guaranteeForTarget target =
+    if
+        target == "ElmToGren.Compat.Char.toLocaleLower"
+            || target == "ElmToGren.Compat.Char.toLocaleUpper"
+    then
+        Approximate
+
+    else
+        when adapterIdForTarget target is
+            Just adapterId ->
+                guarantee adapterId
+
+            Nothing ->
+                if String.startsWith prefix target then
+                    Unsupported
+
+                else
+                    Exact
+
+
+guaranteeForModule : ModuleMapping -> TranslationGuarantee
+guaranteeForModule mapping =
+    [ mapping.target ]
+        |> Array.append (Dict.values mapping.values)
+        |> Array.append (Dict.values mapping.types)
+        |> Array.foldl
+            (\target found ->
+                weakestGuarantee found (guaranteeForTarget target)
+            )
+            Exact
 
 
 normalize : String -> Result AdapterError AdapterId
@@ -192,1084 +341,76 @@ sourceFor : AdapterId -> String
 sourceFor adapterId =
     when adapterId is
         ArrayAdapter ->
-            arraySource
+            ArraySource.source
 
         BasicsAdapter ->
-            basicsSource
+            BasicsSource.source
 
         BrowserAdapter ->
-            browserSource
+            BrowserSource.source
 
         BytesEncodeAdapter ->
-            bytesEncodeSource
+            BytesEncodeSource.source
 
         CharAdapter ->
-            charSource
+            CharSource.source
 
         DictAdapter ->
-            dictSource
+            DictSource.source
 
         ExpectAdapter ->
-            expectSource
+            ExpectSource.source
 
         HtmlAttributesAdapter ->
-            htmlAttributesSource
+            HtmlAttributesSource.source
 
         HtmlEventsAdapter ->
-            htmlEventsSource
+            HtmlEventsSource.source
 
         HtmlKeyedAdapter ->
-            htmlKeyedSource
+            HtmlKeyedSource.source
 
         HttpAdapter ->
-            httpSource
+            HttpSource.source
 
         JsonDecodeAdapter ->
-            jsonDecodeSource
+            JsonDecodeSource.source
 
         JsonEncodeAdapter ->
-            jsonEncodeSource
+            JsonEncodeSource.source
 
         ListAdapter ->
-            listSource
+            ListSource.source
 
         MarkdownAdapter ->
-            markdownSource
+            MarkdownSource.source
 
         MaybeAdapter ->
-            maybeSource
+            MaybeSource.source
 
         RandomAdapter ->
-            randomSource
+            RandomSource.source
 
         ResultAdapter ->
-            resultSource
+            ResultSource.source
 
         SetAdapter ->
-            setSource
+            SetSource.source
 
         StringAdapter ->
-            stringSource
+            StringSource.source
 
         SvgKeyedAdapter ->
-            svgKeyedSource
+            SvgKeyedSource.source
 
         TaskAdapter ->
-            taskSource
+            TaskSource.source
 
         TupleAdapter ->
-            tupleSource
+            TupleSource.source
 
         VirtualDomHandlerAdapter ->
-            virtualDomHandlerSource
+            VirtualDomHandlerSource.source
 
         VirtualDomKeyedAdapter ->
-            virtualDomKeyedSource
-
-
-{-| Elm TEA returns `(model, Cmd msg)` which ports to `{ first, second }`.
-Gren's Browser.element/document/application expect `{ model, command }`.
--}
-browserSource : String
-browserSource =
-    """
-module ElmToGren.Compat.Browser exposing (element, document, application)
-
-import Browser
-import Html exposing (Html)
-
-
-teaPair : { first : model, second : Cmd msg } -> { model : model, command : Cmd msg }
-teaPair pair =
-    { model = pair.first, command = pair.second }
-
-
-element :
-    { init : flags -> { first : model, second : Cmd msg }
-    , view : model -> Html msg
-    , update : msg -> model -> { first : model, second : Cmd msg }
-    , subscriptions : model -> Sub msg
-    }
-    -> Program flags model msg
-element config =
-    Browser.element
-        { init = \\flags -> teaPair (config.init flags)
-        , view = config.view
-        , update = \\msg model -> teaPair (config.update msg model)
-        , subscriptions = config.subscriptions
-        }
-
-
-document :
-    { init : flags -> { first : model, second : Cmd msg }
-    , view : model -> Browser.Document msg
-    , update : msg -> model -> { first : model, second : Cmd msg }
-    , subscriptions : model -> Sub msg
-    }
-    -> Program flags model msg
-document config =
-    Browser.document
-        { init = \\flags -> teaPair (config.init flags)
-        , view = config.view
-        , update = \\msg model -> teaPair (config.update msg model)
-        , subscriptions = config.subscriptions
-        }
-
-
-application config =
-    Browser.application
-        { init = \\flags url key -> teaPair (config.init flags url key)
-        , view = config.view
-        , update = \\msg model -> teaPair (config.update msg model)
-        , subscriptions = config.subscriptions
-        , onUrlRequest = config.onUrlRequest
-        , onUrlChange = config.onUrlChange
-        }
-"""
-
-
-{-| Elm encodes UTF-8 strings via Bytes.Encode.string; Gren moved that to
-Bytes.fromString plus Bytes.Encode.bytes.
--}
-bytesEncodeSource : String
-bytesEncodeSource =
-    """
-module ElmToGren.Compat.Bytes.Encode exposing (string, getStringWidth)
-
-import Bytes
-import Bytes.Encode exposing (Encoder)
-
-
-string : String -> Encoder
-string value =
-    Bytes.Encode.bytes (Bytes.fromString value)
-
-
-getStringWidth : String -> Int
-getStringWidth value =
-    Bytes.length (Bytes.fromString value)
-"""
-
-
-{-| Elm's preventDefaultOn/stopPropagationOn decode `(msg, Bool)` tuples.
-After the tuple rewrite those become `{ first, second }`; Gren expects
-named fields `{ message, preventDefault }` / `{ message, stopPropagation }`.
--}
-htmlAttributesSource : String
-htmlAttributesSource =
-    """
-module ElmToGren.Compat.Html.Attributes exposing (classList)
-
-import Array exposing (Array)
-import Html exposing (Attribute)
-import Html.Attributes
-
-
-classList : Array { first : String, second : Bool } -> Attribute msg
-classList items =
-    Html.Attributes.classList
-        (Array.map
-            (\\pair ->
-                { class = pair.first
-                , enabled = pair.second
-                }
-            )
-            items
-        )
-"""
-
-
-htmlEventsSource : String
-htmlEventsSource =
-    """
-module ElmToGren.Compat.Html.Events exposing (preventDefaultOn, stopPropagationOn, custom)
-
-import Html exposing (Attribute)
-import Html.Events
-import Json.Decode as Decode
-
-
-preventDefaultOn : String -> Decode.Decoder { first : msg, second : Bool } -> Attribute msg
-preventDefaultOn event decoder =
-    Html.Events.preventDefaultOn event
-        (Decode.map
-            (\\pair ->
-                { message = pair.first
-                , preventDefault = pair.second
-                }
-            )
-            decoder
-        )
-
-
-stopPropagationOn : String -> Decode.Decoder { first : msg, second : Bool } -> Attribute msg
-stopPropagationOn event decoder =
-    Html.Events.stopPropagationOn event
-        (Decode.map
-            (\\pair ->
-                { message = pair.first
-                , stopPropagation = pair.second
-                }
-            )
-            decoder
-        )
-
-
-custom :
-    String
-    -> Decode.Decoder { message : msg, stopPropagation : Bool, preventDefault : Bool }
-    -> Attribute msg
-custom event decoder =
-    Html.Events.custom event decoder
-"""
-
-
-{-| Elm Keyed nodes take `List (String, Html msg)` which becomes
-`Array { first : String, second : Html msg }`. Gren expects
-`Array { key : String, node : Html msg }`.
--}
-htmlKeyedSource : String
-htmlKeyedSource =
-    """
-module ElmToGren.Compat.Html.Keyed exposing (node, ol, ul)
-
-import Array exposing (Array)
-import Html exposing (Attribute, Html)
-import Html.Keyed as Keyed
-
-
-keyedChildren : Array { first : String, second : Html msg } -> Array { key : String, node : Html msg }
-keyedChildren entries =
-    Array.map (\\entry -> { key = entry.first, node = entry.second }) entries
-
-
-node : String -> Array (Attribute msg) -> Array { first : String, second : Html msg } -> Html msg
-node tag attributes entries =
-    Keyed.node tag attributes (keyedChildren entries)
-
-
-ol : Array (Attribute msg) -> Array { first : String, second : Html msg } -> Html msg
-ol attributes entries =
-    Keyed.ol attributes (keyedChildren entries)
-
-
-ul : Array (Attribute msg) -> Array { first : String, second : Html msg } -> Html msg
-ul attributes entries =
-    Keyed.ul attributes (keyedChildren entries)
-"""
-
-
-svgKeyedSource : String
-svgKeyedSource =
-    """
-module ElmToGren.Compat.Svg.Keyed exposing (node)
-
-import Array exposing (Array)
-import Svg exposing (Attribute, Svg)
-import Svg.Keyed as Keyed
-
-
-node : String -> Array (Attribute msg) -> Array { first : String, second : Svg msg } -> Svg msg
-node tag attributes entries =
-    Keyed.node tag attributes
-        (Array.map (\\entry -> { key = entry.first, node = entry.second }) entries)
-"""
-
-
-{-| Elm `VirtualDom.Handler` variants wrap `(msg, Bool)` decoders. After the
-tuple rewrite those become `{ first, second }`; Gren expects named fields
-`{ message, preventDefault }` / `{ message, stopPropagation }`. Same rationale
-as `Html.Events.preventDefaultOn` / `stopPropagationOn`.
--}
-virtualDomHandlerSource : String
-virtualDomHandlerSource =
-    """
-module ElmToGren.Compat.VirtualDom.Handler exposing (mayPreventDefault, mayStopPropagation)
-
-import Json.Decode as Decode
-import VirtualDom exposing (Handler(..))
-
-
-mayPreventDefault : Decode.Decoder { first : msg, second : Bool } -> Handler msg
-mayPreventDefault decoder =
-    VirtualDom.MayPreventDefault
-        (Decode.map
-            (\\pair ->
-                { message = pair.first
-                , preventDefault = pair.second
-                }
-            )
-            decoder
-        )
-
-
-mayStopPropagation : Decode.Decoder { first : msg, second : Bool } -> Handler msg
-mayStopPropagation decoder =
-    VirtualDom.MayStopPropagation
-        (Decode.map
-            (\\pair ->
-                { message = pair.first
-                , stopPropagation = pair.second
-                }
-            )
-            decoder
-        )
-"""
-
-
-{-| Elm keyed nodes pass `List (String, node)`. After the tuple rewrite that is
-`Array { first, second }`. Gren VirtualDom expects `{ key, node }`.
--}
-virtualDomKeyedSource : String
-virtualDomKeyedSource =
-    """
-module ElmToGren.Compat.VirtualDom.Keyed exposing (keyedNode, keyedNodeNS)
-
-import Array exposing (Array)
-import VirtualDom exposing (Attribute, Node)
-
-
-keyedChildren : Array { first : String, second : Node msg } -> Array { key : String, node : Node msg }
-keyedChildren entries =
-    Array.map (\\entry -> { key = entry.first, node = entry.second }) entries
-
-
-keyedNode : String -> Array (Attribute msg) -> Array { first : String, second : Node msg } -> Node msg
-keyedNode tag attributes entries =
-    VirtualDom.keyedNode tag attributes (keyedChildren entries)
-
-
-keyedNodeNS : String -> String -> Array (Attribute msg) -> Array { first : String, second : Node msg } -> Node msg
-keyedNodeNS namespace tag attributes entries =
-    VirtualDom.keyedNodeNS namespace tag attributes (keyedChildren entries)
-"""
-
-
-{-| Elm 0.19 `elm/http` 1.x used `Request a` + `send` and positional `get`/`post`.
-Gren (and Elm http 2.x) use record configs and expect-in-request. This adapter
-restores the 1.x surface on top of Gren's Http.
--}
-httpSource : String
-httpSource =
-    """
-module ElmToGren.Compat.Http exposing
-    ( Request
-    , Expect
-    , Error(..)
-    , Response
-    , get
-    , post
-    , request
-    , send
-    , toTask
-    , expectString
-    , expectJson
-    )
-
-import Array exposing (Array)
-import Dict exposing (Dict)
-import Http
-import Json.Decode as Decode
-import Maybe exposing (Maybe(..))
-import Result exposing (Result(..))
-import Task exposing (Task)
-
-
-{-| elm/http 1.x error surface (Response body on BadStatus/BadPayload).
--}
-type Error
-    = BadUrl String
-    | Timeout
-    | NetworkError
-    | BadStatus (Response String)
-    | BadPayload { message : String, response : Response String }
-
-
-type alias Response body =
-    { url : String
-    , status : { code : Int, message : String }
-    , headers : Dict String String
-    , body : body
-    }
-
-
-type Expect a
-    = ExpectJson (Decode.Decoder a)
-
-
-type Request a
-    = Request
-        { method : String
-        , headers : Array Http.Header
-        , url : String
-        , body : Http.Body
-        , expect : Expect a
-        , timeout : Maybe Float
-        }
-
-
-expectString : Expect String
-expectString =
-    ExpectJson Decode.string
-
-
-expectJson : Decode.Decoder a -> Expect a
-expectJson decoder =
-    ExpectJson decoder
-
-
-get : String -> Decode.Decoder a -> Request a
-get url decoder =
-    request
-        { method = "GET"
-        , headers = []
-        , url = url
-        , body = Http.emptyBody
-        , expect = expectJson decoder
-        , timeout = Nothing
-        , withCredentials = False
-        }
-
-
-post : String -> Http.Body -> Decode.Decoder a -> Request a
-post url body decoder =
-    request
-        { method = "POST"
-        , headers = []
-        , url = url
-        , body = body
-        , expect = expectJson decoder
-        , timeout = Nothing
-        , withCredentials = False
-        }
-
-
-request :
-    { method : String
-    , headers : Array Http.Header
-    , url : String
-    , body : Http.Body
-    , expect : Expect a
-    , timeout : Maybe Float
-    , withCredentials : Bool
-    }
-    -> Request a
-request config =
-    Request
-        { method = config.method
-        , headers = config.headers
-        , url = config.url
-        , body = config.body
-        , expect = config.expect
-        , timeout = config.timeout
-        }
-
-
-send : (Result Error a -> msg) -> Request a -> Cmd msg
-send toMsg (Request config) =
-    let
-        (ExpectJson decoder) =
-            config.expect
-    in
-    Http.request
-        { method = config.method
-        , headers = config.headers
-        , url = config.url
-        , body = config.body
-        , expect =
-            Http.expectStringResponse toMsg (interpretResponse decoder)
-        , timeout = config.timeout
-        , tracker = Nothing
-        }
-
-
-toTask : Request a -> Task Error a
-toTask (Request config) =
-    let
-        (ExpectJson decoder) =
-            config.expect
-    in
-    Http.task
-        { method = config.method
-        , headers = config.headers
-        , url = config.url
-        , body = config.body
-        , resolver = Http.stringResolver (interpretResponse decoder)
-        , timeout = config.timeout
-        }
-
-
-interpretResponse : Decode.Decoder a -> Http.Response String -> Result Error a
-interpretResponse decoder response =
-    when response is
-        Http.BadUrl_ url ->
-            Err (BadUrl url)
-
-        Http.Timeout_ ->
-            Err Timeout
-
-        Http.NetworkError_ ->
-            Err NetworkError
-
-        Http.BadStatus_ { metadata, body } ->
-            Err
-                (BadStatus
-                    { url = metadata.url
-                    , status = { code = metadata.statusCode, message = metadata.statusText }
-                    , headers = metadata.headers
-                    , body = body
-                    }
-                )
-
-        Http.GoodStatus_ { metadata, body } ->
-            when Decode.decodeString decoder body is
-                Ok value ->
-                    Ok value
-
-                Err decodeError ->
-                    Err
-                        (BadPayload
-                            { message = Decode.errorToString decodeError
-                            , response =
-                                { url = metadata.url
-                                , status = { code = metadata.statusCode, message = metadata.statusText }
-                                , headers = metadata.headers
-                                , body = body
-                                }
-                            }
-                        )
-"""
-
-
-{-| elm-explorations/markdown is a kernel package. For application ports we emit
-a pure-Gren stub that renders the raw markdown string as text so apps compile.
-Runtime HTML rendering of markdown is out of scope for the port pipeline.
--}
-markdownSource : String
-markdownSource =
-    """
-module ElmToGren.Compat.Markdown exposing (toHtml, toHtmlWith, defaultOptions, Options)
-
-import Array exposing (Array)
-import Html exposing (Attribute, Html)
-import Maybe exposing (Maybe(..))
-
-
-type alias Options =
-    { githubFlavored : Maybe { tables : Bool, breaks : Bool }
-    , defaultHighlighting : Maybe String
-    , sanitize : Bool
-    , smartypants : Bool
-    }
-
-
-defaultOptions : Options
-defaultOptions =
-    { githubFlavored = Just { tables = False, breaks = False }
-    , defaultHighlighting = Nothing
-    , sanitize = True
-    , smartypants = False
-    }
-
-
-toHtml : Array (Attribute msg) -> String -> Html msg
-toHtml attributes markdown =
-    toHtmlWith defaultOptions attributes markdown
-
-
-toHtmlWith : Options -> Array (Attribute msg) -> String -> Html msg
-toHtmlWith _ attributes markdown =
-    Html.div attributes [ Html.text markdown ]
-"""
-
-
-arraySource : String
-arraySource =
-    """
-module ElmToGren.Compat.Array exposing (empty, initialize, fromList, toList, toIndexedList, append, get, set)
-
-import Array exposing (Array)
-
-
-empty : Array a
-empty =
-    []
-
-
-{-| Elm `Array.get` returns Nothing for ANY out-of-range index. Gren's
-`Array.get` counts negative indices from the end; guard them out.
--}
-get : Int -> Array a -> Maybe a
-get index values =
-    if index < 0 then
-        Nothing
-
-    else
-        Array.get index values
-
-
-{-| Elm `Array.set` leaves the array unaltered for ANY out-of-range index.
-Gren's `Array.set` counts negative indices from the end; guard them out.
--}
-set : Int -> a -> Array a -> Array a
-set index value values =
-    if index < 0 then
-        values
-
-    else
-        Array.set index value values
-
-
-{-| Elm `Array.append a b == a ++ b`. Gren's `Array.append` flips its arguments
-to be pipe-friendly (`append a b == b ++ a`), so restore Elm order with `++`.
--}
-append : Array a -> Array a -> Array a
-append lhs rhs =
-    lhs ++ rhs
-
-
-{-| Elm `Array.initialize` returns an empty array for count <= 0. Gren's
-`Array.initialize` throws a RangeError for negative counts; guard them out.
--}
-initialize : Int -> (Int -> a) -> Array a
-initialize count make =
-    if count <= 0 then
-        []
-
-    else
-        Array.initialize count 0 make
-
-
-fromList : Array a -> Array a
-fromList values =
-    values
-
-
-toList : Array a -> Array a
-toList values =
-    values
-
-
-toIndexedList : Array a -> Array { first : Int, second : a }
-toIndexedList values =
-    Array.indexedMap (\\index value -> { first = index, second = value }) values
-"""
-
-
-basicsSource : String
-basicsSource =
-    """
-module ElmToGren.Compat.Basics exposing (always, toPolar, fromPolar)
-
-import Math
-
-
-always : a -> b -> a
-always value _ =
-    value
-
-
-toPolar : { first : Float, second : Float } -> { first : Float, second : Float }
-toPolar point =
-    { first = Math.sqrt (point.first * point.first + point.second * point.second)
-    , second = Math.atan2 point.second point.first
-    }
-
-
-fromPolar : { first : Float, second : Float } -> { first : Float, second : Float }
-fromPolar polar =
-    { first = polar.first * Math.cos polar.second
-    , second = polar.first * Math.sin polar.second
-    }
-"""
-
-
-{-| Gren Char has no case conversion. Route through String.toLower/toUpper
-(kernel Unicode casing). Locale variants match non-locale: Gren has no locale API.
--}
-charSource : String
-charSource =
-    """
-module ElmToGren.Compat.Char exposing (toLower, toUpper, toLocaleLower, toLocaleUpper)
-
-import Maybe exposing (Maybe(..))
-import String
-
-
-toLower : Char -> Char
-toLower char =
-    when String.popFirst (String.toLower (String.fromChar char)) is
-        Just { first } ->
-            first
-
-        Nothing ->
-            char
-
-
-toUpper : Char -> Char
-toUpper char =
-    when String.popFirst (String.toUpper (String.fromChar char)) is
-        Just { first } ->
-            first
-
-        Nothing ->
-            char
-
-
-toLocaleLower : Char -> Char
-toLocaleLower char =
-    toLower char
-
-
-toLocaleUpper : Char -> Char
-toLocaleUpper char =
-    toUpper char
-"""
-
-
-listSource : String
-listSource =
-    """
-module ElmToGren.Compat.List exposing (sum, product, map4, map5, tail, partition, unzip, append)
-
-import Array exposing (Array)
-import Maybe exposing (Maybe(..))
-
-
-sum : Array number -> number
-sum values =
-    Array.foldl (+) 0 values
-
-
-{-| Elm `List.append a b == a ++ b`. Gren maps List onto Array, whose `append`
-flips its arguments to be pipe-friendly, so restore Elm order with `++`.
--}
-append : Array a -> Array a -> Array a
-append lhs rhs =
-    lhs ++ rhs
-
-
-product : Array number -> number
-product values =
-    Array.foldl (*) 1 values
-
-
-map4 : (a -> b -> c -> d -> value) -> Array a -> Array b -> Array c -> Array d -> Array value
-map4 fn arrs bs cs ds =
-    Array.map2 (\\partial d -> partial d) (Array.map3 fn arrs bs cs) ds
-
-
-map5 : (a -> b -> c -> d -> e -> value) -> Array a -> Array b -> Array c -> Array d -> Array e -> Array value
-map5 fn arrs bs cs ds es =
-    Array.map2 (\\partial e -> partial e) (map4 fn arrs bs cs ds) es
-
-
-tail : Array a -> Maybe (Array a)
-tail values =
-    when Array.popFirst values is
-        Just { rest } ->
-            Just rest
-
-        Nothing ->
-            Nothing
-
-
-partition : (a -> Bool) -> Array a -> { first : Array a, second : Array a }
-partition predicate values =
-    let
-        parts =
-            Array.partition predicate values
-    in
-    { first = parts.trues, second = parts.falses }
-
-
-unzip : Array { first : a, second : b } -> { first : Array a, second : Array b }
-unzip pairs =
-    Array.foldr
-        (\\pair result ->
-            { first = Array.pushFirst pair.first result.first
-            , second = Array.pushFirst pair.second result.second
-            }
-        )
-        { first = [], second = [] }
-        pairs
-"""
-
-
-tupleSource : String
-tupleSource =
-    """
-module ElmToGren.Compat.Tuple exposing (pair, first, second, mapFirst, mapSecond, mapBoth)
-
-
-pair : a -> b -> { first : a, second : b }
-pair firstValue secondValue =
-    { first = firstValue, second = secondValue }
-
-
-first : { pair | first : a } -> a
-first value =
-    value.first
-
-
-second : { pair | second : b } -> b
-second value =
-    value.second
-
-
-mapFirst : (a -> x) -> { first : a, second : b } -> { first : x, second : b }
-mapFirst fn value =
-    { first = fn value.first, second = value.second }
-
-
-mapSecond : (b -> y) -> { first : a, second : b } -> { first : a, second : y }
-mapSecond fn value =
-    { first = value.first, second = fn value.second }
-
-
-mapBoth : (a -> x) -> (b -> y) -> { first : a, second : b } -> { first : x, second : y }
-mapBoth fnFirst fnSecond value =
-    { first = fnFirst value.first, second = fnSecond value.second }
-"""
-
-
-stringSource : String
-stringSource =
-    """
-module ElmToGren.Compat.String exposing (concat, uncons, append)
-
-import Array exposing (Array)
-import Maybe exposing (Maybe(..))
-import String
-
-
-concat : Array String -> String
-concat strings =
-    String.join "" strings
-
-
-{-| Elm `String.append a b == a ++ b`. Gren's `String.append` flips its
-arguments to be pipe-friendly, so restore Elm order with `++`.
--}
-append : String -> String -> String
-append lhs rhs =
-    lhs ++ rhs
-
-
-uncons : String -> Maybe { first : Char, second : String }
-uncons string =
-    when String.popFirst string is
-        Just { first, rest } ->
-            Just { first = first, second = rest }
-
-        Nothing ->
-            Nothing
-"""
-
-
-dictSource : String
-dictSource =
-    """
-module ElmToGren.Compat.Dict exposing (toList, fromList, partition)
-
-import Array exposing (Array)
-import Dict exposing (Dict)
-
-
-toList : Dict k v -> Array { first : k, second : v }
-toList dictionary =
-    Dict.foldr
-        (\\key value pairs -> Array.pushFirst { first = key, second = value } pairs)
-        []
-        dictionary
-
-
-fromList : Array { first : comparable, second : v } -> Dict comparable v
-fromList pairs =
-    Array.foldl (\\pair dictionary -> Dict.set pair.first pair.second dictionary) Dict.empty pairs
-
-
-partition : (comparable -> v -> Bool) -> Dict comparable v -> { first : Dict comparable v, second : Dict comparable v }
-partition predicate dictionary =
-    let
-        parts =
-            Dict.partition predicate dictionary
-    in
-    { first = parts.trues, second = parts.falses }
-"""
-
-
-{-| Elm elm-explorations/test had Expect.true and Expect.false predicates.
-gren-lang/test 5.0.0 dropped them in favor of explicit assertions.
-This adapter restores the surface.
--}
-expectSource : String
-expectSource =
-    """
-module ElmToGren.Compat.Expect exposing (true, false)
-
-import Expect
-
-
-true : String -> Bool -> Expect.Expectation
-true message condition =
-    if condition then
-        Expect.pass
-
-    else
-        Expect.fail message
-
-
-false : String -> Bool -> Expect.Expectation
-false message condition =
-    if condition then
-        Expect.fail message
-
-    else
-        Expect.pass
-"""
-
-
-setSource : String
-setSource =
-    """
-module ElmToGren.Compat.Set exposing (partition)
-
-import Set exposing (Set)
-
-
-partition : (comparable -> Bool) -> Set comparable -> { first : Set comparable, second : Set comparable }
-partition predicate values =
-    let
-        parts =
-            Set.partition predicate values
-    in
-    { first = parts.trues, second = parts.falses }
-"""
-
-
-maybeSource : String
-maybeSource =
-    """
-module ElmToGren.Compat.Maybe exposing (map4, map5)
-
-import Maybe exposing (Maybe)
-
-
-map4 : (a -> b -> c -> d -> value) -> Maybe a -> Maybe b -> Maybe c -> Maybe d -> Maybe value
-map4 fn ma mb mc md =
-    Maybe.andMap md (Maybe.map3 fn ma mb mc)
-
-
-map5 : (a -> b -> c -> d -> e -> value) -> Maybe a -> Maybe b -> Maybe c -> Maybe d -> Maybe e -> Maybe value
-map5 fn ma mb mc md me =
-    Maybe.andMap me (map4 fn ma mb mc md)
-"""
-
-
-resultSource : String
-resultSource =
-    """
-module ElmToGren.Compat.Result exposing (map4, map5)
-
-import Result exposing (Result)
-
-
-map4 : (a -> b -> c -> d -> value) -> Result error a -> Result error b -> Result error c -> Result error d -> Result error value
-map4 fn ra rb rc rd =
-    Result.andMap rd (Result.map3 fn ra rb rc)
-
-
-map5 : (a -> b -> c -> d -> e -> value) -> Result error a -> Result error b -> Result error c -> Result error d -> Result error e -> Result error value
-map5 fn ra rb rc rd re =
-    Result.andMap re (map4 fn ra rb rc rd)
-"""
-
-
-taskSource : String
-taskSource =
-    """
-module ElmToGren.Compat.Task exposing (map4, map5)
-
-import Task exposing (Task)
-
-
-map4 : (a -> b -> c -> d -> value) -> Task error a -> Task error b -> Task error c -> Task error d -> Task error value
-map4 fn ta tb tc td =
-    Task.andMap td (Task.map3 fn ta tb tc)
-
-
-map5 : (a -> b -> c -> d -> e -> value) -> Task error a -> Task error b -> Task error c -> Task error d -> Task error e -> Task error value
-map5 fn ta tb tc td te =
-    Task.andMap te (map4 fn ta tb tc td)
-"""
-
-
-randomSource : String
-randomSource =
-    """
-module ElmToGren.Compat.Random exposing (step, weighted, map4, map5)
-
-import Array exposing (Array)
-import Random exposing (Generator, Seed)
-
-
-step : Generator a -> Seed -> { first : a, second : Seed }
-step generator seed =
-    let
-        result =
-            Random.step generator seed
-    in
-    { first = result.value, second = result.seed }
-
-
-weighted : { first : Float, second : a } -> Array { first : Float, second : a } -> Generator a
-weighted first rest =
-    Random.weighted
-        { weight = first.first, value = first.second }
-        (Array.map (\\item -> { weight = item.first, value = item.second }) rest)
-
-
-map4 : (a -> b -> c -> d -> value) -> Generator a -> Generator b -> Generator c -> Generator d -> Generator value
-map4 fn ga gb gc gd =
-    Random.andMap gd (Random.map3 fn ga gb gc)
-
-
-map5 : (a -> b -> c -> d -> e -> value) -> Generator a -> Generator b -> Generator c -> Generator d -> Generator e -> Generator value
-map5 fn ga gb gc gd ge =
-    Random.andMap ge (map4 fn ga gb gc gd)
-"""
-
-
-jsonDecodeSource : String
-jsonDecodeSource =
-    """
-module ElmToGren.Compat.Json.Decode exposing (keyValuePairs)
-
-import Array exposing (Array)
-import Json.Decode exposing (Decoder)
-import Json.Decode as Decode
-
-
-keyValuePairs : Decoder a -> Decoder (Array { first : String, second : a })
-keyValuePairs decoder =
-    Decode.map
-        (Array.map (\\pair -> { first = pair.key, second = pair.value }))
-        (Decode.keyValuePairs decoder)
-"""
-
-
-jsonEncodeSource : String
-jsonEncodeSource =
-    """
-module ElmToGren.Compat.Json.Encode exposing (object)
-
-import Array exposing (Array)
-import Json.Encode exposing (Value)
-import Json.Encode as Encode
-
-
-object : Array { first : String, second : Value } -> Value
-object pairs =
-    Encode.object (Array.map (\\pair -> { key = pair.first, value = pair.second }) pairs)
-"""
+            VirtualDomKeyedSource.source

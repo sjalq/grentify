@@ -163,6 +163,152 @@ by being written through this law; nothing edits the ledger by hand.
 
 ## 6. Known defects register (2026-07-17 audit; independently verified)
 
+Throughput and accounting (2026-07-25 external review; all four reproduced):
+
+- **D50 every invocation ran the tool TWICE, concurrently** (FIXED 2026-07-25):
+  `gren make` emits a trailing `this.Gren.Main.init({})`, so the bundle starts
+  the program on `require`. `bin/elm-to-gren.cjs` then called
+  `.Gren.Main.init()` again — a second full instance of the pipeline, racing
+  the first over the same output dir, ported cache, extract cache and
+  review-app cache. Present since the first commit; every harness spawns the
+  CLI through `bin/`, so EVERY canary, gate, suite and the entire M5 walk ran
+  doubled. Proof: `node -e 'require("./dist/elm-to-gren.js")'` prints one line,
+  `node bin/elm-to-gren.cjs --version` printed two. Fix: require the bundle,
+  never re-init.
+  MEASURED: warm `add elm-community/list-extra` 74s wall / 76s user -> 32s
+  wall / 20s user. Tier 0 267 checks; canary 14/14 (34.0s at -j4).
+  CONSEQUENCES TO RE-READ: this is a second racer inside every single-worker
+  run, so it fed the entire contention family — D13 suite flake, D30/D32
+  review-app compile races, D31 orphaned lock, D34 clone races, D43 output
+  publish race (its own note: "found by canary + doubled hub seeds"). Those
+  fixes are all still correct for real parallelism; the pressure that forced
+  them was self-inflicted. The walker's own comment — "-j beyond ~4 only
+  deepens the queue until per-package budgets starve (23/32 bogus timeouts at
+  -j9)" — is this defect: -j4 was really 8 processes, -j9 was 18. Re-measure
+  the concurrency ceiling and re-drain the 237 timeout/scale packages before
+  treating any of them as terminal.
+- **D51 our own refusals were filed as upstream breakage** (FIXED in the
+  walker 2026-07-25): `ARCHIVE_INVALID` (symlink in archive, 43),
+  `SOURCE_INVALID`/`SOURCE_MANIFEST_MISMATCH` (identity check, 16) and the
+  shasum `PROCESS_FAILED` tail (8) matched the same EXEMPT pattern as genuine
+  404s and became terminal `broken-upstream:unfetchable` — 67 packages that no
+  drain would ever look at again. §1 admits no tool-policy exemption, so they
+  are working failures with their own reasons (`tool-archive-refused`,
+  `tool-identity-mismatch`). The 176 real 404s keep the exemption.
+  Same defect on the `add` side: publication was validated by compiling the
+  CONSUMER'S WHOLE APPLICATION, so an unrelated pre-existing error in the
+  user's own sources rolled the install back. Reproduced end to end. Fixed:
+  the vendored package is verified as a package (fatal — it is ours), the
+  consumer compile is attempted and its module-level errors are reported, not
+  fatal (`Verify.Package.verifyConsumer`); manifest-level errors and any error
+  inside `.elm-to-gren/packages` stay fatal.
+- **D52 walk evidence was the blind tail** (FIXED 2026-07-25): the walker
+  banked `text.split("\n").slice(-4)`, and the last thing printed on most
+  failures is download chatter, so 284 of the queue's failures carry no error
+  at all. Diagnosing any of them means re-running the package solo — the
+  single largest tax on iteration rate in the whole loop. Fixed:
+  `test/ecosystem/lib/failure-signature.cjs` extracts the error-bearing slice
+  (compile-errors JSON summarized, else error banners, else refusal codes) and
+  derives a normalized root-cause `signature`; records now carry both.
+  `npm run ecosystem:clusters` groups the queue by signature instead of by
+  compiler-message bucket. First run over the existing log already separates
+  real classes from noise: OUTPUT_FAILED "generated module path escapes its
+  package" (5) and "generated module Main does not match its path" (5) are
+  ours and small; `shasum exited with code N` (11) is ours; the 40 symlink
+  refusals are one policy decision.
+- **D56 the ported-cache hub bank has been stranded since 2026-07-24 14:59**
+  (DIAGNOSED + instrumented 2026-07-25; re-bank partly done): the cache key is
+  a digest over tool version + **every** `mappings/*.json` + platform +
+  namespacing, so one edited mapping byte strands the entire bank. Editing
+  `mappings/builtin.json` (mtime 07-24 14:59, i.e. AFTER the walk banked its
+  hubs on 07-23 21:56) orphaned all 257 walk-generation entries, including
+  elm-review, elm-css, elm-syntax and elm-ui. Nothing reports this: a stranded
+  bank is indistinguishable from a cold one, except every hub dependent now
+  re-ports the whole hub and blows its budget.
+  MEASURED on `NaunoKTM/elm-ui-mosaic`: 300s TIMEOUT (walk) -> 200s PASS
+  (after D50, hub cold) -> **16.4s PASS** (hub banked). Same package, same
+  tree. Three of 40 spot-checked packages that banked at 16-32s hit the 300s
+  ceiling purely from this.
+  New instrument: `npm run ecosystem:cache-health` — replicates
+  `PortedCache.canonicalInput` exactly, lists LIVE vs STRANDED generations,
+  and exits 1 when a hub family exists only under a stranded digest.
+  RE-BANK: elm-ui, elm-css and elm-syntax are live again. elm-review is NOT —
+  see below.
+  DESIGN ISSUE for the humans: mappings are hashed wholesale, so any mapping
+  edit invalidates every entry including packages that use none of the changed
+  rows. Hashing only the mapping rows a package actually resolves would make
+  the bank survive ordinary mapping work. Until then, treat every mappings
+  edit as a full cache flush and re-bank the four hubs deliberately.
+- **D57 a port's CORRECTNESS depends on the warmth of a DIFFERENT cache**
+  (ROOT-CAUSED + PROVEN 2026-07-25; the refactor is exonerated):
+  `jfmengels/elm-review-debug@1.0.8` failed after 396s with repeated TYPE
+  MISMATCH in `Review.ModuleNameLookupTable.Compute` — "The 1st argument to
+  `Node` is not what I expect", the exact D45/D45b signature — while D48's
+  landed receipt has it porting EXIT=0.
+
+  MECHANISM. The two caches are keyed on disjoint ingredients and drift
+  independently:
+
+      ported cache   tool version + ALL mappings/*.json + platform + namespacing
+      extract cache  review config + elm-review CLI version + source files
+
+  A dependency served from the PORTED cache never re-extracts, so its
+  ctorArities/soleCtors are recovered from the EXTRACT cache
+  (`cachedDepExports`). That lookup ends in
+  `Task.onError (\_ -> Task.succeed Pipeline.emptyDepMaps)`. On a miss the
+  dependent is transformed as if the dependency declared no constructors —
+  silently. elm-syntax hit the ported cache while its extraction existed only
+  under a previous extract digest, so elm-review compiled with no knowledge of
+  `Node`'s arity and its partial applications were never recordified.
+
+  PROOF (A/B, same tree, same binary, one variable):
+
+      elm-syntax extraction absent under live digest -> elm-review-debug FAIL 396s
+      port stil4m/elm-syntax as ROOT (roots are never ported-cached, so it
+        re-extracts and banks under the live digest; PASS in 50s)
+      elm-syntax extraction present  under live digest -> elm-review-debug PASS 290s
+
+  D45's own note called this "soft-degrade to empty". It is not a degrade: for
+  any dependent that needs those arities, empty is WRONG. The one mercy is
+  that wrong arities produce type errors, so it fails gren-verify rather than
+  shipping bad code — it inflates the failure count instead of faking passes.
+  An unknown slice of the 601 queue, especially the 67 hub-family packages,
+  may be this defect and not a transform bug at all.
+
+  FIX SHAPE: make the ported-cache entry self-sufficient — store the package's
+  `ctorArities`/`soleCtors` in the entry beside `src/` and `manifest.json`, so
+  a ported hit always carries its own exports and never reaches into a
+  differently-keyed cache. Until then, never soft-degrade in silence: a cached
+  dep that yields empty exports while declaring constructors is an error, not
+  a shrug.
+  STATE NOW: all four hubs banked under the live digest
+  (`npm run ecosystem:cache-health` exits 0), so the next drain starts warm.
+- **D54 extraction stdout ceiling too low** (FIXED 2026-07-25): the resolved
+  AST arrives on a pipe with `maximumOutputBytes = 64MB`;
+  `Chadtech/elm-vector` (generated Vector1..VectorN modules) blew it and died
+  with `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`, banked as an uninformative
+  `exit-1`. Raised to 256MB. Proper fix: have the extractor write the extract
+  to a file rather than a pipe — no ceiling, no 256MB string in memory per
+  concurrent worker. Found by the D52 signatures on their first run.
+- **D55 tier 1 is unrunnable from a fresh clone** (harness FIXED 2026-07-25):
+  `review/tests/extractor-fixtures.mjs` hardcoded
+  `node_modules/.bin/elm-review`, but `elm-review` is not in package.json's
+  devDependencies at all (only in package-lock), so `npm run test:rule` /
+  `test:rule:fast` — both inside the tier-1 gate — die with a bare
+  `null !== 0`. Harness now resolves the way `Orchestrator.binary` does:
+  local install first, PATH otherwise.
+  STILL OPEN, a decision for the humans: because the TOOL resolves the same
+  way, which elm-review runs every port depends on whether node_modules
+  happens to exist (local 2.13.5 vs global 2.13.4). That is the same class as
+  D26 (2.13.5's optimizer corrupts compiled JS) and D36 (cache segment named
+  after the binary's own version). Pin the dependency and the resolution, or
+  the review-app cache and the D26 workaround are both environment-dependent.
+- **D53 volume threshold drift** (FIXED 2026-07-25): `volume.cjs` tightened
+  totalBytes 400KB -> 250KB; `volume.test.cjs` and README still asserted
+  400KB, so `npm run test:ledger` was RED at HEAD and nothing noticed —
+  test:ledger is in neither tier 0 nor tier 1. Test and README aligned to the
+  implementation; confirm 250KB was the intended value.
+
 Silent wrong output (compiles green, behaves wrong):
 
 - **D1 hex literals**: `src/Ast/Print.gren` printed `PatHex`/`ExprHex` as
@@ -1063,24 +1209,47 @@ DONE = M5.G and M6.G pass on the same clean commit.
 
 ---
 
-## M5 CLOSED — UNIVERSE WALK COMPLETE (2026-07-24 05:50 SAST)
+## M5 WALK DRAINED — MILESTONE REOPENED (2026-07-24 walk; accounting corrected 2026-07-25)
 
-Fable validation stamp. Every one of the 2,055 registry coordinates
-(full elm-package.org snapshot) carries a final verdict under
-latest-verdict-wins accounting; ground truth is the append-only
-test/ecosystem/walk-log.jsonl (+ gz rotations).
+The walk itself stands: every one of the 2,055 registry coordinates carries a
+verdict under latest-verdict-wins accounting, ground truth is the append-only
+test/ecosystem/walk-log.jsonl (+ gz rotations), and the D41-D49 campaign moved
+the real rate from ~65%. What does not stand is the closure.
 
-    PASS                       1,220
-    EXEMPT (structural)          301   kernel / effect / glsl /
-                                       broken-upstream
-    EXEMPT:scale (2x timeout)    138
-    REAL FAILURES                396
-       type-mismatch 82 | exit-1 62 | naming 59 | gren-verify 41
-       dep-cascade 31 | unfinished 18 | timeout(1x) 99
-       arity 2 | shadowing 2
+**M5 is NOT closed.** M5.G requires "every snapshot package terminal, zero
+STALE, zero working failures", and W7.1, W7.2 and W5.7 are all still unchecked.
+Closing it also required two accounting moves this plan forbids (protocol
+rule 8):
 
-    Pass rate over non-exempt candidates: 1,220 / 1,616 = 75.5%
-    (sample-walk baseline before the D41-D49 campaign: ~65%)
+1. `EXEMPT:scale (2x timeout)` is a **size-based exemption**, which §1 rules
+   out in as many words: "A package that fails only on time/memory budget is a
+   working failure, never terminal. There is no size-based exemption." The 138
+   go back in the queue. D50 (below) is the reason to expect most of them to
+   pass on re-drain: every one was measured against a doubled process.
+2. 67 of the 301 structural exemptions are OUR refusals (symlinked archives,
+   identity-check mismatches), not upstream breakage — D51. Also back in the
+   queue. The remaining 176 unfetchables ARE terminal: spot-checked against the
+   GitHub zipball URL `elm install` itself uses, the tags are gone.
+
+Corrected accounting (reproduce with `npm run ecosystem:clusters`):
+
+    PASS                        1,220
+    EXEMPT (kernel/glsl/gone)     234   terminal, evidence-backed
+    QUEUE                         601   396 real + 138 scale + 67 D51
+
+    Pass rate over non-exempt:  1,220 / 1,821 = 67.0%
+    (as previously stated:      1,220 / 1,616 = 75.5%)
+
+Nothing about the engineering changes. The number is the number the ledger can
+defend, and the ledger is the only reason any of these verdicts mean anything.
+
+**The ledger does not yet know about any of this.** §5 makes ledger.json the
+per-package state of record; it still holds 454 entries stamped 0d0ce41, so
+`ecosystem:status` — the tool M5.G proves itself with — cannot see the walk at
+all. Every walk record is also `dirty: true` across 8 commits, which the §5
+reconciliation law excludes from ledger ingestion by construction. Either the
+walk re-runs clean, or the law is amended deliberately and in writing. Renaming
+the problem is not one of the options.
 
 Final-leg methodology: consolidated drain (2026-07-23 23:30 cutover)
 re-ran 739 coordinates (88 never-walked + 402 prior failures + 249
@@ -1103,6 +1272,37 @@ evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-25 EXTERNAL REVIEW — D50/D51/D52/D53 found and fixed; M5 REOPENED.
+  **D50 is the headline: every invocation of the tool has been running the
+  whole pipeline twice, concurrently, since the first commit** (bundle
+  self-init + explicit `init()` in `bin/`). Measured on the same warm add:
+  74s wall / 76s user -> 32s wall / 20s user. Tier 0 267 checks green;
+  canary 14/14 at 34.0s -j4. Every throughput and timeout number in this
+  document predates the fix and is worth re-measuring, starting with the
+  walker's own "-j beyond ~4 starves budgets" ceiling. First re-drain
+  evidence: NaunoKTM/elm-ui-mosaic, a banked 300s TIMEOUT, now PASSES in
+  200s on the same cache.
+  Accounting corrected per §1 (no size-based exemption) and D51: the
+  defensible rate is 1,220/1,821 = 67.0%, queue 601. New instruments:
+  `npm run ecosystem:clusters` (root-cause signatures, not message
+  buckets) and `--log` on the walker (experiments never touch ground
+  truth). `npm run test:ledger` was RED at HEAD (D53) and is green again.
+  D54 (extraction stdout ceiling) and D55 (tier 1 unrunnable from a fresh
+  clone) also found and fixed; add-path law changed and both directions
+  proven by test/add (warn-and-keep over broken consumer sources,
+  roll-back on manifest-level failure).
+  MEASURED re-drain of 24 banked failures on the fixed binary (scratch log,
+  ground truth untouched): 2 PASS — both previously TIMEOUT
+  (NaunoKTM/elm-ui-mosaic 300s->200s, hmsk/elm-css-modern-normalize 286s) —
+  and 22 failures that now carry signatures instead of download chatter.
+  Those 22 resolve to 12 distinct root causes, two of them ours and cheap:
+  D54, and a LIVE instance of the collapse-script idempotency bug ledgered
+  as "harmless while nothing double-applies" (ENDLESS STRING @ dep,
+  jgrenat/regression-testing). It is not harmless.
+  NOT DONE, next by leverage: ingest the walk into ledger.json through the
+  §5 law (needs a clean-tree run), re-drain the 237 timeout/scale packages
+  on the fixed binary, re-measure the -j ceiling now that each worker is one
+  process instead of two, then cluster-drive the rest.
 - 2026-07-22 GATE v9 (commit 06d128a, post D35-D39): pure 201/202
   (elm-review at its real D24b site, EXEMPT), browser 251/252 (echarts =
   operator-torn cache, verified clean solo+suite-cache after re-purge).

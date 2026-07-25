@@ -1,0 +1,21 @@
+module Mapping.Adapter.Source.BytesEncode exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Bytes.Encode exposing (string, getStringWidth)
+
+import Bytes
+import Bytes.Encode exposing (Encoder)
+
+
+string : String -> Encoder
+string value =
+    Bytes.Encode.bytes (Bytes.fromString value)
+
+
+getStringWidth : String -> Int
+getStringWidth value =
+    Bytes.length (Bytes.fromString value)
+"""
+

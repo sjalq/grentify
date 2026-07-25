@@ -1,0 +1,46 @@
+module Mapping.Adapter.Source.HtmlEvents exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Html.Events exposing (preventDefaultOn, stopPropagationOn, custom)
+
+import Html exposing (Attribute)
+import Html.Events
+import Json.Decode as Decode
+
+
+preventDefaultOn : String -> Decode.Decoder { first : msg, second : Bool } -> Attribute msg
+preventDefaultOn event decoder =
+    Html.Events.preventDefaultOn event
+        (Decode.map
+            (\\pair ->
+                { message = pair.first
+                , preventDefault = pair.second
+                }
+            )
+            decoder
+        )
+
+
+stopPropagationOn : String -> Decode.Decoder { first : msg, second : Bool } -> Attribute msg
+stopPropagationOn event decoder =
+    Html.Events.stopPropagationOn event
+        (Decode.map
+            (\\pair ->
+                { message = pair.first
+                , stopPropagation = pair.second
+                }
+            )
+            decoder
+        )
+
+
+custom :
+    String
+    -> Decode.Decoder { message : msg, stopPropagation : Bool, preventDefault : Bool }
+    -> Attribute msg
+custom event decoder =
+    Html.Events.custom event decoder
+"""
+

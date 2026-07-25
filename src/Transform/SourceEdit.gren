@@ -27,6 +27,7 @@ LF, CRLF, or bare CR; no position is allowed in the middle of CRLF.
 -}
 
 import Array exposing (Array)
+import Array.Builder as Builder
 import String
 
 
@@ -353,7 +354,7 @@ describeError sourceError =
 
 indexLines : String -> Array SourceLine
 indexLines source =
-    indexLineCharacters (String.toArray source) 0 0 []
+    indexLineCharacters (sourceCharacters source) 0 0 []
 
 
 indexLineCharacters : Array Char -> Int -> Int -> Array SourceLine -> Array SourceLine
@@ -613,7 +614,7 @@ applyResolved : String -> Array ResolvedSourceEdit -> String
 applyResolved source edits =
     let
         characters =
-            String.toArray source
+            sourceCharacters source
 
         assembled =
             Array.foldl
@@ -671,3 +672,12 @@ describePosition position =
 describeRange : SourceRange -> String
 describeRange range =
     describePosition range.start ++ "-" ++ describePosition range.end
+
+
+{-| `String.toArray` is O(n^2) in gren-lang/core 7.4.2 (`foldl Array.pushLast []`,
+and `pushLast` copies the whole array). Linear equivalent.
+-}
+sourceCharacters : String -> Array Char
+sourceCharacters source =
+    String.foldl Builder.pushLast (Builder.empty (String.count source)) source
+        |> Builder.toArray

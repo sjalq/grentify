@@ -36,6 +36,7 @@ htmlAttributesRegistry : Registry
 htmlAttributesRegistry =
     { packageOrder = []
     , packages = Dict.empty
+    , versionedPackages = []
     , modules =
         Dict.singleton "Html.Attributes"
             { source = "Html.Attributes"

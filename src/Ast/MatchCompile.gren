@@ -5,11 +5,11 @@ module Ast.MatchCompile exposing
     , unportedListSummary
     )
 
-{-| Binder-preserving list/cons match compiler.
+{-| Binder-preserving pattern-matrix compiler for Elm list semantics.
 
-List patterns lower to nested `Array.popFirst` matches where **user binders
-live in Gren patterns** (`Just { first = x, rest = xs }`), not reconstructed
-lets. Synthetic names are only for intermediate list temps.
+List columns lower to shared `Array.popFirst` decision nodes. Tuple columns are
+decomposed into record fields, exposing nested list columns to the same matrix.
+Synthetic names are used only for intermediate subjects and continuations.
 
 Law: free variables of each arm body stay bound by the compiled pattern tree.
 
@@ -502,6 +502,24 @@ type alias SoleCtors =
     Dict String {}
 
 
+{-| A normalized pattern matrix.
+
+Every source `when` contributes one subject column and one row per arm. Nested
+tuple, constructor, record, and list patterns are decomposed recursively by
+`matchPattern`; they do not select separate top-level compilers.
+-}
+type alias PatternMatrix =
+    { columns : Array Expr
+    , rows : Array PatternRow
+    }
+
+
+type alias PatternRow =
+    { patterns : Array Pattern
+    , body : Expr
+    }
+
+
 compile : SoleCtors -> File -> File
 compile packageSole file =
     let
@@ -678,7 +696,7 @@ compileDeclaration sole seed declaration =
         DeclFunction fn ->
             let
                 body =
-                    compileExpr sole (seed + 1) fn.expression
+                    compileExpr sole (Just fn.name) (seed + 1) fn.expression
 
                 rewritten =
                     rewriteConsArgs sole (seed + 2) fn.arguments body
@@ -692,7 +710,7 @@ compileDeclaration sole seed declaration =
         DeclDestructure { pattern = pattern, expression = expression } ->
             let
                 body =
-                    compileExpr sole (seed + 1) expression
+                    compileExpr sole Nothing (seed + 1) expression
 
                 rewritten =
                     rewriteConsArgs sole (seed + 2) [ pattern ] body
@@ -709,46 +727,42 @@ compileDeclaration sole seed declaration =
             declaration
 
 
-compileExpr : SoleCtors -> Int -> Expr -> Expr
-compileExpr sole seed expr =
+compileExpr : SoleCtors -> Maybe String -> Int -> Expr -> Expr
+compileExpr sole currentFunction seed expr =
     when expr is
         ExprCase { expression = scrutinee, cases = arms } ->
             let
                 compiledScrut =
-                    compileExpr sole (seed + 1) scrutinee
+                    compileExpr sole currentFunction (seed + 1) scrutinee
 
                 compiledArms =
                     Array.indexedMap
                         (\i arm ->
                             { pattern = arm.pattern
                             , body =
-                                compileExpr sole (seed + 10 + i * 97) arm.body
+                                compileExpr sole currentFunction
+                                    (seed + 10 + i * 97) arm.body
                             }) arms
 
-                caseBlock =
-                    { expression = compiledScrut, cases = compiledArms }
             in
-            when compileListishCase sole (seed + 3) caseBlock is
-                Just rewritten ->
-                    rewritten
-
-                Nothing ->
-                    if
-                        Array.any (\a -> patternHasUnportedList a.pattern)
+            if Array.any (\a -> patternHasUnportedList a.pattern) compiledArms then
+                compilePatternMatrix sole currentFunction (seed + 5)
+                    { columns = [ compiledScrut ]
+                    , rows =
+                        Array.map
+                            (\arm ->
+                                { patterns = [ arm.pattern ], body = arm.body }
+                            )
                             compiledArms
-                    then
-                        -- Nested lists under Just/tuples/ctors (e.g. Just (x, []))
-                        -- are not "listish cases" but still need peels.
-                        compileGeneralCase sole (seed + 5) compiledScrut
-                            compiledArms
+                    }
 
-                    else
-                        ExprCase caseBlock
+            else
+                ExprCase { expression = compiledScrut, cases = compiledArms }
 
         ExprLambda { arguments = arguments, expression = body } ->
             let
                 compiledBody =
-                    compileExpr sole (seed + 1) body
+                    compileExpr sole currentFunction (seed + 1) body
 
                 rewritten =
                     rewriteConsArgs sole (seed + 2) arguments compiledBody
@@ -761,7 +775,7 @@ compileExpr sole seed expr =
         ExprLet { declarations = declarations, expression = body } ->
             let
                 compiledBody =
-                    compileExpr sole (seed + 1) body
+                    compileExpr sole currentFunction (seed + 1) body
 
                 -- Elm/Gren lets are mutually recursive in one block. Nesting
                 -- each decl as `let a = … in let b = …` breaks forward refs
@@ -774,7 +788,7 @@ compileExpr sole seed expr =
                 Array.indexedFoldr
                     (\i declaration currentBody ->
                         compileLetDeclInto sole (seed + 20 + i * 31) declaration
-                            currentBody) compiledBody declarations
+                            currentFunction currentBody) compiledBody declarations
 
             else
                 ExprLet
@@ -782,13 +796,15 @@ compileExpr sole seed expr =
                         Array.indexedMap
                             (\i declaration ->
                                 compileLetDeclKeep sole (seed + 20 + i * 31)
-                                    declaration) declarations
+                                    currentFunction declaration) declarations
                     , expression = compiledBody
                     }
 
         -- Seeded uniqueness only matters for case/lambda peels above.
         _ ->
-            Walk.mapExprChildren (compileExpr sole (seed + 1)) expr
+            Walk.mapExprChildren
+                (compileExpr sole currentFunction (seed + 1))
+                expr
 
 
 {-| True when a let bind must become a list/cons peel (cannot stay in one block).
@@ -805,13 +821,13 @@ letDeclNeedsListPeel declaration =
 
 {-| Compile one let declaration in place (same mutual block).
 -}
-compileLetDeclKeep : SoleCtors -> Int -> LetDecl -> LetDecl
-compileLetDeclKeep sole seed declaration =
+compileLetDeclKeep : SoleCtors -> Int -> Maybe String -> LetDecl -> LetDecl
+compileLetDeclKeep sole seed currentFunction declaration =
     when declaration is
         LetFunction fn ->
             let
                 fnBody =
-                    compileExpr sole (seed + 1) fn.expression
+                    compileExpr sole (Just fn.name) (seed + 1) fn.expression
 
                 rewritten =
                     rewriteConsArgs sole (seed + 2) fn.arguments fnBody
@@ -825,7 +841,8 @@ compileLetDeclKeep sole seed declaration =
         LetDestructure { pattern = pattern, expression = expression } ->
             LetDestructure
                 { pattern = pattern
-                , expression = compileExpr sole (seed + 1) expression
+                , expression =
+                    compileExpr sole currentFunction (seed + 1) expression
                 }
 
 
@@ -833,13 +850,13 @@ compileLetDeclKeep sole seed declaration =
 List patterns in the bind become peels (same law as case/lambda).
 Only used when the block needs list peels (see `letDeclNeedsListPeel`).
 -}
-compileLetDeclInto : SoleCtors -> Int -> LetDecl -> Expr -> Expr
-compileLetDeclInto sole seed declaration body =
+compileLetDeclInto : SoleCtors -> Int -> LetDecl -> Maybe String -> Expr -> Expr
+compileLetDeclInto sole seed declaration currentFunction body =
     when declaration is
         LetFunction fn ->
             let
                 fnBody =
-                    compileExpr sole (seed + 1) fn.expression
+                    compileExpr sole (Just fn.name) (seed + 1) fn.expression
 
                 rewritten =
                     rewriteConsArgs sole (seed + 2) fn.arguments fnBody
@@ -858,7 +875,7 @@ compileLetDeclInto sole seed declaration body =
         LetDestructure { pattern = pattern, expression = expression } ->
             let
                 value =
-                    compileExpr sole (seed + 1) expression
+                    compileExpr sole currentFunction (seed + 1) expression
             in
             if patternHasUnportedList pattern then
                 matchPattern sole (seed + 2) emptyScope pattern value body
@@ -874,55 +891,1081 @@ compileLetDeclInto sole seed declaration body =
                     }
 
 
-compileLetDecl : SoleCtors -> Int -> LetDecl -> LetDecl
-compileLetDecl sole seed declaration =
-    Walk.mapLetDecl (compileExpr sole (seed + 1)) (\p -> p) declaration
-
--- GENERAL PATTERN MATCH (nested lists anywhere) ------------------------------
+-- PATTERN MATRIX -------------------------------------------------------------
 
 
-{-| Sequential arm tries: first arm that matches wins; nested list peels included.
-Used when specialized listish case paths do not apply (e.g. `Just (x, [])`).
+{-| Compile a normalized pattern matrix. Rows retain source order, so the first
+matching row wins. List and tuple columns share decision nodes; remaining
+nested patterns use the same recursive matcher for wrappers, records, and
+custom constructors.
 -}
-compileGeneralCase : SoleCtors -> Int -> Expr -> Array CaseArm -> Expr
-compileGeneralCase sole seed scrutinee arms =
+compilePatternMatrix : SoleCtors -> Maybe String -> Int -> PatternMatrix -> Expr
+compilePatternMatrix sole currentFunction seed matrix =
     let
-        scrut =
-            "gs_" ++ String.fromInt seed
+        columnNames =
+            Array.indexedMap
+                (\index _ ->
+                    "pm_"
+                        ++ String.fromInt seed
+                        ++ "_"
+                        ++ String.fromInt index
+                )
+                matrix.columns
 
         failEnd =
             todo "elm-to-gren: non-exhaustive pattern match"
 
-        -- Bind each fallthrough as `fl_ = \_ -> next` and call `fl_ {}` from peels.
-        -- Inlining `nextFail` into every peel branch makes a DAG that *Print*
-        -- expands exponentially (hang on multi-arm fixed lists: color/md5/iso8601).
-        chain =
-            Array.indexedFoldr
-                (\i arm nextFail ->
-                    let
-                        failFn =
-                            "fl_" ++ String.fromInt (seed + 1 + i * 100003)
+        occupiedColumns =
+            occupyAll columnNames emptyScope
 
-                        nextFailCall =
-                            ExprApplication [ var failFn, ExprUnit ]
+        compiledRows =
+            compileMatrixDecision sole currentFunction (seed + 1)
+                occupiedColumns
+                columnNames matrix.rows failEnd
 
-                        armExpr =
-                            matchPattern sole (seed + 2 + i * 100003)
-                                (occupy scrut (occupy failFn emptyScope))
-                                arm.pattern (var scrut) arm.body nextFailCall
-                    in
-                    ExprLet
-                        { declarations =
-                            [ LetFunction
-                                { name = failFn
-                                , arguments = [ PatAll ]
-                                , expression = nextFail
-                                }
-                            ]
-                        , expression = armExpr
-                        }) failEnd arms
+        declarations =
+            Array.map2
+                (\name expression ->
+                    LetDestructure
+                        { pattern = PatVar name, expression = expression }
+                )
+                columnNames matrix.columns
     in
-    wrapLet scrut scrutinee chain
+    ExprLet { declarations = declarations, expression = compiledRows }
+
+
+type ListColumnPattern
+    = EmptyListColumn
+    | ConsListColumn { head : Pattern, tail : Pattern }
+    | DefaultListColumn Pattern
+
+
+type TupleColumnPattern
+    = TupleParts (Array Pattern)
+    | DefaultTupleColumn Pattern
+
+
+type LiteralColumnPattern
+    = LiteralValue { key : String, pattern : Pattern }
+    | DefaultLiteralColumn Pattern
+
+
+type NamedColumnPattern
+    = NamedConstructor
+        { key : String
+        , ref : NamedRef
+        , arguments : Array Pattern
+        }
+    | DefaultNamedColumn Pattern
+
+
+{-| Choose and split one list column before falling back to ordered row
+matching. A list is peeled once per decision node, and both branches receive
+specialized matrices. This shares prefixes across arms and keeps output linear
+for fixed-length and recursive list cases.
+-}
+compileMatrixDecision :
+    SoleCtors
+    -> Maybe String
+    -> Int
+    -> Scope
+    -> Array String
+    -> Array PatternRow
+    -> Expr
+    -> Expr
+compileMatrixDecision sole currentFunction seed scope columnNames rows terminalFail =
+    when firstListColumnInMatrix rows is
+        Nothing ->
+            when firstTupleColumnInMatrix rows is
+                Nothing ->
+                    when firstNamedColumnInMatrix sole rows is
+                        Nothing ->
+                            when firstLiteralColumnInMatrix rows is
+                                Nothing ->
+                                    compileMatrixRows sole currentFunction seed
+                                        scope columnNames rows terminalFail
+
+                                Just literalColumn ->
+                                    compileLiteralColumn sole currentFunction seed
+                                        scope columnNames rows terminalFail
+                                        literalColumn
+
+                        Just namedColumn ->
+                            compileNamedColumn sole currentFunction seed scope
+                                columnNames rows terminalFail namedColumn
+
+                Just tupleColumn ->
+                    compileTupleColumn sole currentFunction seed scope
+                        columnNames rows terminalFail tupleColumn
+
+        Just columnIndex ->
+            when Array.get columnIndex columnNames is
+                Nothing ->
+                    terminalFail
+
+                Just wholeName ->
+                    let
+                        headName =
+                            "pc_h_"
+                                ++ String.fromInt seed
+                                ++ "_"
+                                ++ String.fromInt columnIndex
+
+                        tailName =
+                            "pc_t_"
+                                ++ String.fromInt seed
+                                ++ "_"
+                                ++ String.fromInt columnIndex
+
+                        emptyRows =
+                            Array.mapAndKeepJust
+                                (specializeEmptyRow columnIndex wholeName)
+                                rows
+
+                        consRows =
+                            Array.mapAndKeepJust
+                                (specializeConsRow columnIndex wholeName)
+                                rows
+
+                        consColumns =
+                            replaceColumn columnIndex
+                                [ headName, tailName, wholeName ]
+                                columnNames
+
+                        consScope =
+                            occupy headName (occupy tailName scope)
+                    in
+                    ExprCase
+                        { expression = popFirst (var wholeName)
+                        , cases =
+                            [ { pattern = nothingPat
+                              , body =
+                                    compileMatrixDecision sole currentFunction
+                                        (seed + 1) scope columnNames emptyRows
+                                        terminalFail
+                              }
+                            , { pattern =
+                                    justRecord (PatVar headName)
+                                        (PatVar tailName)
+                              , body =
+                                    compileMatrixDecision sole currentFunction
+                                        (seed + 1009) consScope consColumns
+                                        consRows terminalFail
+                              }
+                            ]
+                        }
+
+
+compileTupleColumn :
+    SoleCtors
+    -> Maybe String
+    -> Int
+    -> Scope
+    -> Array String
+    -> Array PatternRow
+    -> Expr
+    -> { index : Int, arity : Int }
+    -> Expr
+compileTupleColumn sole currentFunction seed scope columnNames rows terminalFail tupleColumn =
+    when Array.get tupleColumn.index columnNames is
+        Nothing ->
+            terminalFail
+
+        Just wholeName ->
+            let
+                componentNames =
+                    Array.initialize tupleColumn.arity 0
+                        (\index ->
+                            "pc_c_"
+                                ++ String.fromInt seed
+                                ++ "_"
+                                ++ String.fromInt tupleColumn.index
+                                ++ "_"
+                                ++ String.fromInt index
+                        )
+
+                expandedColumns =
+                    replaceColumn tupleColumn.index
+                        (componentNames ++ [ wholeName ])
+                        columnNames
+
+                expandedRows =
+                    Array.mapAndKeepJust
+                        (specializeTupleRow tupleColumn.index wholeName
+                            tupleColumn.arity)
+                        rows
+
+                declarations =
+                    Array.indexedMap
+                        (\index componentName ->
+                            LetDestructure
+                                { pattern = PatVar componentName
+                                , expression =
+                                    ExprAccess
+                                        { record = var wholeName
+                                        , field = fieldBindLabel index
+                                        }
+                                }
+                        )
+                        componentNames
+            in
+            ExprLet
+                { declarations = declarations
+                , expression =
+                    compileMatrixDecision sole currentFunction (seed + 1009)
+                        (occupyAll componentNames scope) expandedColumns
+                        expandedRows terminalFail
+                }
+
+
+firstTupleColumnInMatrix :
+    Array PatternRow
+    -> Maybe { index : Int, arity : Int }
+firstTupleColumnInMatrix rows =
+    let
+        width =
+            when Array.first rows is
+                Just row ->
+                    Array.length row.patterns
+
+                Nothing ->
+                    0
+    in
+    Array.initialize width 0 identity
+        |> Array.mapAndKeepJust
+            (\columnIndex ->
+                let
+                    classified =
+                        Array.mapAndKeepJust
+                            (\row ->
+                                Array.get columnIndex row.patterns
+                                    |> Maybe.andThen tupleColumnPattern
+                            )
+                            rows
+
+                    arities =
+                        classified
+                            |> Array.mapAndKeepJust
+                                (\shape ->
+                                    when shape is
+                                        TupleParts items ->
+                                            Just (Array.length items)
+
+                                        DefaultTupleColumn _ ->
+                                            Nothing
+                                )
+                in
+                when Array.first arities is
+                    Nothing ->
+                        Nothing
+
+                    Just arity ->
+                        if
+                            Array.length classified == Array.length rows
+                                && Array.all (\found -> found == arity) arities
+                        then
+                            Just { index = columnIndex, arity = arity }
+
+                        else
+                            Nothing
+            )
+        |> Array.first
+
+
+tupleColumnPattern : Pattern -> Maybe TupleColumnPattern
+tupleColumnPattern pattern =
+    when pattern is
+        PatAs { pattern = inner } ->
+            tupleColumnPattern inner
+
+        PatTuple items ->
+            Just (TupleParts items)
+
+        PatVar _ ->
+            Just (DefaultTupleColumn pattern)
+
+        PatAll ->
+            Just (DefaultTupleColumn pattern)
+
+        _ ->
+            Nothing
+
+
+specializeTupleRow :
+    Int
+    -> String
+    -> Int
+    -> PatternRow
+    -> Maybe PatternRow
+specializeTupleRow columnIndex wholeName arity row =
+    when Array.get columnIndex row.patterns is
+        Nothing ->
+            Nothing
+
+        Just original ->
+            let
+                prepared =
+                    peelTopAs wholeName original row.body
+            in
+            when tupleColumnPattern prepared.pattern is
+                Just (TupleParts items) ->
+                    Just
+                        { patterns =
+                            replaceColumn columnIndex (items ++ [ PatAll ])
+                                row.patterns
+                        , body = prepared.body
+                        }
+
+                Just (DefaultTupleColumn defaultPattern) ->
+                    Just
+                        { patterns =
+                            replaceColumn columnIndex
+                                (Array.repeat arity PatAll
+                                    ++ [ defaultPattern ])
+                                row.patterns
+                        , body = prepared.body
+                        }
+
+                Nothing ->
+                    Nothing
+
+
+compileNamedColumn :
+    SoleCtors
+    -> Maybe String
+    -> Int
+    -> Scope
+    -> Array String
+    -> Array PatternRow
+    -> Expr
+    -> { index : Int, constructor : { key : String, ref : NamedRef, arity : Int } }
+    -> Expr
+compileNamedColumn sole currentFunction seed scope columnNames rows terminalFail namedColumn =
+    when Array.get namedColumn.index columnNames is
+        Nothing ->
+            terminalFail
+
+        Just wholeName ->
+            let
+                argumentNames =
+                    Array.initialize namedColumn.constructor.arity 0
+                        (\index ->
+                            "pc_a_"
+                                ++ String.fromInt seed
+                                ++ "_"
+                                ++ String.fromInt namedColumn.index
+                                ++ "_"
+                                ++ String.fromInt index
+                        )
+
+                branchColumns =
+                    replaceColumn namedColumn.index
+                        (argumentNames ++ [ wholeName ])
+                        columnNames
+
+                branchRows =
+                    specializeNamedRows namedColumn.index wholeName
+                        namedColumn.constructor.key
+                        namedColumn.constructor.arity True rows
+
+                remainingRows =
+                    specializeNamedRows namedColumn.index wholeName
+                        namedColumn.constructor.key
+                        namedColumn.constructor.arity False rows
+
+                branchPattern =
+                    PatNamed
+                        { ref = namedColumn.constructor.ref
+                        , arguments = Array.map PatVar argumentNames
+                        }
+            in
+            ExprCase
+                { expression = var wholeName
+                , cases =
+                    [ { pattern = branchPattern
+                      , body =
+                            compileMatrixDecision sole currentFunction
+                                (seed + 1009)
+                                (occupyAll argumentNames scope)
+                                branchColumns branchRows terminalFail
+                      }
+                    , { pattern = PatAll
+                      , body =
+                            compileMatrixDecision sole currentFunction
+                                (seed + 1) scope columnNames remainingRows
+                                terminalFail
+                      }
+                    ]
+                }
+
+
+firstNamedColumnInMatrix :
+    SoleCtors
+    -> Array PatternRow
+    -> Maybe
+        { index : Int
+        , constructor : { key : String, ref : NamedRef, arity : Int }
+        }
+firstNamedColumnInMatrix sole rows =
+    let
+        width =
+            when Array.first rows is
+                Just row ->
+                    Array.length row.patterns
+
+                Nothing ->
+                    0
+    in
+    Array.initialize width 0 identity
+        |> Array.mapAndKeepJust
+            (\columnIndex ->
+                let
+                    classified =
+                        Array.mapAndKeepJust
+                            (\row ->
+                                Array.get columnIndex row.patterns
+                                    |> Maybe.andThen namedColumnPattern
+                            )
+                            rows
+
+                    firstConstructor =
+                        Array.findFirst
+                            (\shape ->
+                                when shape is
+                                    NamedConstructor details ->
+                                        not (isSoleCtor sole details.ref)
+
+                                    DefaultNamedColumn _ ->
+                                        False
+                            )
+                            classified
+                in
+                if
+                    Array.length classified /= Array.length rows
+                        || Array.any
+                            (\shape ->
+                                when shape is
+                                    DefaultNamedColumn _ ->
+                                        True
+
+                                    NamedConstructor _ ->
+                                        False
+                            )
+                            classified
+                then
+                    Nothing
+
+                else
+                    when firstConstructor is
+                        Just found ->
+                            when found.value is
+                                NamedConstructor details ->
+                                    Just
+                                        { index = columnIndex
+                                        , constructor =
+                                            { key = details.key
+                                            , ref = details.ref
+                                            , arity =
+                                                Array.length details.arguments
+                                            }
+                                        }
+
+                                DefaultNamedColumn _ ->
+                                    Nothing
+
+                        Nothing ->
+                            Nothing
+            )
+        |> Array.first
+
+
+namedColumnPattern : Pattern -> Maybe NamedColumnPattern
+namedColumnPattern pattern =
+    when pattern is
+        PatAs { pattern = inner } ->
+            namedColumnPattern inner
+
+        PatNamed details ->
+            Just
+                (NamedConstructor
+                    { key = namedRefKey details.ref
+                    , ref = details.ref
+                    , arguments = details.arguments
+                    }
+                )
+
+        PatVar _ ->
+            Just (DefaultNamedColumn pattern)
+
+        PatAll ->
+            Just (DefaultNamedColumn pattern)
+
+        _ ->
+            Nothing
+
+
+namedRefKey : NamedRef -> String
+namedRefKey ref =
+    Maybe.withDefault "" ref.moduleName ++ "." ++ ref.name
+
+
+specializeNamedRows :
+    Int
+    -> String
+    -> String
+    -> Int
+    -> Bool
+    -> Array PatternRow
+    -> Array PatternRow
+specializeNamedRows columnIndex wholeName selectedKey arity matchingBranch rows =
+    Array.mapAndKeepJust
+        (\row ->
+            when Array.get columnIndex row.patterns is
+                Nothing ->
+                    Nothing
+
+                Just original ->
+                    let
+                        prepared =
+                            peelTopAs wholeName original row.body
+                    in
+                    when namedColumnPattern prepared.pattern is
+                        Just (NamedConstructor details) ->
+                            if matchingBranch && details.key == selectedKey then
+                                Just
+                                    { patterns =
+                                        replaceColumn columnIndex
+                                            (details.arguments ++ [ PatAll ])
+                                            row.patterns
+                                    , body = prepared.body
+                                    }
+
+                            else if
+                                not matchingBranch
+                                    && details.key
+                                    /= selectedKey
+                            then
+                                Just row
+
+                            else
+                                Nothing
+
+                        Just (DefaultNamedColumn defaultPattern) ->
+                            if matchingBranch then
+                                Just
+                                    { patterns =
+                                        replaceColumn columnIndex
+                                            (Array.repeat arity PatAll
+                                                ++ [ defaultPattern ])
+                                            row.patterns
+                                    , body = prepared.body
+                                    }
+
+                            else
+                                Just
+                                    { patterns =
+                                        replaceColumn columnIndex
+                                            [ defaultPattern ]
+                                            row.patterns
+                                    , body = prepared.body
+                                    }
+
+                        Nothing ->
+                            Nothing
+        )
+        rows
+
+
+compileLiteralColumn :
+    SoleCtors
+    -> Maybe String
+    -> Int
+    -> Scope
+    -> Array String
+    -> Array PatternRow
+    -> Expr
+    -> { index : Int, literals : Array { key : String, pattern : Pattern } }
+    -> Expr
+compileLiteralColumn sole currentFunction seed scope columnNames rows terminalFail literalColumn =
+    when Array.get literalColumn.index columnNames is
+        Nothing ->
+            terminalFail
+
+        Just wholeName ->
+            let
+                literalArms =
+                    Array.indexedMap
+                        (\branchIndex literal ->
+                            { pattern = literal.pattern
+                            , body =
+                                compileMatrixDecision sole currentFunction
+                                    (seed + 1 + branchIndex * 1009)
+                                    scope columnNames
+                                    (specializeLiteralRows literalColumn.index
+                                        wholeName (Just literal.key) rows)
+                                    terminalFail
+                            }
+                        )
+                        literalColumn.literals
+
+                defaultArm =
+                    { pattern = PatAll
+                    , body =
+                        compileMatrixDecision sole currentFunction
+                            (seed + 1 + Array.length literalArms * 1009)
+                            scope columnNames
+                            (specializeLiteralRows literalColumn.index wholeName
+                                Nothing rows)
+                            terminalFail
+                    }
+            in
+            ExprCase
+                { expression = var wholeName
+                , cases = Array.pushLast defaultArm literalArms
+                }
+
+
+firstLiteralColumnInMatrix :
+    Array PatternRow
+    -> Maybe
+        { index : Int
+        , literals : Array { key : String, pattern : Pattern }
+        }
+firstLiteralColumnInMatrix rows =
+    let
+        width =
+            when Array.first rows is
+                Just row ->
+                    Array.length row.patterns
+
+                Nothing ->
+                    0
+    in
+    Array.initialize width 0 identity
+        |> Array.mapAndKeepJust
+            (\columnIndex ->
+                let
+                    classified =
+                        Array.mapAndKeepJust
+                            (\row ->
+                                Array.get columnIndex row.patterns
+                                    |> Maybe.andThen literalColumnPattern
+                            )
+                            rows
+
+                    literals =
+                        Array.foldl
+                            (\shape found ->
+                                when shape is
+                                    LiteralValue literal ->
+                                        if
+                                            Array.any
+                                                (\existing ->
+                                                    existing.key == literal.key
+                                                )
+                                                found
+                                        then
+                                            found
+
+                                        else
+                                            Array.pushLast literal found
+
+                                    DefaultLiteralColumn _ ->
+                                        found
+                            )
+                            []
+                            classified
+                in
+                if
+                    Array.length classified == Array.length rows
+                        && Array.all
+                            (\shape ->
+                                when shape is
+                                    LiteralValue _ ->
+                                        True
+
+                                    DefaultLiteralColumn _ ->
+                                        False
+                            )
+                            classified
+                        && not (Array.isEmpty literals)
+                then
+                    Just { index = columnIndex, literals = literals }
+
+                else
+                    Nothing
+            )
+        |> Array.first
+
+
+literalColumnPattern : Pattern -> Maybe LiteralColumnPattern
+literalColumnPattern pattern =
+    when pattern is
+        PatAs { pattern = inner } ->
+            literalColumnPattern inner
+
+        PatChar value ->
+            Just
+                (LiteralValue
+                    { key = "char:" ++ value, pattern = pattern }
+                )
+
+        PatString value ->
+            Just
+                (LiteralValue
+                    { key = "string:" ++ value, pattern = pattern }
+                )
+
+        PatInt value ->
+            Just
+                (LiteralValue
+                    { key = "number:" ++ String.fromInt value
+                    , pattern = pattern
+                    }
+                )
+
+        PatHex value ->
+            Just
+                (LiteralValue
+                    { key = "number:" ++ String.fromInt value
+                    , pattern = pattern
+                    }
+                )
+
+        PatFloat value ->
+            Just
+                (LiteralValue
+                    { key = "float:" ++ String.fromFloat value
+                    , pattern = pattern
+                    }
+                )
+
+        PatVar _ ->
+            Just (DefaultLiteralColumn pattern)
+
+        PatAll ->
+            Just (DefaultLiteralColumn pattern)
+
+        _ ->
+            Nothing
+
+
+specializeLiteralRows :
+    Int
+    -> String
+    -> Maybe String
+    -> Array PatternRow
+    -> Array PatternRow
+specializeLiteralRows columnIndex wholeName selectedKey rows =
+    Array.mapAndKeepJust
+        (\row ->
+            when Array.get columnIndex row.patterns is
+                Nothing ->
+                    Nothing
+
+                Just original ->
+                    let
+                        prepared =
+                            peelTopAs wholeName original row.body
+                    in
+                    when literalColumnPattern prepared.pattern is
+                        Just (LiteralValue literal) ->
+                            if selectedKey == Just literal.key then
+                                Just
+                                    { patterns =
+                                        replaceColumn columnIndex [ PatAll ]
+                                            row.patterns
+                                    , body = prepared.body
+                                    }
+
+                            else
+                                Nothing
+
+                        Just (DefaultLiteralColumn defaultPattern) ->
+                            Just
+                                { patterns =
+                                    replaceColumn columnIndex [ defaultPattern ]
+                                        row.patterns
+                                , body = prepared.body
+                                }
+
+                        Nothing ->
+                            Nothing
+        )
+        rows
+
+
+firstListColumnInMatrix : Array PatternRow -> Maybe Int
+firstListColumnInMatrix rows =
+    let
+        width =
+            when Array.first rows is
+                Just row ->
+                    Array.length row.patterns
+
+                Nothing ->
+                    0
+    in
+    Array.initialize width 0 identity
+        |> Array.findFirst
+            (\columnIndex ->
+                let
+                    classified =
+                        Array.mapAndKeepJust
+                            (\row ->
+                                Array.get columnIndex row.patterns
+                                    |> Maybe.andThen listColumnPattern
+                            )
+                            rows
+                in
+                Array.length classified == Array.length rows
+                    && Array.any
+                        (\shape ->
+                            when shape is
+                                DefaultListColumn _ ->
+                                    False
+
+                                _ ->
+                                    True
+                        )
+                        classified
+            )
+        |> Maybe.map .value
+
+
+listColumnPattern : Pattern -> Maybe ListColumnPattern
+listColumnPattern pattern =
+    when pattern is
+        PatAs { pattern = inner } ->
+            listColumnPattern inner
+
+        PatList members ->
+            when Array.popFirst members is
+                Nothing ->
+                    Just EmptyListColumn
+
+                Just { first = head, rest = tail } ->
+                    Just
+                        (ConsListColumn
+                            { head = head, tail = PatList tail }
+                        )
+
+        PatCons { head = head, tail = tail } ->
+            Just (ConsListColumn { head = head, tail = tail })
+
+        PatVar _ ->
+            Just (DefaultListColumn pattern)
+
+        PatAll ->
+            Just (DefaultListColumn pattern)
+
+        _ ->
+            Nothing
+
+
+specializeEmptyRow : Int -> String -> PatternRow -> Maybe PatternRow
+specializeEmptyRow columnIndex wholeName row =
+    when Array.get columnIndex row.patterns is
+        Nothing ->
+            Nothing
+
+        Just original ->
+            let
+                prepared =
+                    peelTopAs wholeName original row.body
+            in
+            when listColumnPattern prepared.pattern is
+                Just EmptyListColumn ->
+                    Just
+                        { patterns =
+                            replaceColumn columnIndex [ PatAll ] row.patterns
+                        , body = prepared.body
+                        }
+
+                Just (DefaultListColumn defaultPattern) ->
+                    Just
+                        { patterns =
+                            replaceColumn columnIndex [ defaultPattern ]
+                                row.patterns
+                        , body = prepared.body
+                        }
+
+                _ ->
+                    Nothing
+
+
+specializeConsRow : Int -> String -> PatternRow -> Maybe PatternRow
+specializeConsRow columnIndex wholeName row =
+    when Array.get columnIndex row.patterns is
+        Nothing ->
+            Nothing
+
+        Just original ->
+            let
+                prepared =
+                    peelTopAs wholeName original row.body
+            in
+            when listColumnPattern prepared.pattern is
+                Just (ConsListColumn parts) ->
+                    Just
+                        { patterns =
+                            replaceColumn columnIndex
+                                [ parts.head, parts.tail, PatAll ]
+                                row.patterns
+                        , body = prepared.body
+                        }
+
+                Just (DefaultListColumn defaultPattern) ->
+                    Just
+                        { patterns =
+                            replaceColumn columnIndex
+                                [ PatAll, PatAll, defaultPattern ]
+                                row.patterns
+                        , body = prepared.body
+                        }
+
+                _ ->
+                    Nothing
+
+
+peelTopAs : String -> Pattern -> Expr -> { pattern : Pattern, body : Expr }
+peelTopAs wholeName pattern body =
+    when pattern is
+        PatAs { pattern = inner, name = name } ->
+            peelTopAs wholeName inner (wrapLet name (var wholeName) body)
+
+        _ ->
+            { pattern = pattern, body = body }
+
+
+replaceColumn : Int -> Array a -> Array a -> Array a
+replaceColumn columnIndex replacements values =
+    Array.slice 0 columnIndex values
+        ++ replacements
+        ++ Array.slice (columnIndex + 1) (Array.length values) values
+
+
+compileMatrixRows :
+    SoleCtors
+    -> Maybe String
+    -> Int
+    -> Scope
+    -> Array String
+    -> Array PatternRow
+    -> Expr
+    -> Expr
+compileMatrixRows sole currentFunction seed scope columnNames rows terminalFail =
+    when Array.popFirst rows is
+        Nothing ->
+            terminalFail
+
+        Just { first = row, rest = remainingRows } ->
+            let
+                nextRow =
+                    compileMatrixRows sole currentFunction (seed + 100003) scope
+                        columnNames remainingRows terminalFail
+
+                rowBinders =
+                    Array.foldl
+                        (\pattern found ->
+                            Array.append found (patternBinders pattern)
+                        )
+                        []
+                        row.patterns
+
+                mustInline =
+                    when currentFunction is
+                        Just functionName ->
+                            tailHasSelfCall functionName nextRow
+
+                        Nothing ->
+                            False
+            in
+            if mustInline then
+                compileMatrixRow sole (seed + 1) scope columnNames row.patterns
+                    row.body
+                    (freshenBinders (occupyAll rowBinders scope) nextRow)
+
+            else
+                let
+                    failName =
+                        "pf_" ++ String.fromInt seed
+
+                    failCall =
+                        ExprApplication [ var failName, ExprUnit ]
+
+                    rowExpr =
+                        compileMatrixRow sole (seed + 1)
+                            (occupy failName scope) columnNames row.patterns
+                            row.body failCall
+                in
+                ExprLet
+                    { declarations =
+                        [ LetFunction
+                            { name = failName
+                            , arguments = [ PatAll ]
+                            , expression = nextRow
+                            }
+                        ]
+                    , expression = rowExpr
+                    }
+
+
+compileMatrixRow :
+    SoleCtors
+    -> Int
+    -> Scope
+    -> Array String
+    -> Array Pattern
+    -> Expr
+    -> Expr
+    -> Expr
+compileMatrixRow sole seed scope columnNames patterns body fail =
+    let
+        pairs =
+            Array.map2
+                (\columnName pattern ->
+                    { columnName = columnName, pattern = pattern }
+                )
+                columnNames patterns
+    in
+    Array.indexedFoldr
+        (\index pair success ->
+            matchPattern sole (seed + index * 97) scope pair.pattern
+                (var pair.columnName) success fail
+        )
+        body
+        pairs
+
+
+{-| Whether the current function calls itself in a syntactic tail position.
+Such a continuation stays inline so Gren can perform tail-call elimination;
+other continuations are shared through a local thunk to keep matrix output
+linear in the number and depth of rows.
+-}
+tailHasSelfCall : String -> Expr -> Bool
+tailHasSelfCall functionName expression =
+    when expression is
+        ExprApplication parts ->
+            when Array.first parts is
+                Just (ExprVar ref) ->
+                    ref.moduleName == Nothing && ref.name == functionName
+
+                _ ->
+                    False
+
+        ExprCase { cases = arms } ->
+            Array.any (\arm -> tailHasSelfCall functionName arm.body) arms
+
+        ExprIf { then_ = then_, else_ = else_ } ->
+            tailHasSelfCall functionName then_
+                || tailHasSelfCall functionName else_
+
+        ExprLet { expression = body } ->
+            tailHasSelfCall functionName body
+
+        _ ->
+            False
 
 
 {-| Match `pattern` against `value`. On success run `body`; on failure `fail`.
@@ -1256,841 +2299,6 @@ matchNamedPattern sole seed scope ref args value body fail =
         matchNamed sole (PatNamed { ref = ref, arguments = args }) value body
             fail
 
--- LISTISH CASE ENTRY ---------------------------------------------------------
-
-
-compileListishCase :
-    SoleCtors
-    -> Int
-    -> { expression : Expr, cases : Array CaseArm }
-    -> Maybe Expr
-compileListishCase sole seed caseBlock =
-    when tryPlainListCase sole seed caseBlock is
-        Just e ->
-            Just e
-
-        Nothing ->
-            when tryMaybeListCase sole seed caseBlock is
-                Just e ->
-                    Just e
-
-                Nothing ->
-                    when tryResultListCase sole seed caseBlock is
-                        Just e ->
-                            Just e
-
-                        Nothing ->
-                            when tryCtorEmbeddedCase sole seed caseBlock is
-                                Just e ->
-                                    Just e
-
-                                Nothing ->
-                                    tryTupleListCase sole seed caseBlock
-
--- PLAIN LIST CASE ------------------------------------------------------------
-
-
-tryPlainListCase :
-    SoleCtors
-    -> Int
-    -> { expression : Expr, cases : Array CaseArm }
-    -> Maybe Expr
-tryPlainListCase sole seed caseBlock =
-    if not (isPlainListCase caseBlock.cases) then
-        Nothing
-
-    else if not (listCaseNeedsConsPeel caseBlock.cases) then
-        -- Pure fixed array patterns: leave as `when xs is [a,b,c] -> …`.
-        -- Peeling multi-arm fixed lists hangs (exponential Print/transform).
-        Nothing
-
-    else
-        Just (compileListCase sole seed caseBlock.expression caseBlock.cases)
-
-
-{-| True when any arm uses open cons (`::`) and must be peeled.
--}
-listCaseNeedsConsPeel : Array CaseArm -> Bool
-listCaseNeedsConsPeel arms =
-    Array.any (\a -> patternHasCons a.pattern) arms
-
-
-isPlainListCase : Array CaseArm -> Bool
-isPlainListCase arms =
-    Array.any (\a -> isListShape a.pattern) arms
-        && Array.all (\a -> isListCaseArm a.pattern) arms
-
-
-isListShape : Pattern -> Bool
-isListShape pattern =
-    when pattern is
-        PatList _ ->
-            True
-
-        PatCons _ ->
-            True
-
-        PatAs { pattern = inner } ->
-            isListShape inner
-
-        _ ->
-            False
-
-
-isListCaseArm : Pattern -> Bool
-isListCaseArm pattern =
-    when pattern is
-        PatAll ->
-            True
-
-        PatVar _ ->
-            True
-
-        PatList members ->
-            Array.all isCompilableHead members
-
-        PatCons _ ->
-            when consHeadsRest pattern is
-                Just { heads = heads, rest = rest } ->
-                    Array.all isCompilableHead heads && isCompilableRest rest
-
-                Nothing ->
-                    False
-
-        PatAs { pattern = inner } ->
-            isListCaseArm inner
-
-        _ ->
-            False
-
-
-isCompilableHead : Pattern -> Bool
-isCompilableHead pattern =
-    when pattern is
-        PatVar _ ->
-            True
-
-        PatAll ->
-            True
-
-        PatNamed { arguments = args } ->
-            Array.all isCompilableHead args
-
-        PatTuple items ->
-            Array.all isCompilableHead items
-
-        PatRecord _ ->
-            True
-
-        PatRecordBind fields ->
-            Array.all (\f -> isCompilableHead f.pattern) fields
-
-        PatAs { pattern = inner } ->
-            isCompilableHead inner
-
-        PatList members ->
-            -- Nested list head: allow if we can compile it (rare).
-            Array.all isCompilableHead members
-
-        PatCons _ ->
-            isListCaseArm pattern
-
-        _ ->
-            not (patternHasCons pattern)
-
-
-isCompilableRest : Pattern -> Bool
-isCompilableRest pattern =
-    when pattern is
-        PatVar _ ->
-            True
-
-        PatAll ->
-            True
-
-        PatList members ->
-            Array.isEmpty members
-
-        PatAs { pattern = inner } ->
-            isCompilableRest inner
-
-        _ ->
-            False
-
-
-{-| Compile a list case: bind scrutinee, peel with popFirst, binders in patterns.
-
-Multi-arm *fixed-length* lists (`[a,b,c]` / `[a,b,c,d]` / …) must not go through
-`matchConsArms` fallthrough: each arm re-peels and the shared-fail DAG explodes
-(CPU hang on avh4/elm-color, TSFoster/elm-md5, jweir/elm-iso8601). Dispatch on
-`Array.length` first, then peel only arms of that length.
--}
-compileListCase : SoleCtors -> Int -> Expr -> Array CaseArm -> Expr
-compileListCase sole seed scrutinee arms =
-    let
-        consArms =
-            Array.mapAndKeepJust consArmShape arms
-
-        fixedOnly =
-            Array.length consArms >= 2
-                && Array.all (\a -> isExactFixedListRest a.rest) consArms
-    in
-    if fixedOnly then
-        compileFixedListByLength sole seed scrutinee arms consArms
-
-    else
-        compileListCasePeel sole seed scrutinee arms consArms
-
-
-isExactFixedListRest : Pattern -> Bool
-isExactFixedListRest rest =
-    when rest is
-        PatList members ->
-            Array.isEmpty members
-
-        _ ->
-            False
-
-
-{-| Dispatch on Array.length then peel only arms of that length (1–2 typically).
-Avoids multi-arm matchConsArms / general-case peel chains that hang Print.
--}
-compileFixedListByLength :
-    SoleCtors
-    -> Int
-    -> Expr
-    -> Array CaseArm
-    -> Array ConsShape
-    -> Expr
-compileFixedListByLength sole seed scrutinee arms consArms =
-    let
-        scrut =
-            "ls_" ++ String.fromInt seed
-
-        scope0 =
-            occupy scrut emptyScope
-
-        catchAll =
-            firstCatchAll arms
-
-        endFail =
-            when catchAll is
-                Just { name = name, body = body } ->
-                    when name is
-                        Just n ->
-                            let
-                                bound =
-                                    bindName n scope0
-                            in
-                            wrapLet bound.name (var scrut)
-                                (renameExpr bound.subst body)
-
-                        Nothing ->
-                            body
-
-                Nothing ->
-                    todo "elm-to-gren: list match fell through"
-
-        -- Distinct lengths only (order of first appearance).
-        lengths =
-            Array.foldl
-                (\arm acc ->
-                    let
-                        n =
-                            Array.length arm.heads
-                    in
-                    if intInArray n acc then
-                        acc
-
-                    else
-                        Array.pushLast n acc) [] consArms
-
-        -- Each length branch binds fallthrough as fl_ so peels do not inline the
-        -- rest of the dispatch (Print explosion).
-        forLength len next =
-            let
-                ofLen =
-                    Array.keepIf (\a -> Array.length a.heads == len) consArms
-
-                failFn =
-                    "fl_" ++ String.fromInt (seed + 300 + len)
-
-                nextCall =
-                    ExprApplication [ var failFn, ExprUnit ]
-
-                try =
-                    Array.indexedFoldr
-                        (\j arm nextArm ->
-                            let
-                                body0 =
-                                    when arm.asName is
-                                        Just n ->
-                                            wrapLet n (var scrut) arm.body
-
-                                        Nothing ->
-                                            arm.body
-
-                                armFailFn =
-                                    "fl_"
-                                        ++ String.fromInt
-                                            (seed + 400 + len * 20 + j)
-
-                                armFailCall =
-                                    ExprApplication [ var armFailFn, ExprUnit ]
-
-                                peeled =
-                                    matchPattern sole
-                                        (seed + 200 + len * 1009 + j * 17)
-                                        (occupy armFailFn scope0)
-                                        (PatList arm.heads) (var scrut) body0
-                                        armFailCall
-                            in
-                            ExprLet
-                                { declarations =
-                                    [ LetFunction
-                                        { name = armFailFn
-                                        , arguments = [ PatAll ]
-                                        , expression = nextArm
-                                        }
-                                    ]
-                                , expression = peeled
-                                }) nextCall ofLen
-            in
-            ExprLet
-                { declarations =
-                    [ LetFunction
-                        { name = failFn
-                        , arguments = [ PatAll ]
-                        , expression = next
-                        }
-                    ]
-                , expression =
-                    ExprIf
-                        { condition =
-                            ExprBinop
-                                { operator = "=="
-                                , left =
-                                    ExprApplication
-                                        [ ExprVar
-                                            { moduleName = Just "Array"
-                                            , name = "length"
-                                            }
-                                        , var scrut
-                                        ]
-                                , right = ExprInt len
-                                }
-                        , then_ = try
-                        , else_ = nextCall
-                        }
-                }
-
-        chain =
-            Array.foldr forLength endFail lengths
-
-        withEmpty =
-            when firstEmptyBody arms is
-                Just emptyBody ->
-                    ExprIf
-                        { condition =
-                            ExprBinop
-                                { operator = "=="
-                                , left =
-                                    ExprApplication
-                                        [ ExprVar
-                                            { moduleName = Just "Array"
-                                            , name = "length"
-                                            }
-                                        , var scrut
-                                        ]
-                                , right = ExprInt 0
-                                }
-                        , then_ = emptyBody
-                        , else_ = chain
-                        }
-
-                Nothing ->
-                    chain
-    in
-    wrapLet scrut scrutinee withEmpty
-
-
-intInArray : Int -> Array Int -> Bool
-intInArray n values =
-    Array.foldl (\x acc -> acc || x == n) False values
-
-
-compileListCasePeel :
-    SoleCtors
-    -> Int
-    -> Expr
-    -> Array CaseArm
-    -> Array ConsShape
-    -> Expr
-compileListCasePeel sole seed scrutinee arms consArms =
-    let
-        scrut =
-            "ls_" ++ String.fromInt seed
-
-        headN =
-            scrut ++ "_h"
-
-        tailN =
-            scrut ++ "_t"
-
-        scope0 =
-            emptyScope
-                |> occupy scrut
-                |> occupy headN
-                |> occupy tailN
-
-        catchAll =
-            firstCatchAll arms
-
-        nothingBody =
-            when firstEmptyBody arms is
-                Just body ->
-                    body
-
-                Nothing ->
-                    when catchAll is
-                        Just { name = name, body = body } ->
-                            when name is
-                                Just n ->
-                                    let
-                                        bound =
-                                            bindName n scope0
-                                    in
-                                    wrapLet bound.name (var scrut)
-                                        (renameExpr bound.subst body)
-
-                                Nothing ->
-                                    body
-
-                        Nothing ->
-                            todo "elm-to-gren: no empty-list arm"
-
-        nothingBranch =
-            { pattern = nothingPat
-            , body = nothingBody
-            }
-
-        justBranch =
-            { pattern = justRecord (PatVar headN) (PatVar tailN)
-            , body =
-                matchConsArms sole (seed + 1) scope0 (var headN) (var tailN)
-                    (var scrut) consArms catchAll
-                    (todo "elm-to-gren: list match fell through")
-            }
-    in
-    ExprLet
-        { declarations =
-            [ LetFunction
-                { name = scrut
-                , arguments = []
-                , expression = scrutinee
-                }
-            ]
-        , expression =
-            ExprCase
-                { expression = popFirst (var scrut)
-                , cases = [ nothingBranch, justBranch ]
-                }
-        }
-
-
-type alias ConsShape =
-    { heads : Array Pattern
-    , rest : Pattern
-    , body : Expr
-    , asName : Maybe String
-    }
-
-
-consArmShape : CaseArm -> Maybe ConsShape
-consArmShape arm =
-    let
-        asName =
-            topAsName arm.pattern
-    in
-    when stripAs arm.pattern is
-        PatAll ->
-            Nothing
-
-        PatVar _ ->
-            Nothing
-
-        PatList members ->
-            if Array.isEmpty members then
-                Nothing
-
-            else
-                Just
-                    { heads = members
-                    , rest = PatList []
-                    , body = arm.body
-                    , asName = asName
-                    }
-
-        PatCons _ ->
-            consHeadsRest arm.pattern
-                |> Maybe.map
-                    (\hr ->
-                        { heads = hr.heads
-                        , rest = hr.rest
-                        , body = arm.body
-                        , asName = asName
-                        })
-
-        _ ->
-            Nothing
-
-
-topAsName : Pattern -> Maybe String
-topAsName pattern =
-    when pattern is
-        PatAs { name = name } ->
-            Just name
-
-        _ ->
-            Nothing
-
-
-firstEmptyBody : Array CaseArm -> Maybe Expr
-firstEmptyBody arms =
-    Array.mapAndKeepJust
-        (\arm ->
-            when stripAs arm.pattern is
-                PatList members ->
-                    if Array.isEmpty members then
-                        Just arm.body
-
-                    else
-                        Nothing
-
-                _ ->
-                    Nothing) arms
-        |> Array.first
-
-
-firstCatchAll : Array CaseArm -> Maybe { name : Maybe String, body : Expr }
-firstCatchAll arms =
-    Array.mapAndKeepJust
-        (\arm ->
-            when stripAs arm.pattern is
-                PatAll ->
-                    Just { name = Nothing, body = arm.body }
-
-                PatVar name ->
-                    Just { name = Just name, body = arm.body }
-
-                _ ->
-                    Nothing) arms
-        |> Array.first
-
-
-{-| Try each cons arm against head/tail already peeled once. Binders stay in patterns.
-α-renames binders against `scope` so nested fallthrough arms never shadow.
--}
-matchConsArms :
-    SoleCtors
-    -> Int
-    -> Scope
-    -> Expr
-    -> Expr
-    -> Expr
-    -> Array ConsShape
-    -> Maybe { name : Maybe String, body : Expr }
-    -> Expr
-    -> Expr
-matchConsArms sole seed scope headExpr tailExpr wholeList consArms catchAll fail
-        =
-    when Array.popFirst consArms is
-        Nothing ->
-            when catchAll is
-                Just { name = name, body = body } ->
-                    when name is
-                        Just n ->
-                            let
-                                bound =
-                                    bindName n scope
-                            in
-                            wrapLet bound.name wholeList
-                                (renameExpr bound.subst body)
-
-                        Nothing ->
-                            body
-
-                Nothing ->
-                    fail
-
-        Just { first = arm, rest = more } ->
-            let
-                -- Outer `as` on the cons arm binds the whole list (e.g. `(q :: _) as qs`).
-                asBound =
-                    when arm.asName is
-                        Just n ->
-                            let
-                                b =
-                                    bindName n scope
-                            in
-                            { scope = b.scope
-                            , subst = b.subst
-                            , wrap = \body -> wrapLet b.name wholeList body
-                            }
-
-                        Nothing ->
-                            { scope = scope
-                            , subst = Dict.empty
-                            , wrap = \body -> body
-                            }
-
-                headsBound =
-                    bindPatternList arm.heads asBound.scope
-
-                restBound =
-                    bindPattern arm.rest headsBound.scope
-
-                bodyRenamed =
-                    arm.body
-                        |> renameExpr asBound.subst
-                        |> renameExpr headsBound.subst
-                        |> renameExpr restBound.subst
-                        |> asBound.wrap
-
-                -- Fallthrough sits under this arm's binders for irrefutable heads;
-                -- occupy them so the next arm α-renames collisions.
-                -- Bind fallthrough as a zero-cost-until-called function so peels
-                -- share one fail body (avoids exponential Print blow-up).
-                failFn =
-                    bindName ("fl_" ++ String.fromInt seed) restBound.scope
-
-                nextFailBody =
-                    matchConsArms sole (seed + 17) failFn.scope headExpr
-                        tailExpr wholeList more catchAll fail
-
-                nextFailCall =
-                    ExprApplication [ var failFn.name, ExprUnit ]
-
-                armExpr =
-                    matchHeads sole (seed + 1) failFn.scope headExpr tailExpr
-                        headsBound.patterns restBound.pattern bodyRenamed
-                        nextFailCall
-            in
-            ExprLet
-                { declarations =
-                    [ LetFunction
-                        { name = failFn.name
-                        , arguments = [ PatAll ]
-                        , expression = nextFailBody
-                        }
-                    ]
-                , expression = armExpr
-                }
-
-
-{-| Match remaining heads against current head value and tail list.
-Patterns are already α-renamed; scope tracks occupied synthetic names.
--}
-matchHeads :
-    SoleCtors
-    -> Int
-    -> Scope
-    -> Expr
-    -> Expr
-    -> Array Pattern
-    -> Pattern
-    -> Expr
-    -> Expr
-    -> Expr
-matchHeads sole seed scope headExpr tailExpr heads rest body fail =
-    when Array.popFirst heads is
-        Nothing ->
-            -- Should not happen for cons shapes.
-            fail
-
-        Just { first = headPat, rest = moreHeads } ->
-            if Array.isEmpty moreHeads then
-                -- Last head: bind headPat against headExpr, rest against tailExpr.
-                finishLastHead sole seed scope headExpr tailExpr headPat rest
-                    body fail
-
-            else
-                -- More heads: bind this head, peel tail for the rest.
-                let
-                    tailBase =
-                        "lt_" ++ String.fromInt seed
-
-                    tailB =
-                        bindName tailBase scope
-
-                    headB =
-                        bindName (tailB.name ++ "_h") tailB.scope
-
-                    tailTB =
-                        bindName (tailB.name ++ "_t") headB.scope
-
-                    continue =
-                        ExprCase
-                            { expression = popFirst (var tailB.name)
-                            , cases =
-                                [ { pattern = nothingPat
-                                  , body = fail
-                                  }
-                                , { pattern =
-                                      justRecord (PatVar headB.name)
-                                          (PatVar tailTB.name)
-                                  , body =
-                                      matchHeads sole (seed + 1) tailTB.scope
-                                          (var headB.name) (var tailTB.name)
-                                          moreHeads rest body fail
-                                  }
-                                ]
-                            }
-
-                    afterHead =
-                        wrapLet tailB.name tailExpr continue
-                in
-                -- Ctor heads with nested list/cons arguments must go through
-                -- the recursive matcher; bindIrrefutable/matchNamed re-emits
-                -- the original pattern raw and the nested list patterns
-                -- survive to Print (D41, elm-css extendLastSelector).
-                if patternHasUnportedList headPat then
-                    matchPattern sole (seed + 90) tailTB.scope headPat headExpr
-                        afterHead fail
-
-                else
-                    bindIrrefutable sole headPat headExpr afterHead fail
-
-
-finishLastHead :
-    SoleCtors
-    -> Int
-    -> Scope
-    -> Expr
-    -> Expr
-    -> Pattern
-    -> Pattern
-    -> Expr
-    -> Expr
-    -> Expr
-finishLastHead sole seed scope headExpr tailExpr headPat rest body fail =
-    let
-        -- Irrefutable heads: bind with let (never bare `when x is y`).
-        -- Nested list heads: peel via matchListShape (bindIrrefutable would leave
-        -- PatList in a when-arm → AST_UNPORTED_LIST). Use a seed derived from
-        -- pattern size so nested peels do not thrash name `ml_0`.
-        withHeadMatch after =
-            when headPat is
-                PatList members ->
-                    matchListShape sole (seed + 50 + Array.length members) scope
-                        members (PatList []) headExpr after fail
-
-                PatCons _ ->
-                    when consHeadsRest headPat is
-                        Just { heads = heads, rest = nestedRest } ->
-                            matchListShape sole (seed + 50) scope heads
-                                nestedRest headExpr after fail
-
-                        Nothing ->
-                            fail
-
-                _ ->
-                    -- Same D41 law as matchHeads: nested list patterns inside
-                    -- a ctor head need the recursive matcher.
-                    if patternHasUnportedList headPat then
-                        matchPattern sole (seed + 70) scope headPat headExpr
-                            after fail
-
-                    else
-                        bindIrrefutable sole headPat headExpr after fail
-    in
-    when rest is
-        PatVar restName ->
-            -- restName already α-renamed in matchConsArms.
-            withHeadMatch (wrapLet restName tailExpr body)
-
-        PatAll ->
-            withHeadMatch body
-
-        PatList members ->
-            if Array.isEmpty members then
-                withHeadMatch
-                    (ExprCase
-                        { expression = popFirst tailExpr
-                        , cases =
-                            [ { pattern = nothingPat, body = body }
-                            , { pattern = PatAll, body = fail }
-                            ]
-                        })
-
-            else
-                fail
-
-        PatAs { pattern = inner, name = asName } ->
-            -- rest already renamed; just place.
-            wrapLet asName tailExpr
-                (finishLastHead sole seed scope headExpr tailExpr headPat inner
-                    body fail)
-
-        _ ->
-            fail
-
-
-{-| Bind a pattern against a value without a top-level `when value is <pat>`.
-
-Gren (like Elm) must not case-match bare records as the scrutinee of `when`.
-Prefer:
-
-- `let name = value` for vars
-- simple `let { a = x, b = y } = value` only when every field is a var/`_`
-- nested ctors inside records/tuples: bind the whole record to a temp, then
-  peel fields with let/access and `when` for named ctors (let cannot nest
-  `Column fn` inside a record pattern)
-- `when value is` for refutable custom-type patterns
-- sole-constructor named patterns: single arm only (no dead `_`)
--}
-bindIrrefutable : SoleCtors -> Pattern -> Expr -> Expr -> Expr -> Expr
-bindIrrefutable sole pattern value body fail =
-    when pattern is
-        PatVar name ->
-            wrapLet name value body
-
-        PatAll ->
-            body
-
-        PatAs { pattern = inner, name = name } ->
-            wrapLet name value
-                (bindIrrefutable sole inner (var name) body fail)
-
-        PatRecordBind fields ->
-            if Array.all (\f -> isSimpleBind f.pattern) fields then
-                wrapDestructure pattern value body
-
-            else
-                bindComplexRecord sole fields value body fail
-
-        PatRecord names ->
-            wrapDestructure pattern value body
-
-        PatTuple items ->
-            -- Tuples print as records; reuse record peel with first/second/...
-            let
-                labels =
-                    tupleBindLabels (Array.length items)
-
-                fields =
-                    Array.map2 (\name item -> { name = name, pattern = item })
-                        labels items
-            in
-            bindIrrefutable sole (PatRecordBind fields) value body fail
-
-        PatNamed _ ->
-            matchNamed sole pattern value body fail
-
-        _ ->
-            matchNamed sole pattern value body fail
-
-
 {-| Named / other structural patterns: add `_` only when the pattern is refutable.
 
 Irrefutable sole-ctors use `let` destructure — a single-arm `when` (or a dead
@@ -2109,19 +2317,6 @@ matchNamed sole pattern value body fail =
                 , { pattern = PatAll, body = fail }
                 ]
             }
-
-
-isSimpleBind : Pattern -> Bool
-isSimpleBind pattern =
-    when pattern is
-        PatVar _ ->
-            True
-
-        PatAll ->
-            True
-
-        _ ->
-            False
 
 
 tupleBindLabels : Int -> Array String
@@ -2158,33 +2353,6 @@ fieldBindLabel index =
 
         _ ->
             "field" ++ String.fromInt (index + 1)
-
-
-{-| Bind a record with nested patterns: temp = value; then peel each field.
--}
-bindComplexRecord :
-    SoleCtors
-    -> Array { name : String, pattern : Pattern }
-    -> Expr
-    -> Expr
-    -> Expr
-    -> Expr
-bindComplexRecord sole fields value body fail =
-    let
-        temp =
-            "rb_"
-                ++ String.fromInt (Array.length fields)
-                ++ "_"
-                ++ String.fromInt 0
-
-        peeled =
-            Array.foldr
-                (\field cont ->
-                    bindIrrefutable sole field.pattern
-                        (ExprAccess { record = var temp, field = field.name })
-                        cont fail) body fields
-    in
-    wrapLet temp value peeled
 
 
 wrapDestructure : Pattern -> Expr -> Expr -> Expr
@@ -2238,1801 +2406,6 @@ isSoleCtor sole ref =
 
         Nothing ->
             Dict.member ref.name sole
-
--- MAYBE / RESULT WRAPPERS ----------------------------------------------------
-
-
-tryMaybeListCase :
-    SoleCtors
-    -> Int
-    -> { expression : Expr, cases : Array CaseArm }
-    -> Maybe Expr
-tryMaybeListCase sole seed caseBlock =
-    if not (isMaybeListCase caseBlock.cases) then
-        Nothing
-
-    else
-        let
-            scrut =
-                "ms_" ++ String.fromInt seed
-
-            mapped =
-                ExprApplication
-                    [ ExprVar { moduleName = Just "Maybe", name = "map" }
-                    , ExprVar { moduleName = Just "Array", name = "popFirst" }
-                    , var scrut
-                    ]
-
-            arms =
-                Array.indexedMap
-                    (\i arm -> rewriteWrapperArm sole (seed + 1 + i) "Just" arm)
-                    caseBlock.cases
-                    |> Array.mapAndKeepJust (\m -> m)
-        in
-        if Array.length arms /= Array.length caseBlock.cases then
-            Nothing
-
-        else
-            Just
-                (ExprLet
-                    { declarations =
-                        [ LetFunction
-                            { name = scrut
-                            , arguments = []
-                            , expression = caseBlock.expression
-                            }
-                        ]
-                    , expression =
-                        ExprCase
-                            { expression = mapped
-                            , cases = arms
-                            }
-                    })
-
-
-tryResultListCase :
-    SoleCtors
-    -> Int
-    -> { expression : Expr, cases : Array CaseArm }
-    -> Maybe Expr
-tryResultListCase sole seed caseBlock =
-    if not (isResultListCase caseBlock.cases) then
-        Nothing
-
-    else
-        let
-            scrut =
-                "rs_" ++ String.fromInt seed
-
-            mapped =
-                ExprApplication
-                    [ ExprVar { moduleName = Just "Result", name = "map" }
-                    , ExprVar { moduleName = Just "Array", name = "popFirst" }
-                    , var scrut
-                    ]
-
-            arms =
-                Array.indexedMap
-                    (\i arm -> rewriteWrapperArm sole (seed + 1 + i) "Ok" arm)
-                    caseBlock.cases
-                    |> Array.mapAndKeepJust (\m -> m)
-        in
-        if Array.length arms /= Array.length caseBlock.cases then
-            Nothing
-
-        else
-            Just
-                (ExprLet
-                    { declarations =
-                        [ LetFunction
-                            { name = scrut
-                            , arguments = []
-                            , expression = caseBlock.expression
-                            }
-                        ]
-                    , expression =
-                        ExprCase
-                            { expression = mapped
-                            , cases = arms
-                            }
-                    })
-
-
-isMaybeListCase : Array CaseArm -> Bool
-isMaybeListCase arms =
-    -- Need at least one Just with a list shape, every arm a Maybe arm, and no
-    -- Just x binder that wants the *whole* list (phoenix-socket longPollEvent.messages:
-    -- Just [] / Nothing / Just messsages). map popFirst would leave messsages as
-    -- Maybe { first, rest } instead of Array.
-    Array.any (wrapperHasList "Just") arms
-        && Array.all isMaybeArm arms
-        && not (Array.any (wrapperHasWholeListBind "Just") arms)
-
-
-isResultListCase : Array CaseArm -> Bool
-isResultListCase arms =
-    Array.any (wrapperHasList "Ok") arms
-        && Array.all isResultArm arms
-        && not (Array.any (wrapperHasWholeListBind "Ok") arms)
-
-
-{-| `Just xs` / `Ok xs` where `xs` is a bare variable or `_` (binds the full list).
--}
-wrapperHasWholeListBind : String -> CaseArm -> Bool
-wrapperHasWholeListBind ctor arm =
-    when arm.pattern is
-        PatNamed { ref = ref, arguments = args } ->
-            if ref.name /= ctor then
-                False
-
-            else
-                when Array.first args is
-                    Just (PatVar _) ->
-                        True
-
-                    Just PatAll ->
-                        True
-
-                    Just (PatAs { pattern = inner }) ->
-                        when inner is
-                            PatVar _ ->
-                                True
-
-                            PatAll ->
-                                True
-
-                            _ ->
-                                False
-
-                    _ ->
-                        False
-
-        _ ->
-            False
-
-
-wrapperHasList : String -> CaseArm -> Bool
-wrapperHasList ctor arm =
-    when arm.pattern is
-        PatNamed { ref = ref, arguments = args } ->
-            ref.name == ctor
-                && (when Array.first args is
-                        Just inner ->
-                            patternHasCons inner || isEmptyList inner
-
-                        Nothing ->
-                            False)
-
-        _ ->
-            False
-
-
-isMaybeArm : CaseArm -> Bool
-isMaybeArm arm =
-    when arm.pattern is
-        PatAll ->
-            True
-
-        PatNamed { ref = ref, arguments = args } ->
-            if ref.name == "Nothing" && Array.isEmpty args then
-                True
-
-            else if ref.name == "Just" && Array.length args == 1 then
-                when Array.first args is
-                    Just inner ->
-                        isListCaseArm inner || not (patternHasCons inner)
-
-                    Nothing ->
-                        False
-
-            else
-                False
-
-        _ ->
-            False
-
-
-isResultArm : CaseArm -> Bool
-isResultArm arm =
-    when arm.pattern is
-        PatAll ->
-            True
-
-        PatNamed { ref = ref, arguments = args } ->
-            if ref.name == "Err" && Array.length args == 1 then
-                when Array.first args is
-                    Just inner ->
-                        not (patternHasCons inner)
-
-                    Nothing ->
-                        False
-
-            else if ref.name == "Ok" && Array.length args == 1 then
-                when Array.first args is
-                    Just inner ->
-                        isListCaseArm inner || not (patternHasCons inner)
-
-                    Nothing ->
-                        False
-
-            else
-                False
-
-        _ ->
-            False
-
-
-{-| After Maybe/Result.map popFirst, Just/Ok payloads are Maybe {first,rest}.
-Rewrite inner list pattern under that.
--}
-rewriteWrapperArm : SoleCtors -> Int -> String -> CaseArm -> Maybe CaseArm
-rewriteWrapperArm sole seed expectCtor arm =
-    when arm.pattern is
-        PatAll ->
-            Just arm
-
-        PatNamed { ref = ref, arguments = args } ->
-            if ref.name /= expectCtor then
-                Just arm
-
-            else
-                when Array.first args is
-                    Just inner ->
-                        when listShapeToHeadsRest inner is
-                            Nothing ->
-                                if isEmptyList inner then
-                                    Just
-                                        { pattern =
-                                            PatNamed
-                                                { ref = ref
-                                                , arguments = [ nothingPat ]
-                                                }
-                                        , body = arm.body
-                                        }
-
-                                else
-                                    Just arm
-
-                            Just { heads = heads, rest = rest } ->
-                                let
-                                    -- Build body that matches Just {first,rest} peels
-                                    -- Outer pattern: Just (compiled list match value)
-                                    -- Simpler: pattern Just pop, body runs list match on rebuilt...
-                                    -- After map popFirst: Just Nothing means [], Just (Just {f,r}) means cons.
-                                    -- Actually Maybe.map Array.popFirst:
-                                    --   Nothing -> Nothing
-                                    --   Just [] -> Just Nothing
-                                    --   Just (x::xs) -> Just (Just {first=x, rest=xs})
-                                    -- So arms:
-                                    --   Just [] -> Just Nothing
-                                    --   Just (x::xs) -> Just (Just {first=x, rest=xs})
-                                    innerCompiled =
-                                        compileListPatternAsPayload sole seed
-                                            heads rest arm.body
-                                in
-                                Just
-                                    { pattern =
-                                        PatNamed
-                                            { ref = ref
-                                            , arguments =
-                                                [ innerCompiled.pattern ]
-                                            }
-                                    , body = innerCompiled.body
-                                    }
-
-                    Nothing ->
-                        Nothing
-
-        _ ->
-            Nothing
-
-
-{-| Compile list shape to a single pattern for under Just/Ok after map popFirst.
-Empty list → Nothing. Non-empty → Just { first = h0, rest = ... } with nested peels in body if needed.
--}
-compileListPatternAsPayload :
-    SoleCtors
-    -> Int
-    -> Array Pattern
-    -> Pattern
-    -> Expr
-    -> { pattern : Pattern, body : Expr }
-compileListPatternAsPayload sole seed heads rest body =
-    -- sole unused for payload shapes (patterns sit in Just {…}); kept for API unity.
-    compileListPatternAsPayloadScoped seed emptyScope heads rest body
-
-
-compileListPatternAsPayloadScoped :
-    Int
-    -> Scope
-    -> Array Pattern
-    -> Pattern
-    -> Expr
-    -> { pattern : Pattern, body : Expr }
-compileListPatternAsPayloadScoped seed scope heads rest body =
-    let
-        headsBound =
-            bindPatternList heads scope
-
-        restBound =
-            bindPattern rest headsBound.scope
-
-        body2 =
-            body
-                |> renameExpr headsBound.subst
-                |> renameExpr restBound.subst
-    in
-    compileListPatternAsPayloadBound seed restBound.scope headsBound.patterns
-        restBound.pattern body2
-
-
-compileListPatternAsPayloadBound :
-    Int
-    -> Scope
-    -> Array Pattern
-    -> Pattern
-    -> Expr
-    -> { pattern : Pattern, body : Expr }
-compileListPatternAsPayloadBound seed scope heads rest body =
-    when Array.popFirst heads is
-        Nothing ->
-            { pattern = nothingPat, body = body }
-
-        Just { first = headPat, rest = more } ->
-            if Array.isEmpty more then
-                when rest is
-                    PatVar restName ->
-                        { pattern = justRecord headPat (PatVar restName)
-                        , body = body
-                        }
-
-                    PatAll ->
-                        { pattern = justRecord headPat PatAll
-                        , body = body
-                        }
-
-                    PatList members ->
-                        if Array.isEmpty members then
-                            let
-                                tmpB =
-                                    bindName ("pe_" ++ String.fromInt seed)
-                                        scope
-                            in
-                            { pattern = justRecord headPat (PatVar tmpB.name)
-                            , body =
-                                ExprCase
-                                    { expression = popFirst (var tmpB.name)
-                                    , cases =
-                                        [ { pattern = nothingPat
-                                          , body = body
-                                          }
-                                        , { pattern = PatAll
-                                          , body =
-                                              todo
-                                                  "elm-to-gren: expected empty rest"
-                                          }
-                                        ]
-                                    }
-                            }
-
-                        else
-                            { pattern = PatAll, body = body }
-
-                    _ ->
-                        { pattern = justRecord headPat PatAll, body = body }
-
-            else
-                -- Multi-depth under wrapper: Just { first = h0, rest = t0 }, then peel t0 in body.
-                let
-                    t0B =
-                        bindName ("pw_" ++ String.fromInt seed) scope
-
-                    nested =
-                        compileListPatternAsPayloadBound (seed + 1) t0B.scope
-                            more rest body
-
-                    body3 =
-                        ExprCase
-                            { expression = popFirst (var t0B.name)
-                            , cases =
-                                [ { pattern = nested.pattern
-                                  , body = nested.body
-                                  }
-                                , { pattern = PatAll
-                                  , body = todo "elm-to-gren: list peel failed"
-                                  }
-                                ]
-                            }
-                in
-                { pattern = justRecord headPat (PatVar t0B.name)
-                , body = body3
-                }
-
--- CTOR EMBEDDED --------------------------------------------------------------
-
-
-tryCtorEmbeddedCase :
-    SoleCtors
-    -> Int
-    -> { expression : Expr, cases : Array CaseArm }
-    -> Maybe Expr
-tryCtorEmbeddedCase sole seed caseBlock =
-    if not (isCtorEmbeddedCase caseBlock.cases) then
-        Nothing
-
-    else
-        let
-            -- Ctors whose every arm is a single direct-list column collapse into
-            -- one totalized `Array.popFirst` peel (all peers merged in
-            -- first-match order); every other ctor keeps the per-arm rewrite.
-            collapseNames =
-                collapsibleCtorNames caseBlock.cases
-
-            residualCases =
-                Array.keepIf
-                    (\arm -> not (ctorArmCollapsed collapseNames arm))
-                    caseBlock.cases
-
-            collapsedArms =
-                Array.mapAndKeepJust
-                    (\name ->
-                        collapseCtorGroup sole seed caseBlock.expression
-                            (firstCatchAll caseBlock.cases) name caseBlock.cases)
-                    collapseNames
-
-            -- Precompute so cons arms are dropped whether they appear before or
-            -- after the empty peer (`Ctor []` merges empty+cons peels).
-            exactEmptyCtors =
-                Array.foldl
-                    (\arm acc ->
-                        if isExactEmptyCtorArm arm then
-                            markExactEmptyCtor arm acc
-
-                        else
-                            acc) Dict.empty residualCases
-
-            step =
-                Array.indexedFoldl
-                    (\i arm acc ->
-                        when acc is
-                            Err _ ->
-                                acc
-
-                            Ok arms ->
-                                if isCoveredOpenListArm arm exactEmptyCtors then
-                                    Ok arms
-
-                                else
-                                    when
-                                        rewriteCtorArm sole (seed + i * 31)
-                                            residualCases arm
-                                    is
-                                        Nothing ->
-                                            Err {}
-
-                                        Just rewritten ->
-                                            Ok (Array.pushLast rewritten arms))
-                    (Ok []) residualCases
-        in
-        if Array.length collapsedArms /= Array.length collapseNames then
-            -- A flagged group failed to build: bail rather than emit a partial.
-            Nothing
-
-        else
-            when step is
-                Err _ ->
-                    Nothing
-
-                Ok residualArms ->
-                    Just
-                        (ExprCase
-                            { expression = caseBlock.expression
-                            , cases =
-                                Array.flatten [ collapsedArms, residualArms ]
-                            })
-
-
-{-| Ctor names every arm of which is `Ctor … <one direct-list column> …` with
-all other columns irrefutable. Such a ctor collapses into a single peeled arm so
-all its list peers merge under one `Array.popFirst` dispatch with first-match
-order. Nested-ctor / multi-list / literal-column groups are excluded and keep the
-per-arm rewrite path.
--}
-collapsibleCtorNames : Array CaseArm -> Array String
-collapsibleCtorNames arms =
-    arms
-        |> Array.mapAndKeepJust ctorArmName
-        |> distinctNames
-        |> Array.keepIf (\name -> ctorGroupCollapsible name arms)
-
-
-ctorArmName : CaseArm -> Maybe String
-ctorArmName arm =
-    when arm.pattern is
-        PatNamed { ref = ref } ->
-            if isReservedMap ref.name then
-                Nothing
-
-            else
-                Just ref.name
-
-        _ ->
-            Nothing
-
-
-ctorArmRef : CaseArm -> Maybe NamedRef
-ctorArmRef arm =
-    when arm.pattern is
-        PatNamed { ref = ref } ->
-            Just ref
-
-        _ ->
-            Nothing
-
-
-ctorArmCollapsed : Array String -> CaseArm -> Bool
-ctorArmCollapsed names arm =
-    when ctorArmName arm is
-        Just name ->
-            Array.member name names
-
-        Nothing ->
-            False
-
-
-distinctNames : Array String -> Array String
-distinctNames names =
-    Array.foldl
-        (\name acc ->
-            if Array.member name acc then
-                acc
-
-            else
-                Array.pushLast name acc) [] names
-
-
-ctorGroupCollapsible : String -> Array CaseArm -> Bool
-ctorGroupCollapsible name arms =
-    let
-        group =
-            Array.keepIf (\arm -> ctorArmName arm == Just name) arms
-    in
-    not (Array.isEmpty group)
-        && Array.all cleanCtorListArm group
-        && sameListPlacement group
-
-
-{-| One list column (direct `PatList`/`PatCons`/`PatAs` of those), all other
-columns irrefutable — the shape the collapse can peel.
--}
-cleanCtorListArm : CaseArm -> Bool
-cleanCtorListArm arm =
-    when arm.pattern is
-        PatNamed { arguments = args } ->
-            (Array.length (Array.keepIf isListShape args) == 1)
-                && Array.all
-                    (\a -> isListShape a || isIrrefutablePat a)
-                    args
-
-        _ ->
-            False
-
-
-isIrrefutablePat : Pattern -> Bool
-isIrrefutablePat pattern =
-    when pattern is
-        PatVar _ ->
-            True
-
-        PatAll ->
-            True
-
-        _ ->
-            False
-
-
-{-| Every arm of the group shares the same arity and list-column index, so one
-outer pattern binds the list slot for all of them.
--}
-sameListPlacement : Array CaseArm -> Bool
-sameListPlacement group =
-    let
-        placements =
-            Array.mapAndKeepJust listColumnIndex group
-    in
-    when Array.first placements is
-        Nothing ->
-            False
-
-        Just firstP ->
-            (Array.length placements == Array.length group)
-                && Array.all (\p -> p == firstP) placements
-
-
-listColumnIndex : CaseArm -> Maybe { arity : Int, index : Int }
-listColumnIndex arm =
-    when arm.pattern is
-        PatNamed { arguments = args } ->
-            when firstListColumn args is
-                Just index ->
-                    Just { arity = Array.length args, index = index }
-
-                Nothing ->
-                    Nothing
-
-        _ ->
-            Nothing
-
-
-firstListColumn : Array Pattern -> Maybe Int
-firstListColumn args =
-    Array.indexedFoldl
-        (\i arg acc ->
-            when acc is
-                Just _ ->
-                    acc
-
-                Nothing ->
-                    if isListShape arg then
-                        Just i
-
-                    else
-                        Nothing) Nothing args
-
-
-{-| Find sibling arm of the same ctor that binds the whole list as a bare variable.
-For example, `Edit newFixes` where newFixes should bind the entire list value.
--}
-ctorWholeListVarArm : String -> Array CaseArm -> Maybe { name : String, body : Expr }
-ctorWholeListVarArm ctorName arms =
-    arms
-        |> Array.mapAndKeepJust
-            (\arm ->
-                when arm.pattern is
-                    PatNamed { ref = ref, arguments = args } ->
-                        if ref.name /= ctorName then
-                            Nothing
-
-                        else
-                            when Array.first args is
-                                Just (PatVar name) ->
-                                    Just { name = name, body = arm.body }
-
-                                _ ->
-                                    Nothing
-
-                    _ ->
-                        Nothing)
-        |> Array.first
-
-
-{-| Collapse all arms of one ctor into `Ctor … clVar … -> <list peel>`, reusing
-the plain list-case totalizer so every peer merges with first-match order. A peel
-that runs out of arms falls through to the case's irrefutable arm (never a
-reachable `Debug.todo`); the whole scrutinee rebinds a named catch-all. Whole-list
-variable bindings (e.g. `Edit newFixes`) provide fallback for non-empty lists.
--}
-collapseCtorGroup :
-    SoleCtors
-    -> Int
-    -> Expr
-    -> Maybe { name : Maybe String, body : Expr }
-    -> String
-    -> Array CaseArm
-    -> Maybe CaseArm
-collapseCtorGroup sole seed scrutinee catchAll ctorName arms =
-    let
-        indexed =
-            arms
-                |> Array.indexedMap (\i arm -> { index = i, arm = arm })
-                |> Array.keepIf (\e -> ctorArmName e.arm == Just ctorName)
-    in
-    when Array.first indexed is
-        Nothing ->
-            Nothing
-
-        Just firstEntry ->
-            when listColumnIndex firstEntry.arm is
-                Nothing ->
-                    Nothing
-
-                Just placement ->
-                    when ctorArmRef firstEntry.arm is
-                        Nothing ->
-                            Nothing
-
-                        Just ref ->
-                            let
-                                gseed =
-                                    seed + firstEntry.index * 1013 + 500
-
-                                listVar =
-                                    "cel_" ++ String.fromInt gseed
-
-                                colVar j =
-                                    "cec_"
-                                        ++ String.fromInt gseed
-                                        ++ "_"
-                                        ++ String.fromInt j
-
-                                outerArgs =
-                                    Array.initialize placement.arity 0
-                                        (\j ->
-                                            if j == placement.index then
-                                                PatVar listVar
-
-                                            else if columnBinds j indexed then
-                                                PatVar (colVar j)
-
-                                            else
-                                                PatAll)
-
-                                unwrapped =
-                                    Array.map
-                                        (\e ->
-                                            unwrapCtorListArm e.arm
-                                                placement.index colVar) indexed
-
-                                -- Non-exhaustive peel falls through to:
-                                -- (1) a sibling ctor arm that binds the whole list
-                                --     as a variable (e.g., `Edit newFixes`), OR
-                                -- (2) the case's irrefutable arm (e.g., `_` catch-all)
-                                -- For case (1), bind the variable to the list value
-                                -- before running the arm's body.
-                                wholeListVarArm =
-                                    ctorWholeListVarArm ctorName arms
-
-                                fallthrough =
-                                    when wholeListVarArm is
-                                        Just entry ->
-                                            [ { pattern = PatAll
-                                              , body =
-                                                    wrapLet entry.name
-                                                        (var listVar) entry.body
-                                              }
-                                            ]
-
-                                        Nothing ->
-                                            when catchAll is
-                                                Just entry ->
-                                                    when entry.name is
-                                                        Just n ->
-                                                            [ { pattern = PatAll
-                                                              , body =
-                                                                    wrapLet n scrutinee
-                                                                        entry.body
-                                                              }
-                                                            ]
-
-                                                        Nothing ->
-                                                            [ { pattern = PatAll
-                                                              , body = entry.body
-                                                              }
-                                                            ]
-
-                                                Nothing ->
-                                                    []
-                            in
-                            Just
-                                { pattern =
-                                    PatNamed { ref = ref, arguments = outerArgs }
-                                , body =
-                                    compileListCase sole gseed (var listVar)
-                                        (Array.flatten [ unwrapped, fallthrough ])
-                                }
-
-
-columnBinds : Int -> Array { index : Int, arm : CaseArm } -> Bool
-columnBinds j indexed =
-    Array.any
-        (\e ->
-            when e.arm.pattern is
-                PatNamed { arguments = args } ->
-                    when Array.get j args is
-                        Just (PatVar _) ->
-                            True
-
-                        _ ->
-                            False
-
-                _ ->
-                    False) indexed
-
-
-{-| Drop the ctor wrapper to the bare list pattern; rename the arm's irrefutable
-non-list column binders onto the shared outer column vars.
--}
-unwrapCtorListArm : CaseArm -> Int -> (Int -> String) -> CaseArm
-unwrapCtorListArm arm listCol colVar =
-    when arm.pattern is
-        PatNamed { arguments = args } ->
-            let
-                subst =
-                    Array.indexedFoldl
-                        (\j arg acc ->
-                            if j == listCol then
-                                acc
-
-                            else
-                                when arg is
-                                    PatVar name ->
-                                        Dict.set name (colVar j) acc
-
-                                    _ ->
-                                        acc) Dict.empty args
-            in
-            { pattern =
-                Array.get listCol args
-                    |> Maybe.withDefault PatAll
-            , body = renameExpr subst arm.body
-            }
-
-        _ ->
-            { pattern = PatAll, body = arm.body }
-
-
-isExactEmptyCtorArm : CaseArm -> Bool
-isExactEmptyCtorArm arm =
-    when arm.pattern is
-        PatNamed { arguments = args } ->
-            nestedArgIsEmptyList args
-
-        _ ->
-            False
-
-
-markExactEmptyCtor : CaseArm -> Dict String {} -> Dict String {}
-markExactEmptyCtor arm seen =
-    when arm.pattern is
-        PatNamed { ref = ref } ->
-            Dict.set ref.name {} seen
-
-        _ ->
-            seen
-
-
-{-| True when this arm is covered by a prior exact-empty arm for the same ctor:
-`Ctor _` / `Ctor xs`, or `Ctor (x :: xs)` (possibly nested) once empty+cons merge.
--}
-isCoveredOpenListArm : CaseArm -> Dict String {} -> Bool
-isCoveredOpenListArm arm exactEmptyCtors =
-    when arm.pattern is
-        PatNamed { ref = ref, arguments = args } ->
-            if not (Dict.member ref.name exactEmptyCtors) then
-                False
-
-            else
-                when Array.first args is
-                    Just PatAll ->
-                        True
-
-                    Just (PatVar _) ->
-                        True
-
-                    Just _ ->
-                        -- Cons / nested cons peer merged into the empty arm peel.
-                        when nestedListShape args is
-                            Just { heads = heads } ->
-                                not (Array.isEmpty heads)
-
-                            Nothing ->
-                                False
-
-                    Nothing ->
-                        False
-
-        _ ->
-            False
-
-
-isCtorEmbeddedCase : Array CaseArm -> Bool
-isCtorEmbeddedCase arms =
-    Array.any armHasCtorList arms
-        && Array.all ctorArmOk arms
-        && not (ctorShadows arms)
-        && ctorGroupsRespectOtherColumnLaw arms
-        -- D49: the peer-fallback machinery (ctorOpenListFallbackArm and
-        -- friends) identifies the list column as ARGUMENT 0. A list column
-        -- at any other index (elm-css's `Selector sequence [] pseudo`, list
-        -- in slot 1) makes the scan match the WRONG arm — the first arm
-        -- becomes its own non-empty fallback, re-emitting its body with a
-        -- shadowing rebind. Route those to compileGeneralCase, which
-        -- compiles each arm independently (correct since D41).
-        && not (Array.any armHasNonFirstListColumn arms)
-
-
-armHasNonFirstListColumn : CaseArm -> Bool
-armHasNonFirstListColumn arm =
-    when stripAs arm.pattern is
-        PatNamed { arguments = args } ->
-            Array.indexedFoldl
-                (\index arg found ->
-                    found || (index > 0 && isListShape (stripAs arg))
-                )
-                False
-                args
-
-        _ ->
-            False
-
-
-{-| Law: a ctor's list-column merge (the `collapsibleCtorNames` fast path
-*and* `rewriteCtorArm`'s per-arm peer-fallback rewrite alike) is only sound
-when every OTHER argument column is irrefutable — `PatVar` / `PatAll` — in
-EVERY row that shares this ctor name. A literal (including `[]`), a nested
-ctor, or any other refutable pattern in another column means those rows are
-not interchangeable peers on the list column alone; merging them silently
-drops that other column's own test and can reference a name that was never
-bound on that path.
-
-`Fifo [] [] -> …; Fifo [] back -> …; Fifo (next::rest) back -> …` is exactly
-this: the list column is index 0, but row 1's index-1 column is the literal
-`[]` while rows 2/3 bind it as `back` — refutable in one row, irrefutable in
-the others. That disqualifies the whole `Fifo` group and routes the case to
-`compileGeneralCase`, which peels each arm's pattern independently instead of
-merging peers.
--}
-ctorGroupsRespectOtherColumnLaw : Array CaseArm -> Bool
-ctorGroupsRespectOtherColumnLaw arms =
-    arms
-        |> Array.mapAndKeepJust ctorArmName
-        |> distinctNames
-        |> Array.all (\name -> ctorGroupOtherColumnsIrrefutable name arms)
-
-
-ctorGroupOtherColumnsIrrefutable : String -> Array CaseArm -> Bool
-ctorGroupOtherColumnsIrrefutable name arms =
-    let
-        group =
-            Array.keepIf (\arm -> ctorArmName arm == Just name) arms
-    in
-    when firstListColumnAcrossGroup group is
-        Nothing ->
-            -- No list column anywhere in this ctor's rows: the list-merge
-            -- machinery never engages, so there is nothing to protect.
-            True
-
-        Just listIndex ->
-            Array.all (otherColumnsIrrefutableAt listIndex) group
-
-
-firstListColumnAcrossGroup : Array CaseArm -> Maybe Int
-firstListColumnAcrossGroup group =
-    Array.foldl
-        (\arm found ->
-            when found is
-                Just _ ->
-                    found
-
-                Nothing ->
-                    when arm.pattern is
-                        PatNamed { arguments = args } ->
-                            firstListColumn args
-
-                        _ ->
-                            Nothing)
-        Nothing
-        group
-
-
-otherColumnsIrrefutableAt : Int -> CaseArm -> Bool
-otherColumnsIrrefutableAt listIndex arm =
-    when arm.pattern is
-        PatNamed { arguments = args } ->
-            Array.indexedFoldl
-                (\i arg ok -> ok && (i == listIndex || isIrrefutablePat arg))
-                True
-                args
-
-        _ ->
-            True
-
-
-isReservedMap : String -> Bool
-isReservedMap name =
-    name == "Just" || name == "Nothing" || name == "Ok" || name == "Err"
-
-
-armHasCtorList : CaseArm -> Bool
-armHasCtorList arm =
-    when arm.pattern is
-        PatNamed { ref = ref, arguments = args } ->
-            not (isReservedMap ref.name)
-                && Array.any (\a -> patternHasCons a || isEmptyList a) args
-
-        _ ->
-            False
-
-
-ctorArmOk : CaseArm -> Bool
-ctorArmOk arm =
-    when arm.pattern is
-        PatAll ->
-            True
-
-        PatNamed { ref = ref, arguments = args } ->
-            not (isReservedMap ref.name)
-                && Array.all nestedCtorArgOk args
-
-        _ ->
-            False
-
-
-{-| Args may be list-shaped, plain, or nested single-arg ctors that themselves
-embed lists (`Operate (Batch (x :: xs))`).
--}
-nestedCtorArgOk : Pattern -> Bool
-nestedCtorArgOk arg =
-    isListCaseArm arg
-        || not (patternHasCons arg)
-        || nestedNamedListOk arg
-
-
-nestedNamedListOk : Pattern -> Bool
-nestedNamedListOk pattern =
-    when pattern is
-        PatNamed { ref = ref, arguments = args } ->
-            not (isReservedMap ref.name)
-                && Array.all nestedCtorArgOk args
-
-        PatAs { pattern = inner } ->
-            nestedNamedListOk inner
-
-        _ ->
-            False
-
-
-ctorShadows : Array CaseArm -> Bool
-ctorShadows arms =
-    let
-        unconsNames =
-            arms
-                |> Array.mapAndKeepJust
-                    (\arm ->
-                        when arm.pattern is
-                            PatNamed { ref = ref, arguments = args } ->
-                                if Array.any patternHasCons args then
-                                    Just ref.name
-
-                                else
-                                    Nothing
-
-                            _ ->
-                                Nothing)
-
-        catchNames =
-            arms
-                |> Array.mapAndKeepJust
-                    (\arm ->
-                        when arm.pattern is
-                            PatNamed { ref = ref, arguments = args } ->
-                                when Array.first args is
-                                    Just (PatVar _) ->
-                                        Just ref.name
-
-                                    Just PatAll ->
-                                        Just ref.name
-
-                                    _ ->
-                                        Nothing
-
-                            _ ->
-                                Nothing)
-    in
-    Array.any (\n -> Array.member n catchNames) unconsNames
-
-
-rewriteCtorArm : SoleCtors -> Int -> Array CaseArm -> CaseArm -> Maybe CaseArm
-rewriteCtorArm sole seed allArms arm =
-    when arm.pattern is
-        PatAll ->
-            Just arm
-
-        PatNamed { ref = ref, arguments = args } ->
-            let
-                emptyFb =
-                    ctorEmptyFallback ref.name allArms
-
-                consPeer =
-                    ctorConsListPeer ref.name allArms
-
-                openListArm =
-                    ctorOpenListFallbackArm ref.name allArms
-
-                nonEmptyFb =
-                    when openListArm is
-                        Just entry ->
-                            when entry.varName is
-                                Just varName ->
-                                    -- Body references the whole list as a variable;
-                                    -- will be bound to the actual list value in
-                                    -- peelBoundListMerged
-                                    entry.body
-
-                                Nothing ->
-                                    entry.body
-
-                        Nothing ->
-                            todo "elm-to-gren: expected empty list"
-
-                prepared =
-                    Array.indexedMap (\i arg -> prepareCtorArg (seed + i) arg)
-                        args
-            in
-            if Array.any .failed prepared then
-                Nothing
-
-            else
-                Just
-                    { pattern =
-                        PatNamed
-                            { ref = ref
-                            , arguments = Array.map .pattern prepared
-                            }
-                    , body =
-                        Array.foldl
-                            (\item body ->
-                                Array.foldl
-                                    (\bind inner ->
-                                        peelBoundListMergedWithFallback sole bind
-                                            body emptyFb nonEmptyFb consPeer
-                                            openListArm) body
-                                    item.listBinds) arm.body prepared
-                    }
-
-        _ ->
-            Nothing
-
-
-{-| Body and var name of a later arm `Ctor _` / `Ctor xs` — used when `Ctor []`
-sees a non-empty list. When the arm binds the whole list as a variable, return
-the name so it can be bound to the actual list value.
--}
-ctorOpenListFallbackArm :
-    String
-    -> Array CaseArm
-    -> Maybe { varName : Maybe String, body : Expr }
-ctorOpenListFallbackArm ctorName arms =
-    arms
-        |> Array.mapAndKeepJust
-            (\arm ->
-                when arm.pattern is
-                    PatNamed { ref = ref, arguments = args } ->
-                        if ref.name /= ctorName then
-                            Nothing
-
-                        else
-                            when Array.first args is
-                                Just PatAll ->
-                                    Just { varName = Nothing, body = arm.body }
-
-                                Just (PatVar name) ->
-                                    Just { varName = Just name, body = arm.body }
-
-                                _ ->
-                                    Nothing
-
-                    _ ->
-                        Nothing)
-        |> Array.first
-
-
-{-| Body of a later arm `Ctor _` / `Ctor xs` — used when `Ctor []` sees a non-empty list.
--}
-ctorOpenListFallback : String -> Array CaseArm -> Maybe Expr
-ctorOpenListFallback ctorName arms =
-    ctorOpenListFallbackArm ctorName arms
-        |> Maybe.map .body
-
-
-{-| Peer arm `Ctor … (x :: xs)` (possibly nested under single-arg ctors) for
-merging empty+cons list peels under the same outer constructor.
--}
-ctorConsListPeer :
-    String
-    -> Array CaseArm
-    -> Maybe { heads : Array Pattern, rest : Pattern, body : Expr }
-ctorConsListPeer ctorName arms =
-    arms
-        |> Array.mapAndKeepJust
-            (\arm ->
-                when arm.pattern is
-                    PatNamed { ref = ref, arguments = args } ->
-                        if ref.name /= ctorName then
-                            Nothing
-
-                        else
-                            when nestedListShape args is
-                                Just { heads = heads, rest = rest } ->
-                                    if
-                                        Array.isEmpty heads && isEmptyList rest
-                                    then
-                                        Nothing
-
-                                    else
-                                        Just
-                                            { heads = heads
-                                            , rest = rest
-                                            , body = arm.body
-                                            }
-
-                                Nothing ->
-                                    Nothing
-
-                    _ ->
-                        Nothing)
-        |> Array.first
-
-
-{-| Walk single-arg named chains to the embedded list shape.
-`Batch (x :: xs)` / `Batch []` / `Operate (Batch (x :: xs))`.
--}
-nestedListShape :
-    Array Pattern
-    -> Maybe { heads : Array Pattern, rest : Pattern }
-nestedListShape args =
-    when Array.first args is
-        Nothing ->
-            Nothing
-
-        Just arg ->
-            when listShapeToHeadsRest arg is
-                Just shape ->
-                    Just shape
-
-                Nothing ->
-                    if isEmptyList arg then
-                        Just { heads = [], rest = PatList [] }
-
-                    else
-                        when arg is
-                            PatNamed { arguments = inner } ->
-                                nestedListShape inner
-
-                            PatAs { pattern = inner } ->
-                                nestedListShape [ inner ]
-
-                            _ ->
-                                Nothing
-
-
-ctorEmptyFallback : String -> Array CaseArm -> Expr
-ctorEmptyFallback ctorName arms =
-    arms
-        |> Array.mapAndKeepJust
-            (\arm ->
-                when arm.pattern is
-                    PatNamed { ref = ref, arguments = args } ->
-                        if ref.name /= ctorName then
-                            Nothing
-
-                        else if nestedArgIsEmptyList args then
-                            Just arm.body
-
-                        else
-                            Nothing
-
-                    _ ->
-                        Nothing)
-        |> Array.first
-        |> Maybe.withDefault (todo "elm-to-gren: expected empty list arm")
-
-
-nestedArgIsEmptyList : Array Pattern -> Bool
-nestedArgIsEmptyList args =
-    when Array.first args is
-        Nothing ->
-            False
-
-        Just arg ->
-            if isEmptyList arg then
-                True
-
-            else
-                when arg is
-                    PatNamed { arguments = inner } ->
-                        nestedArgIsEmptyList inner
-
-                    PatAs { pattern = inner } ->
-                        isEmptyList inner
-
-                    _ ->
-                        False
-
-
-type alias ListBind =
-    { listName : String
-    , heads : Array Pattern
-    , rest : Pattern
-    , exactEmpty : Bool
-    }
-
-
-type alias CtorArgPrep =
-    { pattern : Pattern
-    , listBinds : Array ListBind
-    , failed : Bool
-    }
-
-
-prepareCtorArg : Int -> Pattern -> CtorArgPrep
-prepareCtorArg seed arg =
-    let
-        listName =
-            "cl_" ++ String.fromInt seed
-    in
-    when listShapeToHeadsRest arg is
-        Just { heads = heads, rest = rest } ->
-            { pattern = PatVar listName
-            , listBinds =
-                [ { listName = listName
-                  , heads = heads
-                  , rest = rest
-                  , exactEmpty = False
-                  }
-                ]
-            , failed = False
-            }
-
-        Nothing ->
-            if isEmptyList arg then
-                { pattern = PatVar listName
-                , listBinds =
-                    [ { listName = listName
-                      , heads = []
-                      , rest = PatList []
-                      , exactEmpty = True
-                      }
-                    ]
-                , failed = False
-                }
-
-            else
-                when arg is
-                    PatNamed { ref = ref, arguments = innerArgs } ->
-                        if
-                            Array.any (\a -> patternHasCons a || isEmptyList a)
-                                innerArgs
-                        then
-                            let
-                                prepared =
-                                    Array.indexedMap
-                                        (\i inner ->
-                                            prepareCtorArg (seed * 37 + i + 1)
-                                                inner) innerArgs
-                            in
-                            if Array.any .failed prepared then
-                                { pattern = arg
-                                , listBinds = []
-                                , failed = True
-                                }
-
-                            else
-                                { pattern =
-                                    PatNamed
-                                        { ref = ref
-                                        , arguments =
-                                            Array.map .pattern prepared
-                                        }
-                                , listBinds =
-                                    Array.foldl
-                                        (\p acc ->
-                                            Array.foldl Array.pushLast acc
-                                                p.listBinds) [] prepared
-                                , failed = False
-                                }
-
-                        else
-                            { pattern = arg, listBinds = [], failed = False }
-
-                    PatAs { pattern = inner, name = name } ->
-                        let
-                            prepared =
-                                prepareCtorArg (seed + 1) inner
-                        in
-                        { pattern =
-                            PatAs { pattern = prepared.pattern, name = name }
-                        , listBinds = prepared.listBinds
-                        , failed = prepared.failed
-                        }
-
-                    _ ->
-                        if patternHasCons arg then
-                            { pattern = arg, listBinds = [], failed = True }
-
-                        else
-                            { pattern = arg, listBinds = [], failed = False }
-
-
-{-| Peel a list bound under a ctor arm, with optional fallback info.
-When this is the exact-empty arm and a cons peer exists, merge into one
-`popFirst` dispatch. When fallback arm binds the whole list as a variable,
-bind it before running the body.
--}
-peelBoundListMergedWithFallback :
-    SoleCtors
-    -> ListBind
-    -> Expr
-    -> Expr
-    -> Expr
-    -> Maybe { heads : Array Pattern, rest : Pattern, body : Expr }
-    -> Maybe { varName : Maybe String, body : Expr }
-    -> Expr
-peelBoundListMergedWithFallback sole bind body emptyFb nonEmptyFb consPeer
-        fallbackArm =
-    if bind.exactEmpty then
-        when consPeer is
-            Just peer ->
-                -- Empty + cons siblings: one peel, both bodies.
-                compileListCaseOnVar sole 0 (occupy bind.listName emptyScope)
-                    bind.listName peer.heads peer.rest peer.body body
-
-            Nothing ->
-                -- Peel empty case, and use fallback for non-empty.
-                -- If fallback arm has a variable binding, bind it to the list value.
-                let
-                    actualNonEmptyFb =
-                        when fallbackArm is
-                            Just entry ->
-                                when entry.varName is
-                                    Just varName ->
-                                        wrapLet varName (var bind.listName)
-                                            entry.body
-
-                                    Nothing ->
-                                        entry.body
-
-                            Nothing ->
-                                nonEmptyFb
-                in
-                peelBoundList sole bind body emptyFb actualNonEmptyFb
-
-    else
-        peelBoundList sole bind body emptyFb nonEmptyFb
-
-
-{-| Peel a list bound under a ctor arm. When this is the exact-empty arm and a
-cons peer exists (`Ctor []` + `Ctor (x :: xs)`, possibly nested), merge into one
-`popFirst` dispatch so heads bind correctly and the cons arm can be dropped.
--}
-peelBoundListMerged :
-    SoleCtors
-    -> ListBind
-    -> Expr
-    -> Expr
-    -> Expr
-    -> Maybe { heads : Array Pattern, rest : Pattern, body : Expr }
-    -> Expr
-peelBoundListMerged sole bind body emptyFb nonEmptyFb consPeer =
-    if bind.exactEmpty then
-        when consPeer is
-            Just peer ->
-                -- Empty + cons siblings: one peel, both bodies.
-                compileListCaseOnVar sole 0 (occupy bind.listName emptyScope)
-                    bind.listName peer.heads peer.rest peer.body body
-
-            Nothing ->
-                peelBoundList sole bind body emptyFb nonEmptyFb
-
-    else
-        peelBoundList sole bind body emptyFb nonEmptyFb
-
-
-peelBoundList :
-    SoleCtors
-    -> ListBind
-    -> Expr
-    -> Expr
-    -> Expr
-    -> Expr
-peelBoundList sole bind body emptyFb nonEmptyFb =
-    if bind.exactEmpty then
-        -- Object [] vs Object _: empty → this arm body; non-empty → open-list arm body.
-        ExprCase
-            { expression = popFirst (var bind.listName)
-            , cases =
-                [ { pattern = nothingPat, body = body }
-                , { pattern = PatAll, body = nonEmptyFb }
-                ]
-            }
-
-    else
-        -- Reuse list case compiler on the bound list name.
-        compileListCaseOnVar sole 0 (occupy bind.listName emptyScope)
-            bind.listName bind.heads bind.rest body emptyFb
-
-
-{-| Match heads/rest against an already-bound list variable.
-Binders for heads and open rest live in `Just { first = …, rest = … }` patterns.
--}
-compileListCaseOnVar :
-    SoleCtors
-    -> Int
-    -> Scope
-    -> String
-    -> Array Pattern
-    -> Pattern
-    -> Expr
-    -> Expr
-    -> Expr
-compileListCaseOnVar sole seed scope listName heads rest body fail =
-    let
-        headsBound =
-            bindPatternList heads scope
-
-        restBound =
-            bindPattern rest headsBound.scope
-
-        body2 =
-            body
-                |> renameExpr headsBound.subst
-                |> renameExpr restBound.subst
-    in
-    compileListCaseOnVarBound seed restBound.scope listName headsBound.patterns
-        restBound.pattern body2 fail
-
-
-compileListCaseOnVarBound :
-    Int
-    -> Scope
-    -> String
-    -> Array Pattern
-    -> Pattern
-    -> Expr
-    -> Expr
-    -> Expr
-compileListCaseOnVarBound seed scope listName heads rest body fail =
-    when Array.popFirst heads is
-        Nothing ->
-            fail
-
-        Just { first = headPat, rest = more } ->
-            if Array.isEmpty more then
-                when rest is
-                    PatVar restName ->
-                        ExprCase
-                            { expression = popFirst (var listName)
-                            , cases =
-                                [ { pattern = nothingPat
-                                  , body = fail
-                                  }
-                                , { pattern =
-                                      justRecord headPat (PatVar restName)
-                                  , body = body
-                                  }
-                                ]
-                            }
-
-                    PatAll ->
-                        ExprCase
-                            { expression = popFirst (var listName)
-                            , cases =
-                                [ { pattern = nothingPat
-                                  , body = fail
-                                  }
-                                , { pattern = justRecord headPat PatAll
-                                  , body = body
-                                  }
-                                ]
-                            }
-
-                    PatList members ->
-                        if Array.isEmpty members then
-                            let
-                                tmpB =
-                                    bindName ("er_" ++ String.fromInt seed)
-                                        scope
-                            in
-                            ExprCase
-                                { expression = popFirst (var listName)
-                                , cases =
-                                    [ { pattern = nothingPat
-                                      , body = fail
-                                      }
-                                    , { pattern =
-                                          justRecord headPat (PatVar tmpB.name)
-                                      , body =
-                                          ExprCase
-                                              { expression =
-                                                  popFirst (var tmpB.name)
-                                              , cases =
-                                                  [ { pattern = nothingPat
-                                                    , body = body
-                                                    }
-                                                  , { pattern = PatAll
-                                                    , body = fail
-                                                    }
-                                                  ]
-                                              }
-                                      }
-                                    ]
-                                }
-
-                        else
-                            fail
-
-                    _ ->
-                        fail
-
-            else
-                let
-                    tmpB =
-                        bindName ("lt_" ++ String.fromInt seed) scope
-                in
-                ExprCase
-                    { expression = popFirst (var listName)
-                    , cases =
-                        [ { pattern = nothingPat
-                          , body = fail
-                          }
-                        , { pattern = justRecord headPat (PatVar tmpB.name)
-                          , body =
-                              compileListCaseOnVarBound (seed + 1) tmpB.scope
-                                  tmpB.name more rest body fail
-                          }
-                        ]
-                    }
-
--- TUPLE LIST -----------------------------------------------------------------
-
-
-tryTupleListCase :
-    SoleCtors
-    -> Int
-    -> { expression : Expr, cases : Array CaseArm }
-    -> Maybe Expr
-tryTupleListCase sole seed caseBlock =
-    when caseBlock.expression is
-        ExprTuple components ->
-            let
-                arity =
-                    Array.length components
-            in
-            if not (isTupleList arity caseBlock.cases) then
-                Nothing
-
-            else
-                let
-                    listCols =
-                        Array.initialize arity 0
-                            (\i -> tupleColIsList i caseBlock.cases)
-
-                    wrapped =
-                        Array.indexedMap
-                            (\i c ->
-                                if Array.get i listCols == Just True then
-                                    popFirst c
-
-                                else
-                                    c) components
-
-                    arms =
-                        Array.indexedMap
-                            (\i arm ->
-                                rewriteTupleArm sole (seed + i * 13) listCols
-                                    arm) caseBlock.cases
-                            |> Array.mapAndKeepJust (\m -> m)
-                in
-                if Array.length arms /= Array.length caseBlock.cases then
-                    Nothing
-
-                else
-                    -- Never `when { first, second } is` with nested ctors:
-                    -- Gren 0.6.6 crashes (Map.!) on that shape (elm-deque).
-                    Just (desugarTupleListCase sole (seed + 7) wrapped arms)
-
-        _ ->
-            Nothing
-
-
-{-| Bind each tuple column, then nest per-arm `when` via `matchNamed`.
--}
-desugarTupleListCase : SoleCtors -> Int -> Array Expr -> Array CaseArm -> Expr
-desugarTupleListCase sole seed components arms =
-    let
-        temps =
-            Array.initialize (Array.length components) 0
-                (\i -> "tc_" ++ String.fromInt seed ++ "_" ++ String.fromInt i)
-
-        decls =
-            Array.indexedMap
-                (\i temp ->
-                    LetDestructure
-                        { pattern = PatVar temp
-                        , expression =
-                            when Array.get i components is
-                                Just c ->
-                                    c
-
-                                Nothing ->
-                                    ExprUnit
-                        }) temps
-
-        chain =
-            chainTupleArms sole (seed + 1) temps arms
-                (todo "elm-to-gren: tuple list fell through")
-    in
-    ExprLet { declarations = decls, expression = chain }
-
-
-chainTupleArms :
-    SoleCtors
-    -> Int
-    -> Array String
-    -> Array CaseArm
-    -> Expr
-    -> Expr
-chainTupleArms sole seed temps arms fail =
-    when Array.popFirst arms is
-        Nothing ->
-            fail
-
-        Just { first = arm, rest = more } ->
-            let
-                next =
-                    chainTupleArms sole (seed + 1) temps more fail
-
-                -- D38: the inlined continuation is duplicated at each mismatch
-                -- branch of THIS arm, so it lands nested inside the scope of
-                -- this arm's own pattern binders. When a later arm re-binds the
-                -- same names (consecutive `leftX/leftY` tuple arms, jinjor/
-                -- elm-diff), Gren rejects the nested rebind as SHADOWING. The
-                -- pre-D35 thunk gave the continuation its own scope, hiding the
-                -- clash. Alpha-rename the continuation's binders that collide
-                -- with this arm's binders (first occurrence keeps its names;
-                -- only the nested copy is freshened). Free occurrences — list
-                -- temps and the tail-positioned self-call that keeps TCO alive —
-                -- are left untouched, so recursion stays in syntactic tail
-                -- position.
-                freshNext =
-                    freshenBinders (occupyAll (patternBinders arm.pattern) emptyScope)
-                        next
-            in
-            -- Inline the fallthrough continuation directly rather than wrapping
-            -- it in a called local thunk (`let tf_ _ = next in ... tf_ {}`).
-            -- The thunk cascade pushed a tail-positioned self-recursive call in
-            -- the final arm out of the function's syntactic tail position (it
-            -- sat inside called helpers), so Gren could not eliminate the tail
-            -- call and deep inputs (>~6k) overflowed the node stack (D35).
-            -- Inlining keeps the recursive arm in genuine tail position, letting
-            -- Gren's TCO turn it into a loop. Gren is pure, so duplicating the
-            -- fallthrough expression at each mismatch branch is semantics-
-            -- preserving; tuple-list matches are small, bounding the copy count.
-            matchTupleArmColumns sole temps arm.pattern arm.body freshNext
-
-
-matchTupleArmColumns :
-    SoleCtors
-    -> Array String
-    -> Pattern
-    -> Expr
-    -> Expr
-    -> Expr
-matchTupleArmColumns sole temps pattern body fail =
-    when pattern is
-        PatAll ->
-            body
-
-        PatTuple items ->
-            let
-                pairs =
-                    Array.indexedMap (\i p -> { index = i, pattern = p }) items
-            in
-            Array.foldr
-                (\pair cont ->
-                    when Array.get pair.index temps is
-                        Just temp ->
-                            matchNamed sole pair.pattern (var temp) cont fail
-
-                        Nothing ->
-                            fail) body pairs
-
-        PatAs { pattern = inner } ->
-            matchTupleArmColumns sole temps inner body fail
-
-        _ ->
-            fail
-
 
 {-| Alpha-rename every binder in `expr` that collides with `scope`, threading
 the growing occupied set through nested binding constructs so no two nested
@@ -4161,102 +2534,6 @@ freshenLet scope declarations body =
         }
 
 
-isTupleList : Int -> Array CaseArm -> Bool
-isTupleList arity arms =
-    -- Pure list shapes (`[]`, `[x]`) count — not only `::` (deque first/last).
-    Array.any (tupleHasListShape arity) arms
-        && Array.all (tupleArmOkArity arity) arms
-
-
-tupleArmOkArity : Int -> CaseArm -> Bool
-tupleArmOkArity arity arm =
-    when arm.pattern is
-        PatAll ->
-            True
-
-        PatTuple items ->
-            Array.length items == arity
-                && Array.all (\p -> isListCaseArm p || not (patternHasCons p))
-                    items
-
-        _ ->
-            False
-
-
-{-| True when a tuple arm embeds a list/cons pattern that needs popFirst.
--}
-tupleHasListShape : Int -> CaseArm -> Bool
-tupleHasListShape _ arm =
-    when arm.pattern is
-        PatTuple items ->
-            Array.any (\p -> isListShape p || patternHasCons p) items
-
-        _ ->
-            False
-
-
-tupleColIsList : Int -> Array CaseArm -> Bool
-tupleColIsList index arms =
-    Array.any
-        (\arm ->
-            when arm.pattern is
-                PatTuple items ->
-                    when Array.get index items is
-                        Just p ->
-                            isListShape p || patternHasCons p
-
-                        Nothing ->
-                            False
-
-                _ ->
-                    False) arms
-
-
-rewriteTupleArm : SoleCtors -> Int -> Array Bool -> CaseArm -> Maybe CaseArm
-rewriteTupleArm sole seed listCols arm =
-    when arm.pattern is
-        PatAll ->
-            Just arm
-
-        PatTuple items ->
-            let
-                pats =
-                    Array.indexedMap
-                        (\i p ->
-                            when Array.get i listCols is
-                                Just True ->
-                                    -- Under outer popFirst, pattern is Maybe {first,rest}
-                                    payloadPattern sole (seed + i) p
-
-                                _ ->
-                                    Just p) items
-                        |> Array.mapAndKeepJust (\m -> m)
-            in
-            if Array.length pats /= Array.length items then
-                Nothing
-
-            else
-                Just { pattern = PatTuple pats, body = arm.body }
-
-        _ ->
-            Nothing
-
-
-payloadPattern : SoleCtors -> Int -> Pattern -> Maybe Pattern
-payloadPattern sole seed pattern =
-    when listShapeToHeadsRest pattern is
-        Nothing ->
-            if isEmptyList pattern then
-                Just nothingPat
-
-            else
-                Just pattern
-
-        Just { heads = heads, rest = rest } ->
-            Just
-                (compileListPatternAsPayload sole seed heads rest
-                    (ExprUnit)).pattern
-
 -- CONS IN ARGS ---------------------------------------------------------------
 
 
@@ -4270,66 +2547,29 @@ rewriteConsArgs sole seed arguments body =
     Array.indexedFoldl
         (\index arg current ->
             if patternHasCons arg || isEmptyList arg then
-                when listShapeToHeadsRest arg is
-                    Just { heads = heads, rest = rest } ->
-                        let
-                            listName =
-                                "al_"
-                                    ++ String.fromInt seed
-                                    ++ "_"
-                                    ++ String.fromInt index
+                let
+                    listName =
+                        "al_"
+                            ++ String.fromInt seed
+                            ++ "_"
+                            ++ String.fromInt index
 
-                            -- Occupy prior arg binders so peels cannot shadow them.
-                            scope0 =
-                                Array.foldl
-                                    (\p s -> occupyAll (patternBinders p) s)
-                                    emptyScope current.arguments
-                                    |> occupy listName
+                    -- Occupy prior arg binders so peels cannot shadow them.
+                    scope0 =
+                        Array.foldl
+                            (\p s -> occupyAll (patternBinders p) s)
+                            emptyScope current.arguments
+                            |> occupy listName
 
-                            peeled =
-                                compileListCaseOnVar sole 0 scope0 listName
-                                    heads rest current.expression
-                                    (todo "elm-to-gren: arg list mismatch")
-                        in
-                        { arguments =
-                            Array.pushLast (PatVar listName) current.arguments
-                        , expression = peeled
-                        }
-
-                    Nothing ->
-                        if isEmptyList arg then
-                            let
-                                listName =
-                                    "al_"
-                                        ++ String.fromInt seed
-                                        ++ "_"
-                                        ++ String.fromInt index
-
-                                peeled =
-                                    ExprCase
-                                        { expression = popFirst (var listName)
-                                        , cases =
-                                            [ { pattern = nothingPat
-                                              , body = current.expression
-                                              }
-                                            , { pattern = PatAll
-                                              , body =
-                                                  todo
-                                                      "elm-to-gren: expected empty arg"
-                                              }
-                                            ]
-                                        }
-                            in
-                            { arguments =
-                                Array.pushLast (PatVar listName)
-                                    current.arguments
-                            , expression = peeled
-                            }
-
-                        else
-                            { arguments = Array.pushLast arg current.arguments
-                            , expression = current.expression
-                            }
+                    peeled =
+                        matchPattern sole (seed + index * 97) scope0 arg
+                            (var listName) current.expression
+                            (todo "elm-to-gren: argument pattern mismatch")
+                in
+                { arguments =
+                    Array.pushLast (PatVar listName) current.arguments
+                , expression = peeled
+                }
 
             else
                 { arguments = Array.pushLast arg current.arguments

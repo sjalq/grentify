@@ -1,0 +1,25 @@
+module Mapping.Adapter.Source.HtmlAttributes exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Html.Attributes exposing (classList)
+
+import Array exposing (Array)
+import Html exposing (Attribute)
+import Html.Attributes
+
+
+classList : Array { first : String, second : Bool } -> Attribute msg
+classList items =
+    Html.Attributes.classList
+        (Array.map
+            (\\pair ->
+                { class = pair.first
+                , enabled = pair.second
+                }
+            )
+            items
+        )
+"""
+

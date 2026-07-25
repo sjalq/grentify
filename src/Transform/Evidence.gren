@@ -1,0 +1,215 @@
+module Transform.Evidence exposing
+    ( DependencyEvidence
+    , PackageEvidence
+    , collect
+    , collectConstructorArities
+    , collectSoleConstructors
+    )
+
+{-| Package-wide semantic evidence collection.
+
+ASTs are decoded once, then kept in two explicitly named universes:
+`resolvedFiles` retain Elm names for pre-substitution evidence, while
+`namedFiles` use final mapped names for representation lowering.
+-}
+
+import Array exposing (Array)
+import Ast.BareResolve as BareResolve
+import Ast.CtorHome as CtorHome
+import Ast.CtorLaw as CtorLaw
+import Ast.Decode as AstDecode
+import Ast.KeyEncode as KeyEncode
+import Ast.MatchCompile as MatchCompile
+import Ast.NameSub as NameSub
+import Ast.RecordAlias as RecordAlias
+import Ast.TupleCompare as TupleCompare
+import Ast.Types exposing (Declaration(..), File)
+import Dict exposing (Dict)
+import Mapping.Types exposing (Registry)
+import Review.Protocol as Protocol
+import Transform.AstPipeline as AstPipeline
+
+
+type alias DependencyEvidence =
+    { constructorArities : Dict String Int
+    , soleConstructors : Dict String {}
+    }
+
+
+type alias PackageEvidence =
+    { tupleReturns : Dict String (Array TupleCompare.ElemShape)
+    , constructorHomes : CtorHome.Homes
+    , keyEvidence : KeyEncode.Evidence
+    , recordAliases : Dict String (Array String)
+    , constructorArities : Dict String Int
+    , soleConstructors : Dict String {}
+    , reservedExports : Dict String String
+    , prepared : Dict String AstPipeline.Prepared
+    , exports : DependencyEvidence
+    }
+
+
+collect :
+    Registry
+    -> DependencyEvidence
+    -> Array Protocol.ModuleExtraction
+    -> PackageEvidence
+collect registry dependencies modules =
+    let
+        decodedFiles =
+            decodeFiles modules
+
+        resolvedFiles =
+            Array.map BareResolve.apply decodedFiles
+
+        namedFiles =
+            Array.map (NameSub.apply registry) resolvedFiles
+
+        recordAliases =
+            mergeFileMaps RecordAlias.collectFromFile namedFiles
+
+        ownConstructorArities =
+            mergeFileMaps CtorLaw.collectFromFile namedFiles
+
+        constructorArities =
+            Dict.foldl Dict.set dependencies.constructorArities
+                ownConstructorArities
+
+        ownSoleConstructors =
+            mergeFileMaps MatchCompile.collectSoleCtorsFromFile namedFiles
+
+        soleConstructors =
+            Dict.foldl Dict.set dependencies.soleConstructors
+                ownSoleConstructors
+
+        prepEvidence =
+            { tupleReturns = collectTupleReturns resolvedFiles
+            , constructorHomes = CtorHome.collectHomes resolvedFiles
+            , keyEvidence = KeyEncode.collectEvidence resolvedFiles
+            , recordAliases = recordAliases
+            , constructorArities = constructorArities
+            , soleConstructors = soleConstructors
+
+            -- Not read by `prepare`; the table it would hold is what the
+            -- prepared modules are about to produce.
+            , reservedExports = Dict.empty
+            }
+
+        -- The lowering prefix runs ONCE per module here. The final pass
+        -- resumes from these values instead of redoing all five passes.
+        preparedFiles =
+            Array.map (AstPipeline.prepare registry prepEvidence) decodedFiles
+
+        prepared =
+            Array.foldl
+                (\one found ->
+                    Dict.set (AstPipeline.moduleNameOf one) one found
+                )
+                Dict.empty
+                preparedFiles
+
+        reservedExports =
+            Array.foldl
+                (\one found ->
+                    Dict.foldl Dict.set found (AstPipeline.reservedExportsOf one)
+                )
+                Dict.empty
+                preparedFiles
+    in
+    { tupleReturns = prepEvidence.tupleReturns
+    , constructorHomes = prepEvidence.constructorHomes
+    , keyEvidence = prepEvidence.keyEvidence
+    , recordAliases = recordAliases
+    , constructorArities = constructorArities
+    , soleConstructors = soleConstructors
+    , reservedExports = reservedExports
+    , prepared = prepared
+    , exports =
+        { constructorArities = ownConstructorArities
+        , soleConstructors = ownSoleConstructors
+        }
+    }
+
+
+collectConstructorArities :
+    Registry
+    -> Array Protocol.ModuleExtraction
+    -> Dict String Int
+collectConstructorArities registry modules =
+    modules
+        |> decodeFiles
+        |> Array.map (BareResolve.apply >> NameSub.apply registry)
+        |> mergeFileMaps CtorLaw.collectFromFile
+
+
+collectSoleConstructors :
+    Registry
+    -> Array Protocol.ModuleExtraction
+    -> Dict String {}
+collectSoleConstructors registry modules =
+    modules
+        |> decodeFiles
+        |> Array.map (BareResolve.apply >> NameSub.apply registry)
+        |> mergeFileMaps MatchCompile.collectSoleCtorsFromFile
+
+
+decodeFiles : Array Protocol.ModuleExtraction -> Array File
+decodeFiles modules =
+    Array.mapAndKeepJust
+        (\moduleExtraction ->
+            moduleExtraction.ast
+                |> Maybe.andThen
+                    (\astValue ->
+                        when AstDecode.decode astValue is
+                            Ok file ->
+                                Just file
+
+                            Err _ ->
+                                Nothing
+                    )
+        )
+        modules
+
+
+collectTupleReturns :
+    Array File
+    -> Dict String (Array TupleCompare.ElemShape)
+collectTupleReturns files =
+    Array.foldl
+        (\file found ->
+            Array.foldl
+                (\declaration current ->
+                    when declaration is
+                        DeclFunction { name = name, signature = Just signature } ->
+                            when
+                                TupleCompare.returnListShape
+                                    signature.typeAnnotation
+                            is
+                                Just shape ->
+                                    Dict.set
+                                        (file.moduleDefinition.moduleName
+                                            ++ "."
+                                            ++ name)
+                                        shape current
+
+                                Nothing ->
+                                    current
+
+                        _ ->
+                            current
+                )
+                found
+                file.declarations
+        )
+        Dict.empty
+        files
+
+
+mergeFileMaps : (File -> Dict String a) -> Array File -> Dict String a
+mergeFileMaps collectFromFile files =
+    Array.foldl
+        (\file found ->
+            Dict.foldl Dict.set found (collectFromFile file)
+        )
+        Dict.empty
+        files

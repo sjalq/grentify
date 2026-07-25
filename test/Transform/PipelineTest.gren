@@ -33,6 +33,7 @@ tests =
     , convertsEveryReviewEditKind
     , rejectsInvalidExtractionData
     , reportsUnsupportedRuntimeBoundaries
+    , reportsApproximateGuarantees
     , convertsSourcePathsSafely
     , compiledFixtureHasExpectedBehavior
     ]
@@ -569,6 +570,45 @@ compiledFixtureHasExpectedBehavior =
         "The compiler-backed transformed fixture returned an unexpected value."
 
 
+reportsApproximateGuarantees : TestResult
+reportsApproximateGuarantees =
+    let
+        path =
+            "src/Approximate.elm"
+
+        source =
+            String.join "\n"
+                [ "module Approximate exposing (view)"
+                , ""
+                , "view markdown ="
+                , "    ElmToGren.Compat.Markdown.toHtml [] markdown"
+                , ""
+                ]
+    in
+    when Pipeline.transform registry Pipeline.emptyDepMaps
+        (extractionFor path "Approximate")
+        [ { path = path, source = source } ] is
+        Err error ->
+            outcome "approximate mappings emit a visible warning" False
+                (PortError.toString error)
+
+        Ok transformed ->
+            let
+                warnings =
+                    transformed.diagnostics
+                        |> Array.keepIf
+                            (\diagnostic ->
+                                diagnostic.code == "APPROXIMATE_TRANSLATION"
+                                    && diagnostic.severity == "warning"
+                            )
+            in
+            outcome "approximate mappings emit a visible warning"
+                (Array.length warnings == 1
+                    && transformed.requiredAdapters == [ "Markdown" ]
+                )
+                "The Markdown approximation was not reported exactly once."
+
+
 diagnosticCodes : Result PortError.Error Pipeline.TransformResult -> Array String
 diagnosticCodes result =
     when result is
@@ -831,6 +871,7 @@ registry : Registry
 registry =
     Registry.fromDocument
         { schemaVersion = 1
+        , versionedPackages = []
         , packages =
             [ GrenAnalogue
                 { elmPackage = "elm/core"

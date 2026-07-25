@@ -1,0 +1,29 @@
+module Mapping.Adapter.Source.Basics exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Basics exposing (always, toPolar, fromPolar)
+
+import Math
+
+
+always : a -> b -> a
+always value _ =
+    value
+
+
+toPolar : { first : Float, second : Float } -> { first : Float, second : Float }
+toPolar point =
+    { first = Math.sqrt (point.first * point.first + point.second * point.second)
+    , second = Math.atan2 point.second point.first
+    }
+
+
+fromPolar : { first : Float, second : Float } -> { first : Float, second : Float }
+fromPolar polar =
+    { first = polar.first * Math.cos polar.second
+    , second = polar.first * Math.sin polar.second
+    }
+"""
+

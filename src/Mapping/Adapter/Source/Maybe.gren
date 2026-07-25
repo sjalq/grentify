@@ -1,0 +1,20 @@
+module Mapping.Adapter.Source.Maybe exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Maybe exposing (map4, map5)
+
+import Maybe exposing (Maybe)
+
+
+map4 : (a -> b -> c -> d -> value) -> Maybe a -> Maybe b -> Maybe c -> Maybe d -> Maybe value
+map4 fn ma mb mc md =
+    Maybe.andMap md (Maybe.map3 fn ma mb mc)
+
+
+map5 : (a -> b -> c -> d -> e -> value) -> Maybe a -> Maybe b -> Maybe c -> Maybe d -> Maybe e -> Maybe value
+map5 fn ma mb mc md me =
+    Maybe.andMap me (map4 fn ma mb mc md)
+"""
+

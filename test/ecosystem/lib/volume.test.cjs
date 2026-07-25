@@ -44,10 +44,13 @@ function metrics(over) {
 
 // --- volume detection --------------------------------------------------------
 
-check("THRESHOLDS match spec (100KB max module, 200 modules, 400KB total)", () => {
+check("THRESHOLDS match spec (100KB max module, 200 modules, 250KB total)", () => {
   assert.equal(THRESHOLDS.maxModuleBytes, 100_000);
   assert.equal(THRESHOLDS.modules, 200);
-  assert.equal(THRESHOLDS.totalBytes, 400_000);
+  // D53: the total-bytes threshold was tightened 400KB -> 250KB in the
+  // implementation; this test and the README kept asserting 400KB, so
+  // `npm run test:ledger` has been red and neither tier 0 nor tier 1 runs it.
+  assert.equal(THRESHOLDS.totalBytes, 250_000);
 });
 
 check("isVolume: maxModuleBytes >= 100KB triggers volume", () => {
@@ -60,9 +63,9 @@ check("isVolume: modules >= 200 triggers volume", () => {
   assert.ok(!isVolume(metrics({ modules: 199 })));
 });
 
-check("isVolume: totalBytes >= 400KB triggers volume", () => {
-  assert.ok(isVolume(metrics({ totalBytes: 400_000 })));
-  assert.ok(!isVolume(metrics({ totalBytes: 399_999 })));
+check("isVolume: totalBytes >= 250KB triggers volume", () => {
+  assert.ok(isVolume(metrics({ totalBytes: 250_000 })));
+  assert.ok(!isVolume(metrics({ totalBytes: 249_999 })));
 });
 
 // --- adaptive timeouts -------------------------------------------------------

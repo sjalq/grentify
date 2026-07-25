@@ -1,0 +1,38 @@
+module Mapping.Adapter.Source.Tuple exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Tuple exposing (pair, first, second, mapFirst, mapSecond, mapBoth)
+
+
+pair : a -> b -> { first : a, second : b }
+pair firstValue secondValue =
+    { first = firstValue, second = secondValue }
+
+
+first : { pair | first : a } -> a
+first value =
+    value.first
+
+
+second : { pair | second : b } -> b
+second value =
+    value.second
+
+
+mapFirst : (a -> x) -> { first : a, second : b } -> { first : x, second : b }
+mapFirst fn value =
+    { first = fn value.first, second = value.second }
+
+
+mapSecond : (b -> y) -> { first : a, second : b } -> { first : a, second : y }
+mapSecond fn value =
+    { first = value.first, second = fn value.second }
+
+
+mapBoth : (a -> x) -> (b -> y) -> { first : a, second : b } -> { first : x, second : y }
+mapBoth fnFirst fnSecond value =
+    { first = fnFirst value.first, second = fnSecond value.second }
+"""
+

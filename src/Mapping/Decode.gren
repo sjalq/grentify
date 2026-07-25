@@ -12,8 +12,10 @@ module Mapping.Decode exposing
 
 import Array
 import Dict exposing (Dict)
+import Elm.Semver as Semver
 import Json.Decode as Decode exposing (Decoder, Value)
-import Mapping.Types exposing (MappingDocument, MappingError(..), ModuleMapping, PackageMapping(..), Platform(..))
+import Mapping.Adapter as Adapter
+import Mapping.Types exposing (MappingDocument, MappingError(..), ModuleMapping, PackageMapping(..), Platform(..), TranslationGuarantee(..), VersionedPackageMapping)
 import Maybe exposing (Maybe(..))
 import Result exposing (Result(..))
 import String.Regex as Regex exposing (Regex)
@@ -44,13 +46,17 @@ decodeDocumentObject object =
         |> Result.andThen
             (\schemaVersion ->
                 if schemaVersion == 1 then
-                    requiredField "packages" (Decode.array packageDecoder) object
-                        |> Result.map
-                            (\packages ->
+                    Result.map2
+                        (\packages versionedPackages ->
                                 { schemaVersion = schemaVersion
                                 , packages = packages
+                                , versionedPackages = versionedPackages
                                 }
-                            )
+                        )
+                        (requiredField "packages" (Decode.array packageDecoder)
+                            object)
+                        (optionalField "versionedPackages"
+                            (Decode.array versionedPackageDecoder) [] object)
 
                 else
                     Err "schemaVersion must be exactly 1."
@@ -62,6 +68,27 @@ packageDecoder : Decoder PackageMapping
 packageDecoder =
     Decode.dict Decode.value
         |> Decode.andThen decodePackageObject
+
+
+versionedPackageDecoder : Decoder VersionedPackageMapping
+versionedPackageDecoder =
+    Decode.dict Decode.value
+        |> Decode.andThen
+            (\object ->
+                Result.map2
+                    (\elmVersionRange mapping ->
+                        { elmVersionRange = elmVersionRange
+                        , mapping = mapping
+                        }
+                    )
+                    (requiredString "elmVersionRange" object
+                        |> Result.andThen
+                            (Semver.parseRange
+                                >> Result.mapError Semver.errorToString)
+                    )
+                    (requiredField "mapping" packageDecoder object)
+                    |> resultDecoder
+            )
 
 
 decodePackageObject : Dict String Value -> Decoder PackageMapping
@@ -170,22 +197,28 @@ decodeModuleObject object =
                                         validateModuleName "target" target
                                             |> Result.andThen
                                                 (\_ ->
-                                                    Result.map2
-                                                        (\values types ->
-                                                            { source = source
-                                                            , target = target
-                                                            , values = values
-                                                            , types = types
-                                                            }
-                                                        )
-                                                        (optionalStringMap "values" object
-                                                            |> Result.andThen
-                                                                (validateStringMap ("Value mappings for '" ++ source ++ "'"))
-                                                        )
-                                                        (optionalStringMap "types" object
-                                                            |> Result.andThen
-                                                                (validateStringMap ("Type mappings for '" ++ source ++ "'"))
-                                                        )
+                                                    validateSupportedTarget
+                                                        ("Module mapping for '" ++ source ++ "'")
+                                                        target
+                                                        |> Result.andThen
+                                                            (\_ ->
+                                                                Result.map2
+                                                                    (\values types ->
+                                                                        { source = source
+                                                                        , target = target
+                                                                        , values = values
+                                                                        , types = types
+                                                                        }
+                                                                    )
+                                                                    (optionalStringMap "values" object
+                                                                        |> Result.andThen
+                                                                            (validateStringMap ("Value mappings for '" ++ source ++ "'"))
+                                                                    )
+                                                                    (optionalStringMap "types" object
+                                                                        |> Result.andThen
+                                                                            (validateStringMap ("Type mappings for '" ++ source ++ "'"))
+                                                                    )
+                                                            )
                                                 )
                                     )
                         )
@@ -251,6 +284,23 @@ requiredField fieldName fieldDecoder object =
                     )
 
 
+optionalField : String -> Decoder a -> a -> Dict String Value -> Result String a
+optionalField fieldName fieldDecoder fallback object =
+    when Dict.get fieldName object is
+        Nothing ->
+            Ok fallback
+
+        Just rawValue ->
+            Decode.decodeValue fieldDecoder rawValue
+                |> Result.mapError
+                    (\problem ->
+                        "Invalid field '"
+                            ++ fieldName
+                            ++ "': "
+                            ++ Decode.errorToString problem
+                    )
+
+
 optionalStringMap : String -> Dict String Value -> Result String (Dict String String)
 optionalStringMap fieldName object =
     when Dict.get fieldName object is
@@ -282,12 +332,28 @@ validateStringMap description mappings =
                             Err (description ++ " contains invalid target symbol for '" ++ source ++ "'.")
 
                         else
-                            Ok {}
+                            validateSupportedTarget
+                                (description ++ " target for '" ++ source ++ "'")
+                                target
                     )
         )
         (Ok {})
         mappings
         |> Result.map (\_ -> mappings)
+
+
+validateSupportedTarget : String -> String -> Result String {}
+validateSupportedTarget description target =
+    if Adapter.guaranteeForTarget target == Unsupported then
+        Err
+            (description
+                ++ " refers to unknown compatibility target '"
+                ++ target
+                ++ "'."
+            )
+
+    else
+        Ok {}
 
 
 validateElmPackageName : String -> Result String {}

@@ -11,6 +11,7 @@ multiline strings, and GLSL blocks are opaque.
 -}
 
 import Array exposing (Array)
+import Array.Builder as Builder
 import Char
 import String
 import Transform.SourceEdit as SourceEdit exposing (EditKind(..), SourceEdit, SourceError)
@@ -71,7 +72,7 @@ transform source =
 
 scan : String -> Array OffsetEdit
 scan source =
-    scanFrom (String.toArray source) 0 []
+    scanFrom (sourceCharacters source) 0 []
 
 
 scanFrom : Array Char -> Int -> Array OffsetEdit -> Array OffsetEdit
@@ -475,3 +476,12 @@ toSourceEdit sourceIndex offsetEdit =
         )
         (SourceEdit.offsetToPositionIn sourceIndex offsetEdit.startOffset)
         (SourceEdit.offsetToPositionIn sourceIndex offsetEdit.endOffset)
+
+
+{-| `String.toArray` is O(n^2) in gren-lang/core 7.4.2 (`foldl Array.pushLast []`,
+and `pushLast` copies the whole array). Linear equivalent.
+-}
+sourceCharacters : String -> Array Char
+sourceCharacters source =
+    String.foldl Builder.pushLast (Builder.empty (String.count source)) source
+        |> Builder.toArray

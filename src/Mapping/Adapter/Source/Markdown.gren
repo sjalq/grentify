@@ -1,0 +1,39 @@
+module Mapping.Adapter.Source.Markdown exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Markdown exposing (toHtml, toHtmlWith, defaultOptions, Options)
+
+import Array exposing (Array)
+import Html exposing (Attribute, Html)
+import Maybe exposing (Maybe(..))
+
+
+type alias Options =
+    { githubFlavored : Maybe { tables : Bool, breaks : Bool }
+    , defaultHighlighting : Maybe String
+    , sanitize : Bool
+    , smartypants : Bool
+    }
+
+
+defaultOptions : Options
+defaultOptions =
+    { githubFlavored = Just { tables = False, breaks = False }
+    , defaultHighlighting = Nothing
+    , sanitize = True
+    , smartypants = False
+    }
+
+
+toHtml : Array (Attribute msg) -> String -> Html msg
+toHtml attributes markdown =
+    toHtmlWith defaultOptions attributes markdown
+
+
+toHtmlWith : Options -> Array (Attribute msg) -> String -> Html msg
+toHtmlWith _ attributes markdown =
+    Html.div attributes [ Html.text markdown ]
+"""
+

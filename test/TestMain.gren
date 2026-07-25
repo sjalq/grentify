@@ -28,6 +28,7 @@ import MappingSemanticsTest
 import Node
 import Resolve.SolverTest
 import Port.PortedCacheTest
+import Port.AddTransactionTest
 import Review.RunnerTest
 import Stream.Log
 import Task exposing (Task)
@@ -49,9 +50,14 @@ main =
         \environment ->
             Init.await FileSystem.initialize <|
                 \fileSystem ->
-                    Init.awaitTask (Emit.WorkspaceTest.tests fileSystem) <|
-                        \workspaceChecks ->
-                            runChecks environment (Array.append allChecks workspaceChecks)
+                    Init.awaitTask
+                        (Task.map2 Array.append
+                            (Emit.WorkspaceTest.tests fileSystem)
+                            (Port.AddTransactionTest.tests fileSystem)
+                        )
+                    <|
+                        \filesystemChecks ->
+                            runChecks environment (Array.append allChecks filesystemChecks)
                                 |> Node.endSimpleProgram
 
 

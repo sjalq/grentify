@@ -1,0 +1,19 @@
+module Mapping.Adapter.Source.Set exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Set exposing (partition)
+
+import Set exposing (Set)
+
+
+partition : (comparable -> Bool) -> Set comparable -> { first : Set comparable, second : Set comparable }
+partition predicate values =
+    let
+        parts =
+            Set.partition predicate values
+    in
+    { first = parts.trues, second = parts.falses }
+"""
+

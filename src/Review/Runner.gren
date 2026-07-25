@@ -191,15 +191,9 @@ withCompileLock platform childProcess options =
                             , -- Steal locks older than 660s: a killed holder (harness
                               -- reaping, ^C) never runs release, and a live one is bounded
                               -- by the 600s extraction timeout plus release overhead.
-                              "for i in $(seq 1 3000); do if mkdir '"
-                                ++ lockDir
-                                ++ "' 2>/dev/null; then exit 0; fi; m=$(stat -f %m '"
-                                ++ lockDir
-                                ++ "' 2>/dev/null || stat -c %Y '"
-                                ++ lockDir
-                                ++ "' 2>/dev/null || echo 0); n=$(date +%s); if [ \"$m\" -gt 0 ] && [ $((n - m)) -gt 660 ]; then rmdir '"
-                                ++ lockDir
-                                ++ "' 2>/dev/null; fi; sleep 0.2; done; exit 1"
+                              "lock_dir=$1; for i in $(seq 1 3000); do if mkdir \"$lock_dir\" 2>/dev/null; then exit 0; fi; m=$(stat -f %m \"$lock_dir\" 2>/dev/null || stat -c %Y \"$lock_dir\" 2>/dev/null || echo 0); n=$(date +%s); if [ \"$m\" -gt 0 ] && [ $((n - m)) -gt 660 ]; then rmdir \"$lock_dir\" 2>/dev/null; fi; sleep 0.2; done; exit 1"
+                            , "elm-to-gren-extract-lock"
+                            , lockDir
                             ]
                         , workingDirectory = "."
                         , environment = Dict.empty
@@ -211,7 +205,12 @@ withCompileLock platform childProcess options =
                 release =
                     System.Process.run childProcess
                         { program = "bash"
-                        , arguments = [ "-c", "rmdir '" ++ lockDir ++ "' 2>/dev/null || true" ]
+                        , arguments =
+                            [ "-c"
+                            , "rmdir \"$1\" 2>/dev/null || true"
+                            , "elm-to-gren-extract-unlock"
+                            , lockDir
+                            ]
                         , workingDirectory = "."
                         , environment = Dict.empty
                         , allowedExitCodes = [ 0 ]
@@ -324,7 +323,12 @@ invokeReview platform childProcess options =
         , environment = environment
         , allowedExitCodes = [ 0, 1 ]
         , timeoutMilliseconds = 10 * 60 * 1000
-        , maximumOutputBytes = 64 * 1024 * 1024
+        , -- D54: the whole resolved AST of the package arrives on stdout, and
+          -- 64MB was not enough for generated-code packages (Chadtech/elm-vector
+          -- died with ERR_CHILD_PROCESS_STDIO_MAXBUFFER, banked as a bare
+          -- `exit-1`). Proper fix is to have the extractor write to a file
+          -- instead of a pipe; until then the ceiling is generous.
+          maximumOutputBytes = 256 * 1024 * 1024
         }
         |> Task.andThen
             (\output ->
@@ -462,9 +466,9 @@ hasReviewApp platform childProcess root =
         { program = "bash"
         , arguments =
             [ "-c"
-            , "find '"
-                ++ System.File.pathToString platform root
-                ++ "' -type d -name review-applications -print -quit 2>/dev/null"
+            , "find \"$1\" -type d -name review-applications -print -quit 2>/dev/null"
+            , "elm-to-gren-find-review-app"
+            , System.File.pathToString platform root
             ]
         , workingDirectory = "."
         , environment = Dict.empty

@@ -19,6 +19,7 @@ import Array exposing ( Array )
 import Ast.CtorLaw as CtorLaw
 import Ast.Eval as Eval exposing ( Outcome(..), Value(..) )
 import Ast.MatchCompile as MatchCompile
+import Ast.Print as Print
 import Ast.Types exposing
     ( CaseArm
     , Declaration(..)
@@ -139,7 +140,12 @@ compareFile rawFile =
                     Agreed
 
                 Just False ->
-                    Failed "value mismatch"
+                    Failed
+                        ("value mismatch\nBEFORE:\n"
+                            ++ Print.print before
+                            ++ "\nAFTER:\n"
+                            ++ Print.print after
+                        )
 
                 Nothing ->
                     Discarded

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,7 +9,17 @@ const reviewRoot = path.resolve(
   "..",
 );
 const projectRoot = path.dirname(reviewRoot);
-const elmReview = path.join(projectRoot, "node_modules", ".bin", "elm-review");
+// D55: resolve exactly the way the tool does (Orchestrator.binary) — local
+// install first, PATH otherwise. Hardcoding the node_modules path made tier 1
+// unrunnable whenever node_modules is absent, which is the state of a fresh
+// clone: `elm-review` is not in devDependencies at all, only in the lock.
+const localElmReview = path.join(
+  projectRoot,
+  "node_modules",
+  ".bin",
+  "elm-review",
+);
+const elmReview = existsSync(localElmReview) ? localElmReview : "elm-review";
 
 function extractFixture(name) {
   const elmJson = path.join(reviewRoot, "fixtures", name, "elm.json");

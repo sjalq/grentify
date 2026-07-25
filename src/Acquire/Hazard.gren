@@ -39,7 +39,7 @@ detect : String -> Array Hazard
 detect source =
     let
         scan =
-            scanFrom (String.toArray source) 0 { tokens = [], glsl = False }
+            scanFrom (sourceCharacters source) 0 { tokens = [], glsl = False }
 
         findings =
             inspectTokens scan.tokens
@@ -311,3 +311,12 @@ errorToString hazard =
 
         Glsl ->
             "contains an Elm [glsl|...|] shader block, which needs an explicit compatibility mapping"
+
+
+{-| `String.toArray` is O(n^2) in gren-lang/core 7.4.2 (`foldl Array.pushLast []`,
+and `pushLast` copies the whole array). Linear equivalent.
+-}
+sourceCharacters : String -> Array Char
+sourceCharacters source =
+    String.foldl Builder.pushLast (Builder.empty (String.count source)) source
+        |> Builder.toArray

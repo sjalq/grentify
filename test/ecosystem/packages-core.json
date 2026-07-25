@@ -1,0 +1,1400 @@
+{
+  "schemaVersion": 1,
+  "role": "THE CORE SET — 11% of the registry that carries 88.8% of all imports, plus the two tooling hubs. This is the target surface.",
+  "generatedFrom": "reverse-dependency fan-in over cached registry manifests",
+  "count": 232,
+  "packages": [
+    {
+      "name": "elm-community/list-extra",
+      "fanIn": 184,
+      "version": "8.7.0",
+      "platform": "pure"
+    },
+    {
+      "name": "avh4/elm-color",
+      "fanIn": 112,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "stil4m/elm-syntax",
+      "fanIn": 98,
+      "version": "7.3.9",
+      "platform": "pure"
+    },
+    {
+      "name": "jfmengels/elm-review",
+      "fanIn": 86,
+      "version": "2.16.6",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-community/maybe-extra",
+      "fanIn": 80,
+      "version": "5.3.0",
+      "platform": "pure"
+    },
+    {
+      "name": "rtfeldman/elm-css",
+      "fanIn": 78,
+      "version": "18.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "NoRedInk/elm-json-decode-pipeline",
+      "fanIn": 74,
+      "version": "1.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "mdgriffith/elm-ui",
+      "fanIn": 64,
+      "version": "1.1.8",
+      "platform": "browser"
+    },
+    {
+      "name": "rtfeldman/elm-hex",
+      "fanIn": 60,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "rtfeldman/elm-iso8601-date-strings",
+      "fanIn": 44,
+      "version": "1.1.4",
+      "platform": "pure"
+    },
+    {
+      "name": "justinmimbs/date",
+      "fanIn": 39,
+      "version": "4.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "ianmackenzie/elm-units",
+      "fanIn": 38,
+      "version": "2.10.0",
+      "platform": "pure"
+    },
+    {
+      "name": "ianmackenzie/elm-geometry",
+      "fanIn": 32,
+      "version": "4.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-community/json-extra",
+      "fanIn": 29,
+      "version": "4.3.0",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-community/string-extra",
+      "fanIn": 28,
+      "version": "4.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "myrho/elm-round",
+      "fanIn": 27,
+      "version": "1.0.5",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-community/result-extra",
+      "fanIn": 26,
+      "version": "2.4.0",
+      "platform": "pure"
+    },
+    {
+      "name": "mgold/elm-nonempty-list",
+      "fanIn": 26,
+      "version": "4.2.0",
+      "platform": "pure"
+    },
+    {
+      "name": "elmcraft/core-extra",
+      "fanIn": 25,
+      "version": "2.3.0",
+      "platform": "pure"
+    },
+    {
+      "name": "justinmimbs/time-extra",
+      "fanIn": 25,
+      "version": "1.2.0",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-community/dict-extra",
+      "fanIn": 24,
+      "version": "2.4.0",
+      "platform": "pure"
+    },
+    {
+      "name": "krisajenkins/remotedata",
+      "fanIn": 21,
+      "version": "6.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "miniBill/elm-codec",
+      "fanIn": 19,
+      "version": "2.3.1",
+      "platform": "pure"
+    },
+    {
+      "name": "zwilias/elm-rosetree",
+      "fanIn": 19,
+      "version": "1.5.0",
+      "platform": "pure"
+    },
+    {
+      "name": "danfishgold/base64-bytes",
+      "fanIn": 18,
+      "version": "1.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-community/random-extra",
+      "fanIn": 18,
+      "version": "3.2.0",
+      "platform": "pure"
+    },
+    {
+      "name": "mpizenberg/elm-pointer-events",
+      "fanIn": 18,
+      "version": "5.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "elm-community/typed-svg",
+      "fanIn": 17,
+      "version": "7.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "pzp1997/assoc-list",
+      "fanIn": 17,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "truqu/elm-base64",
+      "fanIn": 17,
+      "version": "2.0.4",
+      "platform": "pure"
+    },
+    {
+      "name": "debois/elm-dom",
+      "fanIn": 16,
+      "version": "1.3.0",
+      "platform": "browser"
+    },
+    {
+      "name": "noahzgordon/elm-color-extra",
+      "fanIn": 16,
+      "version": "1.0.2",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-community/graph",
+      "fanIn": 15,
+      "version": "6.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "folkertdev/one-true-path-experiment",
+      "fanIn": 14,
+      "version": "6.0.1",
+      "platform": "browser"
+    },
+    {
+      "name": "cmditch/elm-bigint",
+      "fanIn": 13,
+      "version": "2.1.2",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-community/basics-extra",
+      "fanIn": 13,
+      "version": "4.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "ktonon/elm-crypto",
+      "fanIn": 13,
+      "version": "1.1.2",
+      "platform": "pure"
+    },
+    {
+      "name": "ktonon/elm-word",
+      "fanIn": 13,
+      "version": "2.1.2",
+      "platform": "pure"
+    },
+    {
+      "name": "robinheghan/murmur3",
+      "fanIn": 13,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "the-sett/elm-syntax-dsl",
+      "fanIn": 13,
+      "version": "6.0.5",
+      "platform": "pure"
+    },
+    {
+      "name": "dillonkearns/elm-markdown",
+      "fanIn": 12,
+      "version": "7.0.1",
+      "platform": "browser"
+    },
+    {
+      "name": "ianmackenzie/elm-triangular-mesh",
+      "fanIn": 12,
+      "version": "1.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "the-sett/elm-pretty-printer",
+      "fanIn": 12,
+      "version": "3.3.1",
+      "platform": "pure"
+    },
+    {
+      "name": "the-sett/elm-refine",
+      "fanIn": 12,
+      "version": "1.4.0",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-community/html-extra",
+      "fanIn": 11,
+      "version": "3.4.0",
+      "platform": "browser"
+    },
+    {
+      "name": "elm-community/intdict",
+      "fanIn": 11,
+      "version": "3.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "miniBill/elm-fast-dict",
+      "fanIn": 11,
+      "version": "1.2.6",
+      "platform": "pure"
+    },
+    {
+      "name": "toastal/either",
+      "fanIn": 11,
+      "version": "3.6.3",
+      "platform": "pure"
+    },
+    {
+      "name": "eriktim/elm-protocol-buffers",
+      "fanIn": 10,
+      "version": "1.2.0",
+      "platform": "pure"
+    },
+    {
+      "name": "ryan-haskell/date-format",
+      "fanIn": 10,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "chelovek0v/bbase64",
+      "fanIn": 9,
+      "version": "1.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "ianmackenzie/elm-float-extra",
+      "fanIn": 9,
+      "version": "1.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "tesk9/palette",
+      "fanIn": 9,
+      "version": "3.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "the-sett/elm-aws-core",
+      "fanIn": 9,
+      "version": "9.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "zwilias/elm-utf-tools",
+      "fanIn": 9,
+      "version": "2.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-community/array-extra",
+      "fanIn": 8,
+      "version": "2.6.0",
+      "platform": "pure"
+    },
+    {
+      "name": "erlandsona/assoc-set",
+      "fanIn": 8,
+      "version": "1.1.3",
+      "platform": "pure"
+    },
+    {
+      "name": "gampleman/elm-visualization",
+      "fanIn": 8,
+      "version": "2.4.3",
+      "platform": "browser"
+    },
+    {
+      "name": "mdgriffith/elm-codegen",
+      "fanIn": 8,
+      "version": "6.0.3",
+      "platform": "pure"
+    },
+    {
+      "name": "ryannhg/date-format",
+      "fanIn": 8,
+      "version": "2.3.0",
+      "platform": "pure"
+    },
+    {
+      "name": "TSFoster/elm-bytes-extra",
+      "fanIn": 7,
+      "version": "1.3.0",
+      "platform": "pure"
+    },
+    {
+      "name": "ianmackenzie/elm-3d-camera",
+      "fanIn": 7,
+      "version": "4.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "jinjor/elm-diff",
+      "fanIn": 7,
+      "version": "1.0.6",
+      "platform": "pure"
+    },
+    {
+      "name": "lue-bird/elm-allowable-state",
+      "fanIn": 7,
+      "version": "1.0.2",
+      "platform": "pure"
+    },
+    {
+      "name": "lue-bird/elm-linear-direction",
+      "fanIn": 7,
+      "version": "11.2.0",
+      "platform": "pure"
+    },
+    {
+      "name": "pablohirafuji/elm-syntax-highlight",
+      "fanIn": 7,
+      "version": "3.7.1",
+      "platform": "browser"
+    },
+    {
+      "name": "the-sett/json-optional",
+      "fanIn": 7,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "MartinSStewart/elm-serialize",
+      "fanIn": 6,
+      "version": "1.3.1",
+      "platform": "pure"
+    },
+    {
+      "name": "PanagiotisGeorgiadis/elm-datetime",
+      "fanIn": 6,
+      "version": "1.3.0",
+      "platform": "pure"
+    },
+    {
+      "name": "TSFoster/elm-uuid",
+      "fanIn": 6,
+      "version": "4.3.1",
+      "platform": "pure"
+    },
+    {
+      "name": "andre-dietrich/parser-combinators",
+      "fanIn": 6,
+      "version": "7.0.2",
+      "platform": "pure"
+    },
+    {
+      "name": "arturopala/elm-monocle",
+      "fanIn": 6,
+      "version": "2.2.0",
+      "platform": "pure"
+    },
+    {
+      "name": "cuducos/elm-format-number",
+      "fanIn": 6,
+      "version": "9.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "hecrj/html-parser",
+      "fanIn": 6,
+      "version": "2.4.0",
+      "platform": "browser"
+    },
+    {
+      "name": "ianmackenzie/elm-1d-parameter",
+      "fanIn": 6,
+      "version": "1.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "jinjor/elm-debounce",
+      "fanIn": 6,
+      "version": "3.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "miyamoen/select-list",
+      "fanIn": 6,
+      "version": "4.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "truqu/elm-md5",
+      "fanIn": 6,
+      "version": "1.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "waratuman/elm-coder",
+      "fanIn": 6,
+      "version": "3.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "Chadtech/elm-bool-extra",
+      "fanIn": 5,
+      "version": "2.4.2",
+      "platform": "pure"
+    },
+    {
+      "name": "Gizra/elm-keyboard-event",
+      "fanIn": 5,
+      "version": "1.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "K-Adam/elm-dom",
+      "fanIn": 5,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "SwiftsNamesake/proper-keyboard",
+      "fanIn": 5,
+      "version": "4.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "billstclair/elm-port-funnel",
+      "fanIn": 5,
+      "version": "1.2.0",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-community/easing-functions",
+      "fanIn": 5,
+      "version": "2.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "gampleman/elm-rosetree",
+      "fanIn": 5,
+      "version": "1.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "ianmackenzie/elm-units-prefixed",
+      "fanIn": 5,
+      "version": "2.8.0",
+      "platform": "pure"
+    },
+    {
+      "name": "json-tools/json-schema",
+      "fanIn": 5,
+      "version": "1.0.2",
+      "platform": "pure"
+    },
+    {
+      "name": "justinmimbs/timezone-data",
+      "fanIn": 5,
+      "version": "11.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "lue-bird/elm-emptiness-typed",
+      "fanIn": 5,
+      "version": "9.2.1",
+      "platform": "pure"
+    },
+    {
+      "name": "the-sett/elm-string-case",
+      "fanIn": 5,
+      "version": "1.0.2",
+      "platform": "pure"
+    },
+    {
+      "name": "turboMaCk/any-dict",
+      "fanIn": 5,
+      "version": "3.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "waratuman/time-extra",
+      "fanIn": 5,
+      "version": "1.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "ymtszw/elm-xml-decode",
+      "fanIn": 5,
+      "version": "3.2.2",
+      "platform": "pure"
+    },
+    {
+      "name": "BrianHicks/elm-trend",
+      "fanIn": 4,
+      "version": "2.1.3",
+      "platform": "pure"
+    },
+    {
+      "name": "FabienHenon/elm-infinite-list-view",
+      "fanIn": 4,
+      "version": "3.3.1",
+      "platform": "browser"
+    },
+    {
+      "name": "Garados007/elm-svg-parser",
+      "fanIn": 4,
+      "version": "1.1.2",
+      "platform": "browser"
+    },
+    {
+      "name": "Gizra/elm-all-set",
+      "fanIn": 4,
+      "version": "1.0.1",
+      "platform": "browser"
+    },
+    {
+      "name": "Punie/elm-parser-extras",
+      "fanIn": 4,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "Spaxe/svg-pathd",
+      "fanIn": 4,
+      "version": "3.0.2",
+      "platform": "pure"
+    },
+    {
+      "name": "TSFoster/elm-sha1",
+      "fanIn": 4,
+      "version": "2.1.1",
+      "platform": "pure"
+    },
+    {
+      "name": "avh4/elm-fifo",
+      "fanIn": 4,
+      "version": "1.0.4",
+      "platform": "pure"
+    },
+    {
+      "name": "billstclair/elm-xml-eeue56",
+      "fanIn": 4,
+      "version": "3.1.1",
+      "platform": "pure"
+    },
+    {
+      "name": "danhandrea/elm-time-extra",
+      "fanIn": 4,
+      "version": "1.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "dillonkearns/elm-graphql",
+      "fanIn": 4,
+      "version": "5.0.12",
+      "platform": "pure"
+    },
+    {
+      "name": "dzuk-mutant/elm-css",
+      "fanIn": 4,
+      "version": "3.0.1",
+      "platform": "browser"
+    },
+    {
+      "name": "etaque/elm-response",
+      "fanIn": 4,
+      "version": "3.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "folkertdev/elm-deque",
+      "fanIn": 4,
+      "version": "3.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "folkertdev/elm-flate",
+      "fanIn": 4,
+      "version": "2.0.6",
+      "platform": "pure"
+    },
+    {
+      "name": "ianmackenzie/elm-3d-scene",
+      "fanIn": 4,
+      "version": "1.1.0",
+      "platform": "browser"
+    },
+    {
+      "name": "ianmackenzie/elm-geometry-linear-algebra-interop",
+      "fanIn": 4,
+      "version": "2.0.3",
+      "platform": "pure"
+    },
+    {
+      "name": "jonathanfishbein1/numeric-typeclasses",
+      "fanIn": 4,
+      "version": "4.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "json-tools/json-value",
+      "fanIn": 4,
+      "version": "1.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "justgook/elm-image",
+      "fanIn": 4,
+      "version": "5.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "lue-bird/elm-bounded-nat",
+      "fanIn": 4,
+      "version": "35.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "lukewestby/elm-http-builder",
+      "fanIn": 4,
+      "version": "8.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "lukewestby/elm-string-interpolate",
+      "fanIn": 4,
+      "version": "1.0.4",
+      "platform": "pure"
+    },
+    {
+      "name": "mdgriffith/elm-style-animation",
+      "fanIn": 4,
+      "version": "4.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "miniBill/elm-unicode",
+      "fanIn": 4,
+      "version": "1.1.2",
+      "platform": "pure"
+    },
+    {
+      "name": "ohanhi/keyboard",
+      "fanIn": 4,
+      "version": "2.0.1",
+      "platform": "browser"
+    },
+    {
+      "name": "pilatch/flip",
+      "fanIn": 4,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "tesk9/accessible-html",
+      "fanIn": 4,
+      "version": "6.2.0",
+      "platform": "browser"
+    },
+    {
+      "name": "tesk9/accessible-html-with-css",
+      "fanIn": 4,
+      "version": "5.2.1",
+      "platform": "browser"
+    },
+    {
+      "name": "uncover-co/elm-theme",
+      "fanIn": 4,
+      "version": "2.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "wolfadex/elm-ansi",
+      "fanIn": 4,
+      "version": "3.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "AdrianRibao/elm-derberos-date",
+      "fanIn": 3,
+      "version": "1.2.3",
+      "platform": "pure"
+    },
+    {
+      "name": "BrianHicks/elm-string-graphemes",
+      "fanIn": 3,
+      "version": "1.0.4",
+      "platform": "pure"
+    },
+    {
+      "name": "MartinSStewart/elm-nonempty-string",
+      "fanIn": 3,
+      "version": "2.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "MaybeJustJames/yaml",
+      "fanIn": 3,
+      "version": "2.1.7",
+      "platform": "pure"
+    },
+    {
+      "name": "NoRedInk/elm-random-pcg-extended",
+      "fanIn": 3,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "TSFoster/elm-heap",
+      "fanIn": 3,
+      "version": "2.1.2",
+      "platform": "pure"
+    },
+    {
+      "name": "TSFoster/elm-tuple-extra",
+      "fanIn": 3,
+      "version": "2.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "arowM/elm-mixin",
+      "fanIn": 3,
+      "version": "5.3.0",
+      "platform": "browser"
+    },
+    {
+      "name": "canceraiddev/elm-aws-core",
+      "fanIn": 3,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "ccapndave/elm-flat-map",
+      "fanIn": 3,
+      "version": "1.2.0",
+      "platform": "pure"
+    },
+    {
+      "name": "ccapndave/elm-update-extra",
+      "fanIn": 3,
+      "version": "4.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "chain-partners/elm-bignum",
+      "fanIn": 3,
+      "version": "1.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "danyx23/elm-mimetype",
+      "fanIn": 3,
+      "version": "4.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "danyx23/elm-uuid",
+      "fanIn": 3,
+      "version": "2.1.2",
+      "platform": "pure"
+    },
+    {
+      "name": "dillonkearns/elm-bcp47-language-tag",
+      "fanIn": 3,
+      "version": "2.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "dillonkearns/elm-cli-options-parser",
+      "fanIn": 3,
+      "version": "5.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-cardano/x-bytes",
+      "fanIn": 3,
+      "version": "1.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "folkertdev/elm-sha2",
+      "fanIn": 3,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "hrldcpr/elm-cons",
+      "fanIn": 3,
+      "version": "3.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "icidasset/elm-material-icons",
+      "fanIn": 3,
+      "version": "11.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "j-maas/elm-ordered-containers",
+      "fanIn": 3,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "joakin/elm-canvas",
+      "fanIn": 3,
+      "version": "5.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "jxxcarlson/htree",
+      "fanIn": 3,
+      "version": "2.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "kuon/elm-hsluv",
+      "fanIn": 3,
+      "version": "3.0.2",
+      "platform": "pure"
+    },
+    {
+      "name": "lattyware/elm-fontawesome",
+      "fanIn": 3,
+      "version": "7.2.0",
+      "platform": "browser"
+    },
+    {
+      "name": "lobanov/elm-taskport",
+      "fanIn": 3,
+      "version": "2.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "lue-bird/elm-no-record-type-alias-constructor-function",
+      "fanIn": 3,
+      "version": "1.0.8",
+      "platform": "pure"
+    },
+    {
+      "name": "lue-bird/elm-typesafe-array",
+      "fanIn": 3,
+      "version": "34.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "lydell/elm-app-url",
+      "fanIn": 3,
+      "version": "1.0.4",
+      "platform": "pure"
+    },
+    {
+      "name": "maca/elm-rose-tree",
+      "fanIn": 3,
+      "version": "1.2.1",
+      "platform": "pure"
+    },
+    {
+      "name": "miniBill/elm-oklch",
+      "fanIn": 3,
+      "version": "1.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "nikita-volkov/typeclasses",
+      "fanIn": 3,
+      "version": "1.8.0",
+      "platform": "pure"
+    },
+    {
+      "name": "pablohirafuji/elm-markdown",
+      "fanIn": 3,
+      "version": "2.0.6",
+      "platform": "browser"
+    },
+    {
+      "name": "pithub/elm-parser-bug-workaround",
+      "fanIn": 3,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "prozacchiwawa/elm-keccak",
+      "fanIn": 3,
+      "version": "2.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "rundis/elm-bootstrap",
+      "fanIn": 3,
+      "version": "5.2.0",
+      "platform": "browser"
+    },
+    {
+      "name": "stil4m/structured-writer",
+      "fanIn": 3,
+      "version": "1.0.3",
+      "platform": "pure"
+    },
+    {
+      "name": "terezka/intervals",
+      "fanIn": 3,
+      "version": "2.0.2",
+      "platform": "browser"
+    },
+    {
+      "name": "torreyatcitty/the-best-decimal",
+      "fanIn": 3,
+      "version": "1.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "turboMaCk/any-set",
+      "fanIn": 3,
+      "version": "1.6.1",
+      "platform": "pure"
+    },
+    {
+      "name": "turboMaCk/non-empty-list-alias",
+      "fanIn": 3,
+      "version": "1.4.0",
+      "platform": "pure"
+    },
+    {
+      "name": "zwilias/elm-html-string",
+      "fanIn": 3,
+      "version": "2.0.2",
+      "platform": "browser"
+    },
+    {
+      "name": "ContaSystemer/elm-effects",
+      "fanIn": 2,
+      "version": "1.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "ContaSystemer/elm-js-data",
+      "fanIn": 2,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "EngageSoftware/elm-dnn-localization",
+      "fanIn": 2,
+      "version": "1.1.0",
+      "platform": "browser"
+    },
+    {
+      "name": "FabienHenon/jsonapi",
+      "fanIn": 2,
+      "version": "2.3.1",
+      "platform": "pure"
+    },
+    {
+      "name": "Janiczek/architecture-test",
+      "fanIn": 2,
+      "version": "2.1.2",
+      "platform": "pure"
+    },
+    {
+      "name": "Janiczek/cmd-extra",
+      "fanIn": 2,
+      "version": "1.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "Janiczek/elm-bidict",
+      "fanIn": 2,
+      "version": "3.1.1",
+      "platform": "pure"
+    },
+    {
+      "name": "MackeyRMS/elm-ui",
+      "fanIn": 2,
+      "version": "2.0.3",
+      "platform": "browser"
+    },
+    {
+      "name": "NoRedInk/elm-compare",
+      "fanIn": 2,
+      "version": "2.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "NoRedInk/elm-string-conversions",
+      "fanIn": 2,
+      "version": "1.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "NoRedInk/noredink-ui",
+      "fanIn": 2,
+      "version": "35.8.0",
+      "platform": "browser"
+    },
+    {
+      "name": "Skinney/murmur3",
+      "fanIn": 2,
+      "version": "2.0.8",
+      "platform": "pure"
+    },
+    {
+      "name": "ThinkAlexandria/css-in-elm",
+      "fanIn": 2,
+      "version": "2.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "UbiqueLambda/elm-with-ui-backend",
+      "fanIn": 2,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "allo-media/canopy",
+      "fanIn": 2,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "arowM/elm-html-internal",
+      "fanIn": 2,
+      "version": "1.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "avh4/elm-program-test",
+      "fanIn": 2,
+      "version": "4.0.1",
+      "platform": "browser"
+    },
+    {
+      "name": "bburdette/toop",
+      "fanIn": 2,
+      "version": "1.2.1",
+      "platform": "pure"
+    },
+    {
+      "name": "bellroy/elm-actor-framework",
+      "fanIn": 2,
+      "version": "1.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "billstclair/elm-websocket-client",
+      "fanIn": 2,
+      "version": "4.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "bitsoflogic/elm-radixint",
+      "fanIn": 2,
+      "version": "2.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "dillonkearns/elm-date-or-date-time",
+      "fanIn": 2,
+      "version": "2.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "dillonkearns/elm-form",
+      "fanIn": 2,
+      "version": "3.1.0",
+      "platform": "browser"
+    },
+    {
+      "name": "dillonkearns/elm-ts-json",
+      "fanIn": 2,
+      "version": "2.1.3",
+      "platform": "pure"
+    },
+    {
+      "name": "dosarf/elm-tree-view",
+      "fanIn": 2,
+      "version": "3.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "drathier/elm-graph",
+      "fanIn": 2,
+      "version": "4.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "dtwrks/elm-book",
+      "fanIn": 2,
+      "version": "1.5.1",
+      "platform": "browser"
+    },
+    {
+      "name": "dwayne/elm-validation",
+      "fanIn": 2,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "edkv/elm-generic-dict",
+      "fanIn": 2,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-cardano/base64",
+      "fanIn": 2,
+      "version": "1.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-cardano/float16",
+      "fanIn": 2,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "elm-community/undo-redo",
+      "fanIn": 2,
+      "version": "3.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "fabhof/elm-ui-datepicker",
+      "fanIn": 2,
+      "version": "5.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "feathericons/elm-feather",
+      "fanIn": 2,
+      "version": "1.5.0",
+      "platform": "browser"
+    },
+    {
+      "name": "folkertdev/elm-paragraph",
+      "fanIn": 2,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "folkertdev/svg-path-lowlevel",
+      "fanIn": 2,
+      "version": "4.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "fredcy/elm-parseint",
+      "fanIn": 2,
+      "version": "2.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "goyalarchit/elm-dagre",
+      "fanIn": 2,
+      "version": "4.0.1",
+      "platform": "browser"
+    },
+    {
+      "name": "ianmackenzie/elm-geometry-svg",
+      "fanIn": 2,
+      "version": "3.0.1",
+      "platform": "browser"
+    },
+    {
+      "name": "ianmackenzie/elm-interval",
+      "fanIn": 2,
+      "version": "3.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "ianmackenzie/elm-units-interval",
+      "fanIn": 2,
+      "version": "3.2.0",
+      "platform": "pure"
+    },
+    {
+      "name": "icidasset/elm-binary",
+      "fanIn": 2,
+      "version": "2.1.0",
+      "platform": "pure"
+    },
+    {
+      "name": "inkuzmin/elm-multiselect",
+      "fanIn": 2,
+      "version": "4.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "ivadzy/bbase64",
+      "fanIn": 2,
+      "version": "1.1.1",
+      "platform": "pure"
+    },
+    {
+      "name": "jfmengels/elm-lint",
+      "fanIn": 2,
+      "version": "4.1.2",
+      "platform": "pure"
+    },
+    {
+      "name": "jinjor/elm-xml-parser",
+      "fanIn": 2,
+      "version": "2.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "jluckyiv/elm-utc-date-strings",
+      "fanIn": 2,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "joeybright/json-decode-map-gen",
+      "fanIn": 2,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "jonathanfishbein1/elm-numbers",
+      "fanIn": 2,
+      "version": "5.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "joneshf/elm-tagged",
+      "fanIn": 2,
+      "version": "2.1.1",
+      "platform": "pure"
+    },
+    {
+      "name": "jschomay/elm-bounded-number",
+      "fanIn": 2,
+      "version": "2.1.2",
+      "platform": "pure"
+    },
+    {
+      "name": "justgook/webgl-shape",
+      "fanIn": 2,
+      "version": "3.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "jxxcarlson/hex",
+      "fanIn": 2,
+      "version": "4.0.1",
+      "platform": "pure"
+    },
+    {
+      "name": "kirchner/elm-selectize",
+      "fanIn": 2,
+      "version": "2.0.7",
+      "platform": "browser"
+    },
+    {
+      "name": "kokizzu/elm-date-format",
+      "fanIn": 2,
+      "version": "1.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "kudzu-forest/elm-constant-time-queue",
+      "fanIn": 2,
+      "version": "1.4.0",
+      "platform": "pure"
+    },
+    {
+      "name": "kudzu-forest/elm-wide-float",
+      "fanIn": 2,
+      "version": "2.0.2",
+      "platform": "pure"
+    },
+    {
+      "name": "kuon/elm-string-normalize",
+      "fanIn": 2,
+      "version": "1.0.6",
+      "platform": "pure"
+    },
+    {
+      "name": "linsyking/elm-regl",
+      "fanIn": 2,
+      "version": "10.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "lovasoa/elm-rolling-list",
+      "fanIn": 2,
+      "version": "1.1.4",
+      "platform": "pure"
+    },
+    {
+      "name": "lue-bird/elm-partial-or-complete",
+      "fanIn": 2,
+      "version": "1.0.2",
+      "platform": "pure"
+    },
+    {
+      "name": "matheus23/elm-tailwind-modules-base",
+      "fanIn": 2,
+      "version": "1.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "matthewsj/elm-ordering",
+      "fanIn": 2,
+      "version": "2.0.0",
+      "platform": "pure"
+    },
+    {
+      "name": "miniBill/elm-ui-with-context",
+      "fanIn": 2,
+      "version": "2.0.0",
+      "platform": "browser"
+    },
+    {
+      "name": "noordstar/elm-iddict",
+      "fanIn": 2,
+      "version": "1.0.1",
+      "platform": "pure"
+    }
+  ]
+}

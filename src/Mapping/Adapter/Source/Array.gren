@@ -1,0 +1,74 @@
+module Mapping.Adapter.Source.Array exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Array exposing (empty, initialize, fromList, toList, toIndexedList, append, get, set)
+
+import Array exposing (Array)
+
+
+empty : Array a
+empty =
+    []
+
+
+{-| Elm `Array.get` returns Nothing for ANY out-of-range index. Gren's
+`Array.get` counts negative indices from the end; guard them out.
+-}
+get : Int -> Array a -> Maybe a
+get index values =
+    if index < 0 then
+        Nothing
+
+    else
+        Array.get index values
+
+
+{-| Elm `Array.set` leaves the array unaltered for ANY out-of-range index.
+Gren's `Array.set` counts negative indices from the end; guard them out.
+-}
+set : Int -> a -> Array a -> Array a
+set index value values =
+    if index < 0 then
+        values
+
+    else
+        Array.set index value values
+
+
+{-| Elm `Array.append a b == a ++ b`. Gren's `Array.append` flips its arguments
+to be pipe-friendly (`append a b == b ++ a`), so restore Elm order with `++`.
+-}
+append : Array a -> Array a -> Array a
+append lhs rhs =
+    lhs ++ rhs
+
+
+{-| Elm `Array.initialize` returns an empty array for count <= 0. Gren's
+`Array.initialize` throws a RangeError for negative counts; guard them out.
+-}
+initialize : Int -> (Int -> a) -> Array a
+initialize count make =
+    if count <= 0 then
+        []
+
+    else
+        Array.initialize count 0 make
+
+
+fromList : Array a -> Array a
+fromList values =
+    values
+
+
+toList : Array a -> Array a
+toList values =
+    values
+
+
+toIndexedList : Array a -> Array { first : Int, second : a }
+toIndexedList values =
+    Array.indexedMap (\\index value -> { first = index, second = value }) values
+"""
+

@@ -34,6 +34,7 @@ import Mapping.Registry as MappingRegistry
 import Mapping.Types as Mapping exposing (MappingKind(..), Registry)
 import Math
 import Node
+import Port.AddTransaction as AddTransaction
 import Port.Error as PortError exposing (Error)
 import Port.Plan as Plan
 import Resolve.Online
@@ -154,10 +155,10 @@ run context permissions cliOptions =
                                 |> Task.andThen
                                     (\rootSource ->
                                         let
-                                            -- elm/http 1.x apps need Request/send/positional get.
                                             registryForRoot =
-                                                MappingRegistry.overlayHttp1Compat
-                                                    (dependsOnHttp1 rootSource.manifest)
+                                                MappingRegistry.applyVersionedMappings
+                                                    (manifestDependencyRanges
+                                                        rootSource.manifest)
                                                     registry
                                         in
                                         resolveGraph permissions acquireOptions registryForRoot rootSource
@@ -524,28 +525,81 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
                 , version = Semver.versionToString source.manifest.version
                 }
                 source.sourceUrl
+
+        runReviewAt packageRoot =
+            Review.Runner.run context.platform permissions.childProcess
+                { packageRoot = packageRoot
+                , elmJson = Path.join [ packageRoot, Path.fromPosixString "elm.json" ]
+                , reviewConfig = assets.review
+                , executable = assets.elmReviewExecutable
+                , elmHome = Just elmHome
+                , files = reviewFiles
+                , offline = offline
+                , reviewAppCache = Just reviewAppCache
+                , extractCache = extractCache
+                , logStream = context.logStream
+                , fileSystem = permissions.fileSystem
+                }
+
+        runReview =
+            when source.sourceUrl is
+                Just _ ->
+                    runReviewAt source.root
+
+                Nothing ->
+                    -- Local inputs are user-owned and must remain read-only.
+                    -- elm-review creates and may heal `elm-stuff`, so run it
+                    -- against a disposable copy instead of the source tree.
+                    FileSystem.makeTempDirectory permissions.fileSystem
+                        "elm-to-gren-local-review-"
+                        |> Task.mapError
+                            (FileSystem.errorToString
+                                >> PortError.create "LOCAL_REVIEW_STAGING_FAILED"
+                            )
+                        |> Task.andThen
+                            (\temporary ->
+                                System.File.copyDirectoryContents
+                                    permissions.fileSystem
+                                    source.root
+                                    temporary
+                                    |> Task.andThen (\_ -> runReviewAt temporary)
+                                    |> Task.map Ok
+                                    |> Task.onError (Err >> Task.succeed)
+                                    |> Task.andThen
+                                        (\reviewResult ->
+                                            FileSystem.remove permissions.fileSystem
+                                                { recursive = True }
+                                                temporary
+                                                |> Task.mapError
+                                                    (FileSystem.errorToString
+                                                        >> PortError.create "LOCAL_REVIEW_STAGING_FAILED"
+                                                    )
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        when reviewResult is
+                                                            Ok extraction ->
+                                                                Task.succeed extraction
+
+                                                            Err error ->
+                                                                Task.fail error
+                                                    )
+                                        )
+                            )
     in
     Task.map2
         (\extraction sourceFiles -> { extraction = extraction, sourceFiles = sourceFiles })
-        (Review.Runner.run context.platform permissions.childProcess
-            { packageRoot = source.root
-            , elmJson = Path.join [ source.root, Path.fromPosixString "elm.json" ]
-            , reviewConfig = assets.review
-            , executable = assets.elmReviewExecutable
-            , elmHome = Just elmHome
-            , files = reviewFiles
-            , offline = offline
-            , reviewAppCache = Just reviewAppCache
-            , extractCache = extractCache
-            , logStream = context.logStream
-            , fileSystem = permissions.fileSystem
-            }
+        (logPhase context "extract" (PackageName.toString source.manifest.name)
+            |> Task.andThen (\_ -> runReview)
         )
         (readSources permissions.fileSystem source includeTests)
         |> Task.andThen
             (\inputs ->
-                Pipeline.transform registry depMaps inputs.extraction inputs.sourceFiles
-                    |> resultTask identity
+                logPhase context "transform" (PackageName.toString source.manifest.name)
+                    |> Task.andThen
+                        (\_ ->
+                            Pipeline.transform registry depMaps inputs.extraction inputs.sourceFiles
+                                |> resultTask identity
+                        )
             )
         |> Task.andThen
             (\transformed ->
@@ -605,6 +659,42 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
                             )
                         |> resultTask identity
             )
+
+
+{-| D51: the install stands; the consumer's own modules do not compile. Say so
+loudly on the log stream — silence here would let a broken application look
+like a broken port at the user's next build.
+-}
+logConsumerVerdict : Context -> Verify.Package.ConsumerVerdict -> Task x {}
+logConsumerVerdict context verdict =
+    when { stream = context.logStream, verdict = verdict } is
+        { verdict = Verify.Package.ConsumerVerified } ->
+            Task.succeed {}
+
+        { stream = Nothing } ->
+            Task.succeed {}
+
+        { stream = Just stream, verdict = Verify.Package.ConsumerSourceErrors details } ->
+            Stream.Log.line stream
+                ("WARNING: the package was vendored and verified, but this application's own sources do not compile.\n"
+                    ++ "The install was kept — fix the application, then build again.\n"
+                    ++ details
+                )
+
+
+{-| Phase markers. The tool cannot report its own death — the harness SIGKILLs
+it at budget — so it announces each phase on entry and the killer reads the
+last marker. No clock plumbing here on purpose: consumers timestamp on receipt,
+which also makes the markers free when nobody is listening.
+-}
+logPhase : Context -> String -> String -> Task x {}
+logPhase context phase subject =
+    when context.logStream is
+        Nothing ->
+            Task.succeed {}
+
+        Just stream ->
+            Stream.Log.line stream ("[phase] " ++ phase ++ " " ++ subject)
 
 
 logPortedCached : Context -> PortedCache.Coordinate -> Task x {}
@@ -1237,7 +1327,15 @@ prepareOnePackage context permissions assets rootIdentity planned staging packag
             Task.succeed {}
 
         Nothing ->
-            maybeFormatPackage context.platform permissions.fileSystem permissions.childProcess assets.formatExecutable dir
+            logPhase context "format" package.manifest.name
+                |> Task.andThen
+                    (\_ ->
+                        maybeFormatPackage context.platform permissions.fileSystem permissions.childProcess assets.formatExecutable dir
+                    )
+                |> Task.andThen
+                    (\_ ->
+                        logPhase context "verify" package.manifest.name
+                    )
                 |> Task.andThen
                     (\_ ->
                         Verify.Package.verify context.platform
@@ -1791,16 +1889,14 @@ references to the namespaced names. Ported module names never collide with the
 built-in stdlib mappings (Elm guarantees globally unique module names), so this
 only ever adds entries.
 -}
-dependsOnHttp1 : Manifest -> Bool
-dependsOnHttp1 manifest =
-    let
-        isHttp1 key dependency =
-            (key == "elm/http")
-                && dependency.constraint.lower.major
-                == 1
-    in
-    Dict.any isHttp1 manifest.dependencies
-        || Dict.any isHttp1 manifest.testDependencies
+manifestDependencyRanges : Manifest -> Dict String Semver.Range
+manifestDependencyRanges manifest =
+    Dict.foldl
+        (\name dependency found ->
+            Dict.set name dependency.constraint found
+        )
+        (Dict.map (\_ dependency -> dependency.constraint) manifest.dependencies)
+        manifest.testDependencies
 
 
 overlayPortedModules : Dict String Acquire.PackageSource -> Registry -> Registry
@@ -1956,6 +2052,7 @@ finalizeAdd context permissions cliOptions output assets resolution planned =
 
                 manifestPath =
                     Path.join [ output, Path.fromPosixString "gren.json" ]
+
             in
             -- Validate and build the updated gren.json *before* writing packages,
             -- so a non-application project fails without leaving vendor debris.
@@ -1975,8 +2072,14 @@ finalizeAdd context permissions cliOptions output assets resolution planned =
                                 generateStagingPath packagesRoot
                                     |> Task.andThen
                                         (\staging ->
-                                            System.File.ensureDirectory permissions.fileSystem packagesRoot
-                                                |> Task.andThen (\_ -> System.File.ensureDirectory permissions.fileSystem staging)
+                                            System.File.ensureDirectory permissions.fileSystem staging
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        AddTransaction.seedStaging
+                                                            permissions.fileSystem
+                                                            packagesRoot
+                                                            staging
+                                                    )
                                                 |> Task.andThen
                                                     (\_ ->
                                                         writeVendored context
@@ -1988,22 +2091,50 @@ finalizeAdd context permissions cliOptions output assets resolution planned =
                                                     )
                                                 |> Task.andThen
                                                     (\_ ->
-                                                        atomicReplaceAdd permissions.fileSystem staging packagesRoot
+                                                        AddTransaction.commit permissions.fileSystem
+                                                            { destination = packagesRoot
+                                                            , staging = staging
+                                                            , manifestPath = manifestPath
+                                                            , updatedManifest = updatedManifest
+                                                            , validatePublished =
+                                                                -- D51: the vendored tree is OURS — it must compile
+                                                                -- as a package or the publication rolls back. The
+                                                                -- consumer application is theirs: a pre-existing
+                                                                -- error in it is reported, never fatal.
+                                                                Verify.Package.verify context.platform
+                                                                    permissions.childProcess
+                                                                    { packageDirectory =
+                                                                        Path.join
+                                                                            [ packagesRoot
+                                                                            , Path.fromPosixString libDirectory
+                                                                            ]
+                                                                    , grenExecutable = assets.grenExecutable
+                                                                    , isApplication = False
+                                                                    }
+                                                                    |> Task.andThen
+                                                                        (\_ ->
+                                                                            Verify.Package.verifyConsumer context.platform
+                                                                                permissions.childProcess
+                                                                                { applicationDirectory = output
+                                                                                , grenExecutable = assets.grenExecutable
+                                                                                , vendorDirectory = ".elm-to-gren/packages"
+                                                                                }
+                                                                        )
+                                                            }
                                                     )
                                                 |> Task.andThen
-                                                    (\_ ->
-                                                        System.File.writeText permissions.fileSystem manifestPath updatedManifest
-                                                            |> Task.map (\_ -> {})
-                                                    )
-                                                |> Task.map
-                                                    (\_ ->
-                                                        { output = output
-                                                        , rootPackage = rootIdentity.grenName
-                                                        , packageCount = Array.length planned.packages
-                                                        , testModuleCount = planned.testModuleCount
-                                                        , report = addReport rootIdentity libDirectory planned
-                                                        , behaviorMessage = Nothing
-                                                        }
+                                                    (\verdict ->
+                                                        logConsumerVerdict context verdict
+                                                            |> Task.map
+                                                                (\_ ->
+                                                                    { output = output
+                                                                    , rootPackage = rootIdentity.grenName
+                                                                    , packageCount = Array.length planned.packages
+                                                                    , testModuleCount = planned.testModuleCount
+                                                                    , report = addReport rootIdentity libDirectory planned
+                                                                    , behaviorMessage = Nothing
+                                                                    }
+                                                                )
                                                     )
                                                 |> Task.onError
                                                     (\error ->
@@ -2181,57 +2312,6 @@ generateStagingPath destination =
                             ++ uuid
                 in
                 Path.join [ parent, Path.fromPosixString name ]
-            )
-
-
-atomicReplaceAdd : FileSystem.Permission -> Path -> Path -> Task Error {}
-atomicReplaceAdd permission staging destination =
-    generateStagingPath destination
-        |> Task.andThen
-            (\backup ->
-                System.File.exists permission destination
-                    |> Task.andThen
-                        (\hadDestination ->
-                            if hadDestination then
-                                FileSystem.move permission backup destination
-                                    |> Task.map (\_ -> {})
-                                    |> Task.mapError
-                                        (\error ->
-                                            PortError.create "ADD_FAILED"
-                                                ("Could not back up existing packages: " ++ FileSystem.errorToString error)
-                                        )
-                                    |> Task.andThen
-                                        (\_ ->
-                                            FileSystem.move permission destination staging
-                                                |> Task.map (\_ -> {})
-                                                |> Task.mapError
-                                                    (\error ->
-                                                        PortError.create "ADD_FAILED"
-                                                            ("Could not publish vendored packages: " ++ FileSystem.errorToString error)
-                                                    )
-                                                |> Task.onError
-                                                    (\publishError ->
-                                                        FileSystem.move permission destination backup
-                                                            |> Task.map (\_ -> {})
-                                                            |> Task.onError (\_ -> Task.succeed {})
-                                                            |> Task.andThen (\_ -> Task.fail publishError)
-                                                    )
-                                        )
-                                    |> Task.andThen
-                                        (\_ ->
-                                            removeIfExistsAdd permission backup
-                                                |> Task.onError (\_ -> Task.succeed {})
-                                        )
-
-                            else
-                                FileSystem.move permission destination staging
-                                    |> Task.map (\_ -> {})
-                                    |> Task.mapError
-                                        (\error ->
-                                            PortError.create "ADD_FAILED"
-                                                ("Could not publish vendored packages: " ++ FileSystem.errorToString error)
-                                        )
-                        )
             )
 
 

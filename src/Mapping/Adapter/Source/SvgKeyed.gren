@@ -1,0 +1,18 @@
+module Mapping.Adapter.Source.SvgKeyed exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Svg.Keyed exposing (node)
+
+import Array exposing (Array)
+import Svg exposing (Attribute, Svg)
+import Svg.Keyed as Keyed
+
+
+node : String -> Array (Attribute msg) -> Array { first : String, second : Svg msg } -> Svg msg
+node tag attributes entries =
+    Keyed.node tag attributes
+        (Array.map (\\entry -> { key = entry.first, node = entry.second }) entries)
+"""
+

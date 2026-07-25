@@ -1,4 +1,4 @@
-module Ast.Reserved exposing ( apply, exportRenames, rewriteName )
+module Ast.Reserved exposing ( apply, applyWith, exportRenames, exportRenamesFrom, renameMap, rewriteName )
 
 {-| Rename identifiers that are keywords in Gren but ordinary names in Elm.
 
@@ -58,11 +58,24 @@ type alias Ctx =
     }
 
 
+{-| The module's local reserved-name escapes. `apply` and `exportRenames` both
+need exactly this, and computing it means walking every identifier in the file
+into a Dict; profiled at 7.7s of a 15s port when done twice per module. Compute
+it once and pass it to `applyWith` / `exportRenamesFrom`.
+-}
+renameMap : File -> Dict String String
+renameMap file =
+    buildRenameMap (collectOccupied file)
+
+
 apply : Dict String String -> File -> File
 apply packageExports file =
+    applyWith packageExports (renameMap file) file
+
+
+applyWith : Dict String String -> Dict String String -> File -> File
+applyWith packageExports renames file =
     let
-        renames =
-            buildRenameMap (collectOccupied file)
 
         ctx =
             { package = packageExports, local = renames }
@@ -83,6 +96,11 @@ entry equals its local escape.
 -}
 exportRenames : File -> Dict String String
 exportRenames file =
+    exportRenamesFrom file (renameMap file)
+
+
+exportRenamesFrom : File -> Dict String String -> Dict String String
+exportRenamesFrom file renames =
     let
         moduleName =
             file.moduleDefinition.moduleName
@@ -91,7 +109,7 @@ exportRenames file =
         (\reserved escaped acc ->
             Dict.set (moduleName ++ "." ++ reserved) escaped acc)
         Dict.empty
-        (buildRenameMap (collectOccupied file))
+        renames
 
 
 {-| Public helper: naive single underscore escape (no occupancy). Prefer `apply`

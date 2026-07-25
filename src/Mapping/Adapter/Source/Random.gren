@@ -1,0 +1,37 @@
+module Mapping.Adapter.Source.Random exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Random exposing (step, weighted, map4, map5)
+
+import Array exposing (Array)
+import Random exposing (Generator, Seed)
+
+
+step : Generator a -> Seed -> { first : a, second : Seed }
+step generator seed =
+    let
+        result =
+            Random.step generator seed
+    in
+    { first = result.value, second = result.seed }
+
+
+weighted : { first : Float, second : a } -> Array { first : Float, second : a } -> Generator a
+weighted first rest =
+    Random.weighted
+        { weight = first.first, value = first.second }
+        (Array.map (\\item -> { weight = item.first, value = item.second }) rest)
+
+
+map4 : (a -> b -> c -> d -> value) -> Generator a -> Generator b -> Generator c -> Generator d -> Generator value
+map4 fn ga gb gc gd =
+    Random.andMap gd (Random.map3 fn ga gb gc)
+
+
+map5 : (a -> b -> c -> d -> e -> value) -> Generator a -> Generator b -> Generator c -> Generator d -> Generator e -> Generator value
+map5 fn ga gb gc gd ge =
+    Random.andMap ge (map4 fn ga gb gc gd)
+"""
+

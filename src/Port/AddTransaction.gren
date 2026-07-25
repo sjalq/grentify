@@ -1,0 +1,274 @@
+module Port.AddTransaction exposing
+    ( Options
+    , commit
+    , seedStaging
+    )
+
+{-| Transactional publication for `elm-to-gren add`.
+
+The caller prepares a complete proposed package tree in `staging`. `commit`
+publishes that tree and the proposed manifest together, runs validation while
+both backups still exist, and restores both resources if any step fails.
+-}
+
+import Crypto
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Port.Error as PortError exposing (Error)
+import System.File
+import Task exposing (Task)
+
+
+{-| `validatePublished` runs while both backups still exist, so its failure
+rolls the whole publication back. Its VALUE is carried out to the caller: the
+validation is what learns whether the consumer's own sources compile, and
+that verdict has to reach the report (D51).
+-}
+type alias Options a =
+    { destination : Path
+    , staging : Path
+    , manifestPath : Path
+    , updatedManifest : String
+    , validatePublished : Task Error a
+    }
+
+
+type alias TransactionPaths =
+    { packageBackup : Path
+    , manifestBackup : Path
+    , stagedManifest : Path
+    }
+
+
+{-| Seed the proposed tree with all previously managed packages. The caller can
+then overwrite the directories belonging to the package graph being updated.
+-}
+seedStaging : FileSystem.Permission -> Path -> Path -> Task Error {}
+seedStaging permission existing staging =
+    System.File.exists permission existing
+        |> Task.andThen
+            (\exists ->
+                if exists then
+                    System.File.copyDirectoryContents permission existing staging
+
+                else
+                    Task.succeed {}
+            )
+
+
+commit : FileSystem.Permission -> Options a -> Task Error a
+commit permission options =
+    transactionPaths options
+        |> Task.andThen
+            (\paths ->
+                System.File.writeText permission paths.stagedManifest options.updatedManifest
+                    |> Task.andThen
+                        (\_ ->
+                            System.File.exists permission options.destination
+                                |> Task.andThen
+                                    (\hadPackages ->
+                                        publish permission options paths hadPackages
+                                            |> Task.andThen
+                                                (\verdict ->
+                                                    cleanupSuccess permission paths
+                                                        |> Task.map (\_ -> verdict)
+                                                )
+                                            |> Task.onError
+                                                (rollback permission options paths hadPackages)
+                                    )
+                        )
+                    |> Task.onError
+                        (\error ->
+                            removeIfExists permission paths.stagedManifest
+                                |> Task.onError (\_ -> Task.succeed {})
+                                |> Task.andThen (\_ -> Task.fail error)
+                        )
+            )
+
+
+publish : FileSystem.Permission -> Options a -> TransactionPaths -> Bool -> Task Error a
+publish permission options paths hadPackages =
+    (if hadPackages then
+        move permission paths.packageBackup options.destination "back up existing packages"
+
+     else
+        Task.succeed {}
+    )
+        |> Task.andThen
+            (\_ ->
+                move permission options.destination options.staging "publish proposed packages"
+            )
+        |> Task.andThen
+            (\_ ->
+                move permission paths.manifestBackup options.manifestPath "back up the application manifest"
+            )
+        |> Task.andThen
+            (\_ ->
+                move permission options.manifestPath paths.stagedManifest "publish the proposed application manifest"
+            )
+        |> Task.andThen (\_ -> options.validatePublished)
+
+
+rollback : FileSystem.Permission -> Options a -> TransactionPaths -> Bool -> Error -> Task Error a
+rollback permission options paths hadPackages originalError =
+    attempt "manifest restore"
+        (restorePath permission True options.manifestPath paths.manifestBackup)
+        |> Task.andThen
+            (\manifestFailure ->
+                attempt "package restore"
+                    (restorePath permission hadPackages options.destination paths.packageBackup)
+                    |> Task.andThen
+                        (\packageFailure ->
+                            attempt "staging cleanup"
+                                (removeIfExists permission options.staging)
+                                |> Task.andThen
+                                    (\stagingFailure ->
+                                        attempt "manifest staging cleanup"
+                                            (removeIfExists permission paths.stagedManifest)
+                                            |> Task.andThen
+                                                (\manifestStagingFailure ->
+                                                    let
+                                                        failures =
+                                                            [ manifestFailure
+                                                            , packageFailure
+                                                            , stagingFailure
+                                                            , manifestStagingFailure
+                                                            ]
+                                                                |> Array.mapAndKeepJust identity
+                                                    in
+                                                    if Array.isEmpty failures then
+                                                        Task.fail originalError
+
+                                                    else
+                                                        Task.fail <|
+                                                            PortError.create "ADD_ROLLBACK_FAILED"
+                                                                (PortError.toString originalError
+                                                                    ++ "\nRollback also failed: "
+                                                                    ++ String.join "; " failures
+                                                                )
+                                                )
+                                    )
+                        )
+            )
+
+
+restorePath : FileSystem.Permission -> Bool -> Path -> Path -> Task Error {}
+restorePath permission hadOriginal destination backup =
+    if hadOriginal then
+        System.File.exists permission backup
+            |> Task.andThen
+                (\backupExists ->
+                    if backupExists then
+                        removeIfExists permission destination
+                            |> Task.andThen
+                                (\_ ->
+                                    move permission destination backup "restore previous add state"
+                                )
+
+                    else
+                        Task.succeed {}
+                )
+
+    else
+        removeIfExists permission destination
+
+
+cleanupSuccess : FileSystem.Permission -> TransactionPaths -> Task Error {}
+cleanupSuccess permission paths =
+    removeIfExists permission paths.packageBackup
+        |> Task.onError (\_ -> Task.succeed {})
+        |> Task.andThen
+            (\_ ->
+                removeIfExists permission paths.manifestBackup
+                    |> Task.onError (\_ -> Task.succeed {})
+            )
+        |> Task.andThen
+            (\_ ->
+                removeIfExists permission paths.stagedManifest
+                    |> Task.onError (\_ -> Task.succeed {})
+            )
+
+
+attempt : String -> Task Error {} -> Task Error (Maybe String)
+attempt label task =
+    task
+        |> Task.map (\_ -> Nothing)
+        |> Task.onError
+            (\error ->
+                Task.succeed (Just (label ++ ": " ++ PortError.toString error))
+            )
+
+
+transactionPaths : Options a -> Task Error TransactionPaths
+transactionPaths options =
+    Task.map3
+        (\packageBackup manifestBackup stagedManifest ->
+            { packageBackup = packageBackup
+            , manifestBackup = manifestBackup
+            , stagedManifest = stagedManifest
+            }
+        )
+        (uniqueSibling options.destination "backup")
+        (uniqueSibling options.manifestPath "backup")
+        (uniqueSibling options.manifestPath "staging")
+
+
+uniqueSibling : Path -> String -> Task Error Path
+uniqueSibling destination role =
+    Crypto.getSecureContext
+        |> Task.mapError
+            (\_ ->
+                PortError.create "ADD_FAILED"
+                    "Secure randomness is unavailable for the add transaction."
+            )
+        |> Task.andThen Crypto.randomUuidV4
+        |> Task.map
+            (\uuid ->
+                let
+                    parent =
+                        Path.parentPath destination |> Maybe.withDefault Path.empty
+
+                    name =
+                        "."
+                            ++ Path.filenameWithExtension destination
+                            ++ ".elm-to-gren-"
+                            ++ role
+                            ++ "-"
+                            ++ uuid
+                in
+                Path.join [ parent, Path.fromPosixString name ]
+            )
+
+
+move : FileSystem.Permission -> Path -> Path -> String -> Task Error {}
+move permission destination source action =
+    FileSystem.move permission destination source
+        |> Task.map (\_ -> {})
+        |> Task.mapError
+            (\error ->
+                PortError.create "ADD_FAILED"
+                    ("Could not " ++ action ++ ": " ++ FileSystem.errorToString error)
+            )
+
+
+removeIfExists : FileSystem.Permission -> Path -> Task Error {}
+removeIfExists permission path =
+    System.File.exists permission path
+        |> Task.andThen
+            (\exists ->
+                if exists then
+                    FileSystem.remove permission { recursive = True } path
+                        |> Task.map (\_ -> {})
+                        |> Task.mapError
+                            (\error ->
+                                PortError.create "ADD_FAILED"
+                                    ("Could not remove "
+                                        ++ Path.toPosixString path
+                                        ++ ": "
+                                        ++ FileSystem.errorToString error
+                                    )
+                            )
+
+                else
+                    Task.succeed {}
+            )

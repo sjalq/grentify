@@ -28,10 +28,17 @@ const {
   classifyFail,
 } = require("../test/ecosystem/lib/suite.cjs");
 const { gitStamp } = require("../test/ecosystem/lib/git-stamp.cjs");
+const {
+  extractEvidence,
+  failureSignature,
+} = require("../test/ecosystem/lib/failure-signature.cjs");
 
 const root = path.resolve(__dirname, "..");
 const snapshotPath = path.join(root, "test/ecosystem/registry-snapshot.json");
-const walkLogPath = path.join(root, "test/ecosystem/walk-log.jsonl");
+// Ground truth by default. `--log` points experiments (throughput probes,
+// class drains, bisects) at a scratch log so a dirty tree can never append
+// to the committed record.
+let walkLogPath = path.join(root, "test/ecosystem/walk-log.jsonl");
 // Shared with the curated suites: months of elm-home, review-app, source,
 // and extract-cache warmth; content-addressed, so the walk only adds to it.
 // Override with --cache for an isolated run.
@@ -69,11 +76,35 @@ const EXEMPT_SIGNATURES = [
   { pattern: /Elm\.Kernel|KERNEL/i, reason: "kernel:source" },
   { pattern: /\[glsl\||GLSL/, reason: "glsl:source" },
   { pattern: /effect module/i, reason: "effect-module:source" },
+  // Genuinely gone upstream: the coordinate's GitHub tag no longer exists, so
+  // `elm install` cannot fetch it either (spot-checked against the zipball URL
+  // Elm itself uses). Terminal per §1.
   {
-    pattern: /SOURCE_CLONE_FAILED|ARCHIVE_INVALID|SOURCE_MANIFEST_MISMATCH|SOURCE_INVALID|DOWNLOAD_FAILED|couldn't find a compatible version|NO_ELM_SOURCES/,
+    pattern: /SOURCE_CLONE_FAILED|DOWNLOAD_FAILED|couldn't find a compatible version|NO_ELM_SOURCES/,
     reason: "broken-upstream:unfetchable",
   },
 ];
+
+/**
+ * D51: OUR refusals, previously filed as `broken-upstream:unfetchable` — 67 of
+ * M5's 301 exemptions. A package we decline to unpack is a working failure
+ * (§1 admits no tool-policy exemption); filing it as upstream breakage made it
+ * terminal and therefore invisible to every later drain.
+ */
+const TOOL_REFUSAL_SIGNATURES = [
+  { pattern: /ARCHIVE_INVALID/, reason: "tool-archive-refused" },
+  {
+    pattern: /SOURCE_INVALID|SOURCE_MANIFEST_MISMATCH/,
+    reason: "tool-identity-mismatch",
+  },
+];
+
+function classifyToolRefusal(text) {
+  for (const sig of TOOL_REFUSAL_SIGNATURES) {
+    if (sig.pattern.test(text)) return sig.reason;
+  }
+  return null;
+}
 
 function classifyExempt(text) {
   for (const sig of EXEMPT_SIGNATURES) {
@@ -176,7 +207,11 @@ function selfTest() {
     ["contains [glsl| shader", "glsl:source"],
     ["this is an effect module", "effect-module:source"],
     ["SOURCE_CLONE_FAILED: gone", "broken-upstream:unfetchable"],
+    ["DOWNLOAD_FAILED: Bad status: 404 - Not Found", "broken-upstream:unfetchable"],
     ["TYPE MISMATCH in Main.elm", null],
+    // D51: our own refusals must NOT be exempt — they stay in the queue.
+    ["ARCHIVE_INVALID: Package archive contains a symbolic link.", null],
+    ["SOURCE_INVALID: Downloaded Elm package identity does not match.", null],
   ];
   for (const [text, want] of exemptCases) {
     const got = classifyExempt(text);
@@ -185,11 +220,27 @@ function selfTest() {
       console.error(`FAIL exempt "${text}": got ${got}, want ${want}`);
     }
   }
+  const refusalCases = [
+    ["ARCHIVE_INVALID: contains a symbolic link.", "tool-archive-refused"],
+    ["SOURCE_INVALID: identity does not match", "tool-identity-mismatch"],
+    ["SOURCE_MANIFEST_MISMATCH: nope", "tool-identity-mismatch"],
+    ["DOWNLOAD_FAILED: 404", null],
+    ["TYPE MISMATCH in Main.gren", null],
+  ];
+  for (const [text, want] of refusalCases) {
+    const got = classifyToolRefusal(text);
+    if (got !== want) {
+      failed += 1;
+      console.error(`FAIL tool-refusal "${text}": got ${got}, want ${want}`);
+    }
+  }
   if (failed > 0) {
     console.error(`walker self-test: ${failed} failure(s)`);
     process.exit(1);
   }
-  console.log(`walker self-test: ${cases.length + exemptCases.length} checks green`);
+  console.log(
+    `walker self-test: ${cases.length + exemptCases.length + refusalCases.length} checks green`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +273,7 @@ function parseArgs(argv) {
       opts.concurrency = defaultConcurrency(Number(argv[++i]));
     else if (a === "--timeout-ms") opts.timeoutMs = Number(argv[++i]);
     else if (a === "--cache") opts.cacheDir = String(argv[++i] || defaultCacheDir);
+    else if (a === "--log") opts.logPath = path.resolve(String(argv[++i] || ""));
   }
   return opts;
 }
@@ -325,12 +377,20 @@ async function portOne(entry, stamp, opts) {
       evidence: text.split("\n").filter(Boolean).slice(-4).join("\n").slice(0, 500),
     };
   }
+  // D52: evidence is the error-bearing slice, never the blind tail. Download
+  // chatter is the last thing printed on most failures, so slice(-4) banked
+  // 447 of M5's 534 failures with nothing triageable in them — every one of
+  // those had to be re-run solo to be diagnosed. `signature` is the
+  // root-cause fingerprint the drain loop groups by (npm run ecosystem:clusters).
+  const { signature } = failureSignature(text);
   return {
     status: "working-failure",
-    reason: classifyFail(text, result.status, verified),
+    reason:
+      classifyToolRefusal(text) || classifyFail(text, result.status, verified),
     platform,
     ms,
-    evidence: text.split("\n").filter(Boolean).slice(-4).join("\n").slice(0, 500),
+    signature,
+    evidence: extractEvidence(text),
   };
 }
 
@@ -344,6 +404,11 @@ async function main() {
   if (freeBytes() < MIN_FREE_BYTES * 2) {
     console.error("[walk] refusing to start: need at least 4GB free disk");
     process.exit(3);
+  }
+  if (opts.logPath) {
+    walkLogPath = opts.logPath;
+    fs.mkdirSync(path.dirname(walkLogPath), { recursive: true });
+    console.log(`[walk] SCRATCH LOG ${walkLogPath} — ground truth untouched`);
   }
   const snapshot = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
   const stamp = gitStamp(root);

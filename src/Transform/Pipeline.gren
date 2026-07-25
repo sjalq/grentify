@@ -27,19 +27,11 @@ only for hand-crafted / legacy extractions without an encoded AST.
 -}
 
 import Array exposing (Array)
+import Array.Builder as Builder
 import Ast.Decode as AstDecode
 import Ast.CtorHome as AstCtorHome
-import Ast.CtorLaw as AstCtorLaw
-import Ast.MatchCompile as AstMatchCompile
-import Ast.NameSub as AstNameSub
-import Ast.Print as AstPrint
-import Ast.RecordAlias as AstRecordAlias
-import Ast.BareResolve as AstBareResolve
-import Ast.IndexClamp as AstIndexClamp
 import Ast.KeyEncode as AstKeyEncode
 import Ast.TupleCompare as AstTupleCompare
-import Ast.Reserved as AstReserved
-import Ast.Types exposing (File)
 import Char
 import Dict exposing (Dict)
 import Json.Decode as Decode
@@ -51,6 +43,8 @@ import Port.Error as PortError exposing (Error)
 import Result exposing (Result(..))
 import Review.Protocol as Protocol
 import Transform.Lexical as Lexical
+import Transform.AstPipeline as AstPipeline
+import Transform.Evidence as Evidence
 import Transform.SourceEdit as SourceEdit exposing (EditKind(..), SourceEdit, SourceError)
 
 
@@ -387,54 +381,11 @@ transform registry depMaps extraction sources =
         |> Result.andThen
             (\_ ->
                 let
-                    -- Collect package-wide maps *after* NameSub so keys match
-                    -- transformed module names (`Elm.Internal.Model.StyleClass`)
-                    -- and import-alias indexes (`Internal.StyleClass`) used by
-                    -- RecordAlias / CtorLaw / MatchCompile.
-                    -- D24: cross-module return-shape evidence must be in ELM
-                    -- names (TupleCompare runs pre-NameSub), so collect after
-                    -- BareResolve only.
-                    packageTupleReturns =
-                        collectPackageTupleReturns extraction.modules
-
-                    -- D24b evidence (Elm names, pre-NameSub like D24).
-                    packageKeyEvidence =
-                        collectPackageKeyEvidence extraction.modules
-
-                    -- D46 evidence (Elm names): ctor name -> declaring modules.
-                    packageCtorHomes =
-                        collectPackageCtorHomes extraction.modules
-
-                    packageRecordAliases =
-                        collectPackageRecordAliases registry extraction.modules
-
-                    ownCtorArities =
-                        collectPackageCtorArities registry extraction.modules
-
-                    -- D45: dependency ctor arities merged UNDER this
-                    -- package's own (own keys win on collision), so
-                    -- CtorLaw recordifies partial applications of
-                    -- cross-package ctors (elm-syntax's Node etc.).
-                    packageCtorArities =
-                        Dict.foldl Dict.set depMaps.ctorArities ownCtorArities
-
-                    -- D45b: dependency sole ctors merged the same way, so
-                    -- MatchCompile destructures them without the dead `_`
-                    -- arm that panics Gren 0.6.6 on record payloads.
-                    packageSoleCtors =
-                        Dict.foldl Dict.set depMaps.soleCtors
-                            (collectPackageSoleCtors registry extraction.modules)
-
-                    -- Reserved renames escape per-module, so a caller must not
-                    -- re-decide a callee's exported name; collect every
-                    -- module's own decision so cross-module references stay in
-                    -- sync. Built off the same lowering chain the per-module
-                    -- transform runs, so keys/occupancy match exactly.
-                    packageReservedExports =
-                        collectPackageReservedExports registry
-                            packageRecordAliases
-                            packageCtorArities
-                            packageSoleCtors
+                    packageEvidence =
+                        Evidence.collect registry
+                            { constructorArities = depMaps.ctorArities
+                            , soleConstructors = depMaps.soleCtors
+                            }
                             extraction.modules
                 in
                 sources
@@ -446,25 +397,24 @@ transform registry depMaps extraction sources =
                                     (\modules ->
                                         findMatchingExtraction source.path extraction.modules
                                             |> Result.andThen
-                                                (transformModule registry
-                                                    packageTupleReturns
-                                                    packageCtorHomes
-                                                    packageKeyEvidence
-                                                    packageRecordAliases
-                                                    packageCtorArities
-                                                    packageSoleCtors
-                                                    packageReservedExports
-                                                    source
-                                                )
+                                                (transformModuleWithEvidence
+                                                    registry packageEvidence
+                                                    source)
                                             |> Result.map (\module_ -> Array.pushLast module_ modules)
                                     )
                         )
                         (Ok [])
+                    |> Result.map
+                        (\transformedModules ->
+                            { evidence = packageEvidence
+                            , modules = transformedModules
+                            }
+                        )
             )
         |> Result.andThen
-            (\transformedModules ->
+            (\collected ->
                 normalizeRequiredAdapters
-                    (Array.flatten (Array.map .requiredAdapters transformedModules))
+                    (Array.flatten (Array.map .requiredAdapters collected.modules))
                     |> Result.map
                         (\requiredAdapters ->
                             let
@@ -473,219 +423,59 @@ transform registry depMaps extraction sources =
 
                                 diagnostics =
                                     Array.append globalDiagnostics
-                                        (Array.flatten (Array.map .diagnostics transformedModules))
+                                        (Array.flatten
+                                            (Array.map .diagnostics
+                                                collected.modules))
                             in
-                            { modules = Array.map .generated transformedModules
-                            , transformedModules = transformedModules
+                            { modules = Array.map .generated collected.modules
+                            , transformedModules = collected.modules
                             , diagnostics = diagnostics
                             , requiredAdapters = requiredAdapters
-                            , detectedPlatform = aggregatePlatform transformedModules
+                            , detectedPlatform =
+                                aggregatePlatform collected.modules
                             , depExports =
                                 { ctorArities =
-                                    collectPackageCtorArities registry extraction.modules
+                                    collected.evidence.exports.constructorArities
                                 , soleCtors =
-                                    collectPackageSoleCtors registry extraction.modules
+                                    collected.evidence.exports.soleConstructors
                                 }
                             }
                         )
             )
 
 
-{-| `"Module.AliasName"` → ordered record field names, from every AST in the package.
--}
-collectPackageRecordAliases :
-    Registry
-    -> Array Protocol.ModuleExtraction
-    -> Dict String (Array String)
-collectPackageRecordAliases registry modules =
-    foldNamedAsts registry modules AstRecordAlias.collectFromFile Dict.empty
-
-
-{-| D24 evidence index: `"Module.fn"` → element shape, for every function
-whose signature returns a list of tuples. Elm names (BareResolve only —
-TupleCompare consumes this pre-NameSub).
--}
-collectPackageTupleReturns :
-    Array Protocol.ModuleExtraction
-    -> Dict String (Array AstTupleCompare.ElemShape)
-collectPackageTupleReturns modules =
-    Array.foldl
-        (\moduleExtraction acc ->
-            when moduleExtraction.ast is
-                Nothing ->
-                    acc
-
-                Just astValue ->
-                    when AstDecode.decode astValue is
-                        Err _ ->
-                            acc
-
-                        Ok file ->
-                            let
-                                resolved =
-                                    AstBareResolve.apply file
-                            in
-                            Array.foldl
-                                (\declaration inner ->
-                                    when declaration is
-                                        Ast.Types.DeclFunction { name = name, signature = Just sig } ->
-                                            when AstTupleCompare.returnListShape sig.typeAnnotation is
-                                                Just shape ->
-                                                    Dict.set
-                                                        (resolved.moduleDefinition.moduleName ++ "." ++ name)
-                                                        shape
-                                                        inner
-
-                                                Nothing ->
-                                                    inner
-
-                                        _ ->
-                                            inner
-                                )
-                                acc
-                                resolved.declarations
-        )
-        Dict.empty
-        modules
-
-
-{-| D24b evidence: eligible tuple-key aliases + tuple-keyed record
-fields, package-wide. Elm names (BareResolve only — KeyEncode consumes
-this pre-NameSub).
--}
-collectPackageKeyEvidence :
-    Array Protocol.ModuleExtraction
-    -> AstKeyEncode.Evidence
-collectPackageKeyEvidence modules =
-    Array.mapAndKeepJust
-        (\moduleExtraction ->
-            moduleExtraction.ast
-                |> Maybe.andThen
-                    (\astValue ->
-                        when AstDecode.decode astValue is
-                            Err _ ->
-                                Nothing
-
-                            Ok file ->
-                                Just (AstBareResolve.apply file)
-                    )
-        )
-        modules
-        |> AstKeyEncode.collectEvidence
-
-
-{-| D46 evidence: ctor name -> declaring modules, package-wide (Elm names,
-BareResolve only — CtorHome consumes this pre-NameSub).
--}
-collectPackageCtorHomes :
-    Array Protocol.ModuleExtraction
-    -> AstCtorHome.Homes
-collectPackageCtorHomes modules =
-    Array.mapAndKeepJust
-        (\moduleExtraction ->
-            moduleExtraction.ast
-                |> Maybe.andThen
-                    (\astValue ->
-                        when AstDecode.decode astValue is
-                            Err _ ->
-                                Nothing
-
-                            Ok file ->
-                                Just (AstBareResolve.apply file)
-                    )
-        )
-        modules
-        |> AstCtorHome.collectHomes
-
-
-{-| `"Module.Ctor"` → arity (≥ 2), from every AST in the package.
--}
 collectPackageCtorArities :
     Registry
     -> Array Protocol.ModuleExtraction
     -> Dict String Int
-collectPackageCtorArities registry modules =
-    foldNamedAsts registry modules AstCtorLaw.collectFromFile Dict.empty
+collectPackageCtorArities =
+    Evidence.collectConstructorArities
 
 
-{-| Sole custom-type constructors (`Module.Ctor` + short name) for irrefutable peels.
--}
 collectPackageSoleCtors :
     Registry
     -> Array Protocol.ModuleExtraction
     -> Dict String {}
-collectPackageSoleCtors registry modules =
-    foldNamedAsts registry modules AstMatchCompile.collectSoleCtorsFromFile Dict.empty
+collectPackageSoleCtors =
+    Evidence.collectSoleConstructors
 
 
-{-| `"Module.reserved"` → escaped export name, from every AST in the package.
-Lowered through the same NameSub → RecordAlias → CtorLaw → MatchCompile chain a
-module runs before `AstReserved.apply`, so a module's own package entry equals
-the local escape `apply` derives — the invariant that keeps cross-module
-qualified references and import `exposing` lists in sync.
--}
-collectPackageReservedExports :
+transformModuleWithEvidence :
     Registry
-    -> Dict String (Array String)
-    -> Dict String Int
-    -> Dict String {}
-    -> Array Protocol.ModuleExtraction
-    -> Dict String String
-collectPackageReservedExports registry recordAliases ctorArities soleCtors modules =
-    Array.foldl
-        (\moduleExtraction acc ->
-            when moduleExtraction.ast is
-                Nothing ->
-                    acc
-
-                Just astValue ->
-                    when AstDecode.decode astValue is
-                        Err _ ->
-                            acc
-
-                        Ok file ->
-                            let
-                                lowered =
-                                    file
-                                        |> AstBareResolve.apply
-                                        |> AstNameSub.apply registry
-                                        |> AstRecordAlias.apply recordAliases
-                                        |> AstCtorLaw.apply ctorArities
-                                        |> AstMatchCompile.compile soleCtors
-                            in
-                            Dict.foldl Dict.set acc
-                                (AstReserved.exportRenames lowered)
-        )
-        Dict.empty
-        modules
-
-
-{-| Decode each module AST, apply NameSub, then merge `collect` into `acc`.
--}
-foldNamedAsts :
-    Registry
-    -> Array Protocol.ModuleExtraction
-    -> (File -> Dict String a)
-    -> Dict String a
-    -> Dict String a
-foldNamedAsts registry modules collect acc =
-    Array.foldl
-        (\moduleExtraction inner ->
-            when moduleExtraction.ast is
-                Nothing ->
-                    inner
-
-                Just astValue ->
-                    when AstDecode.decode astValue is
-                        Err _ ->
-                            inner
-
-                        Ok file ->
-                            Dict.foldl Dict.set inner
-                                (collect (AstNameSub.apply registry (AstBareResolve.apply file)))
-        )
-        acc
-        modules
+    -> Evidence.PackageEvidence
+    -> SourceFile
+    -> Protocol.ModuleExtraction
+    -> Result Error TransformedModule
+transformModuleWithEvidence registry evidence =
+    transformModule registry
+        evidence.tupleReturns
+        evidence.constructorHomes
+        evidence.keyEvidence
+        evidence.recordAliases
+        evidence.constructorArities
+        evidence.soleConstructors
+        evidence.reservedExports
+        evidence.prepared
 
 
 transformModule :
@@ -697,10 +487,11 @@ transformModule :
     -> Dict String Int
     -> Dict String {}
     -> Dict String String
+    -> Dict String AstPipeline.Prepared
     -> SourceFile
     -> Protocol.ModuleExtraction
     -> Result Error TransformedModule
-transformModule registry packageTupleReturns packageCtorHomes packageKeyEvidence packageRecordAliases packageCtorArities packageSoleCtors packageReservedExports input extraction =
+transformModule registry packageTupleReturns packageCtorHomes packageKeyEvidence packageRecordAliases packageCtorArities packageSoleCtors packageReservedExports packagePrepared input extraction =
     toGrenSourcePath input.path
         |> Result.andThen
             (\outputPath ->
@@ -737,6 +528,7 @@ transformModule registry packageTupleReturns packageCtorHomes packageKeyEvidence
                             packageCtorArities
                             packageSoleCtors
                             packageReservedExports
+                            packagePrepared
                             input
                             extraction
                             outputPath
@@ -753,12 +545,13 @@ transformModuleViaAst :
     -> Dict String Int
     -> Dict String {}
     -> Dict String String
+    -> Dict String AstPipeline.Prepared
     -> SourceFile
     -> Protocol.ModuleExtraction
     -> String
     -> Decode.Value
     -> Result Error TransformedModule
-transformModuleViaAst registry packageTupleReturns packageCtorHomes packageKeyEvidence packageRecordAliases packageCtorArities packageSoleCtors packageReservedExports input extraction outputPath astValue =
+transformModuleViaAst registry packageTupleReturns packageCtorHomes packageKeyEvidence packageRecordAliases packageCtorArities packageSoleCtors packageReservedExports packagePrepared input extraction outputPath astValue =
     when AstDecode.decode astValue is
         Err decodeError ->
             Err <|
@@ -771,45 +564,55 @@ transformModuleViaAst registry packageTupleReturns packageCtorHomes packageKeyEv
 
         Ok file ->
             let
-                lowered =
-                    file
-                        |> AstBareResolve.apply
-                        |> AstCtorHome.apply packageCtorHomes
-                        |> AstIndexClamp.apply
-                        |> AstTupleCompare.apply packageTupleReturns
-                        |> AstKeyEncode.apply packageKeyEvidence
-                        |> AstNameSub.apply registry
-                        |> AstRecordAlias.apply packageRecordAliases
-                        |> AstCtorLaw.apply packageCtorArities
-                        |> AstMatchCompile.compile packageSoleCtors
-                        |> AstReserved.apply packageReservedExports
+                -- The lowering prefix already ran for this module during
+                -- evidence collection; finish from that value instead of
+                -- redoing BareResolve/NameSub/RecordAlias/CtorLaw/MatchCompile.
+                -- The fallback covers a module the evidence pass could not
+                -- decode, which cannot reach here (this branch decoded it).
+                translated =
+                    when Dict.get extraction.moduleName packagePrepared is
+                        Just prepared ->
+                            AstPipeline.finish packageReservedExports prepared
 
-                printed =
-                    AstPrint.print lowered
+                        Nothing ->
+                            AstPipeline.run registry
+                                { tupleReturns = packageTupleReturns
+                                , constructorHomes = packageCtorHomes
+                                , keyEvidence = packageKeyEvidence
+                                , recordAliases = packageRecordAliases
+                                , constructorArities = packageCtorArities
+                                , soleConstructors = packageSoleCtors
+                                , reservedExports = packageReservedExports
+                                }
+                                file
             in
-            if AstMatchCompile.hasUnportedListPatterns lowered then
-                Err <|
-                    PortError.create "AST_UNPORTED_LIST"
-                        ("Host match compiler left unported list/cons patterns in "
-                            ++ extraction.moduleName
-                            ++ " ("
-                            ++ input.path
-                            ++ "): "
-                            ++ AstMatchCompile.unportedListSummary lowered
-                            ++ ". Extend Ast.MatchCompile rather than range-edit fallback."
-                        )
+            when translated.unportedListSummary is
+                Just summary ->
+                    Err <|
+                        PortError.create "AST_UNPORTED_LIST"
+                            ("Host match compiler left unported list/cons patterns in "
+                                ++ extraction.moduleName
+                                ++ " ("
+                                ++ input.path
+                                ++ "): "
+                                ++ summary
+                                ++ ". Extend Ast.MatchCompile rather than range-edit fallback."
+                            )
 
-            else if String.contains "unported-cons-pattern" printed then
-                Err <|
-                    PortError.create "AST_UNPORTED_LIST"
-                        ("Printer left unported list-cons markers in "
-                            ++ extraction.moduleName
-                            ++ "."
-                        )
+                Nothing ->
+                    if translated.hasUnportedMarker then
+                        Err <|
+                            PortError.create "AST_UNPORTED_LIST"
+                                ("Printer left unported list-cons markers in "
+                                    ++ extraction.moduleName
+                                    ++ "."
+                                )
 
-            else
-                finalizeTransformedModule registry input extraction outputPath printed [] [] []
-                    |> Result.map (withTransformPath input extraction "ast")
+                    else
+                        finalizeTransformedModule registry input extraction
+                            outputPath translated.source [] [] []
+                            |> Result.map
+                                (withTransformPath input extraction "ast")
 
 withTransformPath :
     SourceFile
@@ -925,6 +728,7 @@ finalizeTransformedModule registry input extraction outputPath source reviewEdit
 
                                 diagnostics =
                                     addUnsupportedDiagnostics input extraction finalSource extractedDiagnostics
+                                        |> addGuaranteeDiagnostics input extraction finalSource
                             in
                             { generated =
                                 { moduleName = extraction.moduleName
@@ -1646,9 +1450,9 @@ moduleImportInsertionOffset source tokens =
                         Just close ->
                             let
                                 afterWhitespace =
-                                    skipWhitespace (String.toArray source) close.endOffset
+                                    skipWhitespace (sourceCharacters source) close.endOffset
                             in
-                            if matchesCharactersAt (String.toArray source) afterWhitespace [ '{', '-', '|' ] then
+                            if matchesCharactersAt (sourceCharacters source) afterWhitespace [ '{', '-', '|' ] then
                                 skipBlockComment (String.toArray source) (afterWhitespace + 2) 1
 
                             else
@@ -1745,6 +1549,62 @@ addUnsupportedDiagnostics input extraction source diagnostics =
         withEffect
 
 
+{-| Approximate mappings are allowed to produce output, but never silently.
+Exact and representation-changing rules need no warning; unsupported source is
+handled by `addUnsupportedDiagnostics`.
+-}
+addGuaranteeDiagnostics
+    : SourceFile
+    -> Protocol.ModuleExtraction
+    -> String
+    -> Array Diagnostic
+    -> Array Diagnostic
+addGuaranteeDiagnostics input extraction source diagnostics =
+    let
+        tokens =
+            scanCodeTokens source
+
+        approximateTargets =
+            tokens
+                |> Array.indexedFoldl
+                    (\index _ found ->
+                        when fullQualifiedNameAt source tokens index is
+                            Just qualified ->
+                                if Adapter.guaranteeForTarget qualified.name == Mapping.Types.Approximate then
+                                    Dict.set qualified.name {} found
+
+                                else
+                                    found
+
+                            Nothing ->
+                                found
+                    )
+                    Dict.empty
+                |> Dict.keys
+    in
+    if Array.isEmpty approximateTargets then
+        diagnostics
+
+    else if Array.any (\diagnostic -> diagnostic.code == "APPROXIMATE_TRANSLATION") diagnostics then
+        diagnostics
+
+    else
+        Array.pushLast
+            { path = Just input.path
+            , moduleName = Just extraction.moduleName
+            , code = "APPROXIMATE_TRANSLATION"
+            , severity = "warning"
+            , message =
+                "Approximate compatibility behavior is used for: "
+                    ++ String.join ", " approximateTargets
+            , range = Nothing
+            , help =
+                Just
+                    "Review these calls manually or replace them with a behavior-preserving Gren implementation."
+            }
+            diagnostics
+
+
 addSyntheticDiagnostic
     : SourceFile
     -> Protocol.ModuleExtraction
@@ -1827,55 +1687,81 @@ ensureTrailingNewline source =
         source ++ "\n"
 
 
+{-| `String.toArray` is O(n^2) in gren-lang/core 7.4.2: it is
+`foldl Array.pushLast []`, and `Array.pushLast` is `toSpliced`, which copies
+the whole array on every character. Profiling a single 100KB module showed
+this one call dominating the entire port. Same fold, Builder accumulator,
+linear.
+-}
+sourceCharacters : String -> Array Char
+sourceCharacters source =
+    String.foldl Builder.pushLast (Builder.empty (String.count source)) source
+        |> Builder.toArray
+
+
 scanCodeTokens : String -> Array CodeToken
 scanCodeTokens source =
-    scanTokensFrom (String.toArray source) 0 []
+    -- Builder, not Array: `Builder.pushLast` is `toSpliced`, which COPIES the
+    -- whole array on every push, so an accumulator loop over N tokens is
+    -- O(N^2). Measured before this change: elm-community/list-extra spent
+    -- 97.5s of a 101s port inside transform. Builder.pushLast is amortized
+    -- O(1) and the array materializes once.
+    Builder.toArray (scanTokensFrom (sourceCharacters source) 0 (Builder.empty 1024))
 
 
-scanTokensFrom : Array Char -> Int -> Array CodeToken -> Array CodeToken
+scanTokensFrom : Array Char -> Int -> Builder.Builder CodeToken -> Builder.Builder CodeToken
 scanTokensFrom characters offset tokens =
     -- Every recursive call below binds its arguments first: Gren only
     -- eliminates direct self tail calls, so `recurse a (g b) c` or
     -- `recurse a b <| build c` overflow the stack on large files.
+    --
+    -- Hot loop: this runs once per character of every module. It was written
+    -- with `matchesCharactersAt` (13 Array.get calls per character, each
+    -- allocating a Maybe, with a fold that never short-circuits) and
+    -- `String.contains (String.fromArray [ character ]) "..."` (a fresh
+    -- one-character String per character per class test). Profiled at 33s of
+    -- an 80s port. The multi-character forms are now guarded by their first
+    -- character and the class tests are direct Char comparisons.
     when Array.get offset characters is
         Nothing ->
             tokens
 
         Just character ->
-            if matchesCharactersAt characters offset [ '-', '-' ] then
+            if character == '-' && charAt characters (offset + 1) == Just '-' then
                 let
                     next =
                         skipLineComment characters (offset + 2)
                 in
                 scanTokensFrom characters next tokens
 
-            else if matchesCharactersAt characters offset [ '{', '-' ] then
+            else if character == '{' && charAt characters (offset + 1) == Just '-' then
                 let
                     next =
                         skipBlockComment characters (offset + 2) 1
                 in
                 scanTokensFrom characters next tokens
 
-            else if matchesCharactersAt characters offset [ '[', 'g', 'l', 's', 'l', '|' ] then
+            else if character == '[' && matchesCharactersAt characters offset [ '[', 'g', 'l', 's', 'l', '|' ] then
                 let
                     next =
                         skipGlsl characters (offset + 6)
                 in
                 scanTokensFrom characters next tokens
 
-            else if matchesCharactersAt characters offset [ '"', '"', '"' ] then
-                let
-                    next =
-                        skipMultilineString characters (offset + 3)
-                in
-                scanTokensFrom characters next tokens
-
             else if character == '"' then
-                let
-                    next =
-                        skipQuoted characters '"' (offset + 1)
-                in
-                scanTokensFrom characters next tokens
+                if charAt characters (offset + 1) == Just '"' && charAt characters (offset + 2) == Just '"' then
+                    let
+                        next =
+                            skipMultilineString characters (offset + 3)
+                    in
+                    scanTokensFrom characters next tokens
+
+                else
+                    let
+                        next =
+                            skipQuoted characters '"' (offset + 1)
+                    in
+                    scanTokensFrom characters next tokens
 
             else if character == '\'' then
                 let
@@ -1890,7 +1776,7 @@ scanTokensFrom characters offset tokens =
                         scanIdentifierEnd characters (offset + 1)
 
                     nextTokens =
-                        Array.pushLast
+                        Builder.pushLast
                             { kind = IdentifierToken
                             , text = String.fromArray (Array.slice offset tokenEnd characters)
                             , startOffset = offset
@@ -1903,16 +1789,16 @@ scanTokensFrom characters offset tokens =
             else if character == '.' then
                 let
                     nextTokens =
-                        Array.pushLast
+                        Builder.pushLast
                             { kind = DotToken, text = ".", startOffset = offset, endOffset = offset + 1 }
                             tokens
                 in
                 scanTokensFrom characters (offset + 1) nextTokens
 
-            else if String.contains (String.fromArray [ character ]) "()[]{};," then
+            else if isPunctuationChar character then
                 let
                     nextTokens =
-                        Array.pushLast
+                        Builder.pushLast
                             { kind = PunctuationToken
                             , text = String.fromArray [ character ]
                             , startOffset = offset
@@ -1922,13 +1808,13 @@ scanTokensFrom characters offset tokens =
                 in
                 scanTokensFrom characters (offset + 1) nextTokens
 
-            else if String.contains (String.fromArray [ character ]) "+-/*=.$<>:&|^!?%#@~\\" then
+            else if isOperatorChar character then
                 let
                     tokenEnd =
                         scanOperatorEnd characters (offset + 1)
 
                     nextTokens =
-                        Array.pushLast
+                        Builder.pushLast
                             { kind = OperatorToken
                             , text = String.fromArray (Array.slice offset tokenEnd characters)
                             , startOffset = offset
@@ -1940,6 +1826,56 @@ scanTokensFrom characters offset tokens =
 
             else
                 scanTokensFrom characters (offset + 1) tokens
+
+
+charAt : Array Char -> Int -> Maybe Char
+charAt characters offset =
+    Array.get offset characters
+
+
+{-| `()[]{};,`. A `when` on Char literals compiles to primitive comparisons;
+an `||` chain of `character == 'x'` compiles to one `_Utils_eq` CALL per
+alternative, which profiled at 5.1s of a 20s port across these two functions.
+-}
+isPunctuationChar : Char -> Bool
+isPunctuationChar character =
+    when character is
+        '(' -> True
+        ')' -> True
+        '[' -> True
+        ']' -> True
+        '{' -> True
+        '}' -> True
+        ';' -> True
+        ',' -> True
+        _ -> False
+
+
+{-| `+-/*=.$<>:&|^!?%#@~\\` — see `isPunctuationChar` for why this is a `when`. -}
+isOperatorChar : Char -> Bool
+isOperatorChar character =
+    when character is
+        '+' -> True
+        '-' -> True
+        '/' -> True
+        '*' -> True
+        '=' -> True
+        '.' -> True
+        '$' -> True
+        '<' -> True
+        '>' -> True
+        ':' -> True
+        '&' -> True
+        '|' -> True
+        '^' -> True
+        '!' -> True
+        '?' -> True
+        '%' -> True
+        '#' -> True
+        '@' -> True
+        '~' -> True
+        '\\' -> True
+        _ -> False
 
 
 isIdentifierStart : Char -> Bool
@@ -1970,7 +1906,7 @@ scanOperatorEnd : Array Char -> Int -> Int
 scanOperatorEnd characters offset =
     when Array.get offset characters is
         Just character ->
-            if String.contains (String.fromArray [ character ]) "+-/*=.$<>:&|^!?%#@~\\" then
+            if isOperatorChar character then
                 scanOperatorEnd characters (offset + 1)
 
             else

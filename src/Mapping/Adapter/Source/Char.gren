@@ -1,0 +1,41 @@
+module Mapping.Adapter.Source.Char exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Char exposing (toLower, toUpper, toLocaleLower, toLocaleUpper)
+
+import Maybe exposing (Maybe(..))
+import String
+
+
+toLower : Char -> Char
+toLower char =
+    when String.popFirst (String.toLower (String.fromChar char)) is
+        Just { first } ->
+            first
+
+        Nothing ->
+            char
+
+
+toUpper : Char -> Char
+toUpper char =
+    when String.popFirst (String.toUpper (String.fromChar char)) is
+        Just { first } ->
+            first
+
+        Nothing ->
+            char
+
+
+toLocaleLower : Char -> Char
+toLocaleLower char =
+    toLower char
+
+
+toLocaleUpper : Char -> Char
+toLocaleUpper char =
+    toUpper char
+"""
+

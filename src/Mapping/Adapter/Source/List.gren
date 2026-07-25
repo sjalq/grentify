@@ -1,0 +1,70 @@
+module Mapping.Adapter.Source.List exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.List exposing (sum, product, map4, map5, tail, partition, unzip, append)
+
+import Array exposing (Array)
+import Maybe exposing (Maybe(..))
+
+
+sum : Array number -> number
+sum values =
+    Array.foldl (+) 0 values
+
+
+{-| Elm `List.append a b == a ++ b`. Gren maps List onto Array, whose `append`
+flips its arguments to be pipe-friendly, so restore Elm order with `++`.
+-}
+append : Array a -> Array a -> Array a
+append lhs rhs =
+    lhs ++ rhs
+
+
+product : Array number -> number
+product values =
+    Array.foldl (*) 1 values
+
+
+map4 : (a -> b -> c -> d -> value) -> Array a -> Array b -> Array c -> Array d -> Array value
+map4 fn arrs bs cs ds =
+    Array.map2 (\\partial d -> partial d) (Array.map3 fn arrs bs cs) ds
+
+
+map5 : (a -> b -> c -> d -> e -> value) -> Array a -> Array b -> Array c -> Array d -> Array e -> Array value
+map5 fn arrs bs cs ds es =
+    Array.map2 (\\partial e -> partial e) (map4 fn arrs bs cs ds) es
+
+
+tail : Array a -> Maybe (Array a)
+tail values =
+    when Array.popFirst values is
+        Just { rest } ->
+            Just rest
+
+        Nothing ->
+            Nothing
+
+
+partition : (a -> Bool) -> Array a -> { first : Array a, second : Array a }
+partition predicate values =
+    let
+        parts =
+            Array.partition predicate values
+    in
+    { first = parts.trues, second = parts.falses }
+
+
+unzip : Array { first : a, second : b } -> { first : Array a, second : Array b }
+unzip pairs =
+    Array.foldr
+        (\\pair result ->
+            { first = Array.pushFirst pair.first result.first
+            , second = Array.pushFirst pair.second result.second
+            }
+        )
+        { first = [], second = [] }
+        pairs
+"""
+

@@ -1,0 +1,33 @@
+module Mapping.Adapter.Source.Dict exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Dict exposing (toList, fromList, partition)
+
+import Array exposing (Array)
+import Dict exposing (Dict)
+
+
+toList : Dict k v -> Array { first : k, second : v }
+toList dictionary =
+    Dict.foldr
+        (\\key value pairs -> Array.pushFirst { first = key, second = value } pairs)
+        []
+        dictionary
+
+
+fromList : Array { first : comparable, second : v } -> Dict comparable v
+fromList pairs =
+    Array.foldl (\\pair dictionary -> Dict.set pair.first pair.second dictionary) Dict.empty pairs
+
+
+partition : (comparable -> v -> Bool) -> Dict comparable v -> { first : Dict comparable v, second : Dict comparable v }
+partition predicate dictionary =
+    let
+        parts =
+            Dict.partition predicate dictionary
+    in
+    { first = parts.trues, second = parts.falses }
+"""
+

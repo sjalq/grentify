@@ -2,10 +2,11 @@ module Mapping.Tests exposing (Check, allPassed, checks, failures)
 
 import Array
 import Dict
+import Elm.Semver as Semver
 import Mapping.Adapter as Adapter
 import Mapping.Decode as MappingDecode
 import Mapping.Registry as Registry
-import Mapping.Types exposing (AdapterId(..), PackageMapping(..), Platform(..))
+import Mapping.Types exposing (AdapterId(..), PackageMapping(..), Platform(..), TranslationGuarantee(..))
 import Maybe exposing (Maybe(..))
 import Result exposing (Result(..))
 
@@ -20,10 +21,12 @@ checks : Array Check
 checks =
     [ check "valid mapping JSON decodes into typed variants" validDocumentDecodes
     , check "invalid optional maps are rejected instead of defaulted" invalidOptionalMapRejected
+    , check "unknown compatibility targets are rejected" unknownCompatTargetRejected
     , check "duplicate module declarations are rejected" duplicateModuleRejected
     , check "overlay replacement moves package to the final position" overlayOrderIsStable
     , check "transpile overlay removes stale module mappings" transpileRemovesModules
     , check "module collisions resolve according to package overlay order" moduleCollisionUsesLastPackage
+    , check "versioned mappings activate only for intersecting Elm ranges" versionedMappingsAreDeclarative
     , check "platform inference selects the narrowest host" platformInferenceWorks
     , check "browser and node evidence produces a typed conflict" platformConflictIsTyped
     , check "adapter discovery follows fully-qualified target symbols" adapterDiscoveryWorks
@@ -37,6 +40,7 @@ checks =
     , check "Html classList and event adapters convert pair records" htmlAdaptersAreSemantic
     , check "Bytes.Encode and Random.step adapters bridge Gren record shapes" bytesAndRandomAdaptersAreSemantic
     , check "browser catalog targets discover nested Compat adapters" browserAdaptersCatalogWiring
+    , check "every mapping target has an explicit semantic guarantee" mappingGuaranteesAreExplicit
     , check "mapping lexical validation matches the JSON contract" lexicalValidationWorks
     ]
 
@@ -56,6 +60,22 @@ failures =
 check : String -> Bool -> Check
 check name passed =
     { name = name, passed = passed }
+
+
+mappingGuaranteesAreExplicit : Bool
+mappingGuaranteesAreExplicit =
+    Adapter.guaranteeForTarget "Math.round"
+        == Exact
+        && Adapter.guaranteeForTarget "ElmToGren.Compat.List.append"
+        == RepresentationChange
+        && Adapter.guaranteeForTarget "ElmToGren.Compat.Markdown.toHtml"
+        == Approximate
+        && Adapter.guaranteeForTarget "ElmToGren.Compat.Char.toLocaleLower"
+        == Approximate
+        && Adapter.guaranteeForTarget "ElmToGren.Compat.Char.toLower"
+        == RepresentationChange
+        && Adapter.guaranteeForTarget "ElmToGren.Compat.Unknown.value"
+        == Unsupported
 
 
 isErr result =
@@ -99,6 +119,30 @@ invalidOptionalMapRejected =
     "grenVersion": "7.4.2",
     "platform": "common",
     "modules": [{ "source": "Basics", "target": "Basics", "values": [], "types": {} }]
+  }]
+}
+"""
+        |> isErr
+
+
+unknownCompatTargetRejected : Bool
+unknownCompatTargetRejected =
+    MappingDecode.decodeString "unknown-compat.json"
+        """
+{
+  "schemaVersion": 1,
+  "packages": [{
+    "kind": "gren-analogue",
+    "elmPackage": "elm/core",
+    "grenPackage": "gren-lang/core",
+    "grenVersion": "7.4.2",
+    "platform": "common",
+    "modules": [{
+      "source": "Basics",
+      "target": "Basics",
+      "values": { "identity": "ElmToGren.Compat.Unknown.identity" },
+      "types": {}
+    }]
   }]
 }
 """
@@ -173,6 +217,48 @@ moduleCollisionUsesLastPackage =
                     False
 
         Err _ ->
+            False
+
+
+versionedMappingsAreDeclarative : Bool
+versionedMappingsAreDeclarative =
+    when
+        { document =
+            MappingDecode.decodeString "versioned.json" versionedDocumentJson
+        , http1 = Semver.parseRange "1.0.0 <= v < 2.0.0"
+        , http2 = Semver.parseRange "2.0.0 <= v < 3.0.0"
+        }
+    is
+        { document = Ok document, http1 = Ok http1, http2 = Ok http2 } ->
+            let
+                base =
+                    Registry.fromDocument document
+
+                selected1 =
+                    Registry.applyVersionedMappings
+                        (Dict.set "elm/http" http1 Dict.empty)
+                        base
+
+                selected2 =
+                    Registry.applyVersionedMappings
+                        (Dict.set "elm/http" http2 Dict.empty)
+                        base
+            in
+            when
+                { http1 = Registry.moduleMappingFor "Http" selected1
+                , http2 = Registry.moduleMappingFor "Http" selected2
+                }
+            is
+                { http1 = Just http1Module, http2 = Just http2Module } ->
+                    Dict.get "get" http1Module.values
+                        == Just "ElmToGren.Compat.Http.get"
+                        && Dict.get "get" http2Module.values
+                        == Nothing
+
+                _ ->
+                    False
+
+        _ ->
             False
 
 
@@ -601,6 +687,38 @@ transpileOverlayJson =
     "kind": "transpile",
     "elmPackage": "elm/core",
     "grenPackage": "ported/elm--core"
+  }]
+}
+"""
+
+
+versionedDocumentJson : String
+versionedDocumentJson =
+    """
+{
+  "schemaVersion": 1,
+  "packages": [{
+    "kind": "absorbed",
+    "elmPackage": "elm/http",
+    "grenPackage": "gren-lang/browser",
+    "grenVersion": "6.0.2",
+    "platform": "browser",
+    "modules": [{ "source": "Http", "target": "Http" }]
+  }],
+  "versionedPackages": [{
+    "elmVersionRange": "1.0.0 <= v < 2.0.0",
+    "mapping": {
+      "kind": "absorbed",
+      "elmPackage": "elm/http",
+      "grenPackage": "gren-lang/browser",
+      "grenVersion": "6.0.2",
+      "platform": "browser",
+      "modules": [{
+        "source": "Http",
+        "target": "Http",
+        "values": { "get": "ElmToGren.Compat.Http.get" }
+      }]
+    }
   }]
 }
 """

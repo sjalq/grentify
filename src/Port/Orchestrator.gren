@@ -450,11 +450,21 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
                                                             materializeDraftFromCache permissions.fileSystem source cachePath digestHex
                                                                 |> Task.andThen
                                                                     (\draft ->
-                                                                        -- D45: the transform was skipped, so recover
-                                                                        -- this dep's ctor arities from the cached
-                                                                        -- extraction (soft-degrade to empty).
-                                                                        cachedDepExports permissions extractCacheEnabled cacheRoot assets registry coordinate source
-                                                                            |> Task.map (\exports -> { draft | depExports = exports })
+                                                                        -- D57: prefer the facts the ENTRY stored for
+                                                                        -- itself; the extract cache is keyed on other
+                                                                        -- ingredients and drifts, and its miss used to
+                                                                        -- degrade silently to empty arities.
+                                                                        PortedCache.loadExports permissions.fileSystem entry
+                                                                            |> Task.andThen
+                                                                                (\stored ->
+                                                                                    when stored is
+                                                                                        Just exports ->
+                                                                                            Task.succeed { draft | depExports = exports }
+
+                                                                                        Nothing ->
+                                                                                            cachedDepExports permissions extractCacheEnabled cacheRoot assets registry coordinate source
+                                                                                                |> Task.map (\exports -> { draft | depExports = exports })
+                                                                                )
                                                                     )
                                                                 |> Task.onError
                                                                     (\_ ->
@@ -464,6 +474,7 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
                                                                                 { cacheRoot = key.cacheRoot
                                                                                 , coordinate = key.coordinate
                                                                                 , digest = digestHex
+                                                                                , exports = Pipeline.emptyDepMaps
                                                                                 }
                                                                             )
                                                                     )
@@ -475,6 +486,7 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
                                                         { cacheRoot = key.cacheRoot
                                                         , coordinate = key.coordinate
                                                         , digest = digestHex
+                                                        , exports = Pipeline.emptyDepMaps
                                                         }
                                                     )
                                     )
@@ -1091,7 +1103,9 @@ planOne cliOptions registry resolution drafts name state =
                                             , portedCachePending =
                                                 when draft.portedCachePending is
                                                     Just pending ->
-                                                        Dict.set key pending state.portedCachePending
+                                                        Dict.set key
+                                                            { pending | exports = draft.depExports }
+                                                            state.portedCachePending
 
                                                     Nothing ->
                                                         state.portedCachePending
@@ -1381,6 +1395,7 @@ prepareOnePackage context permissions assets rootIdentity planned staging packag
                                     context.toolVersion
                                     pending.digest
                                     platformName
+                                    pending.exports
                     )
 
 
@@ -2243,6 +2258,7 @@ writeVendored context permissions assets packagesRoot planned packages =
                                                                                         context.toolVersion
                                                                                         storePending.digest
                                                                                         platformName
+                                                                                        storePending.exports
                                                                         )
                                                     )
                                         )

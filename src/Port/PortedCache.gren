@@ -6,6 +6,7 @@ module Port.PortedCache exposing
     , coordinateLabel
     , digest12
     , digestFor
+    , loadExports
     , entryPath
     , keyFor
     , load
@@ -31,7 +32,7 @@ import Bytes exposing (Bytes)
 import Bytes.Decode as BytesDecode
 import ChildProcess
 import Crypto
-import Dict
+import Dict exposing (Dict)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Json.Decode as Decode
@@ -70,6 +71,9 @@ type alias Pending =
     { cacheRoot : Path
     , coordinate : Coordinate
     , digest : String
+    , -- D57: the constructor facts to bank alongside the tree, so a future hit
+      -- is self-sufficient and never has to consult the extract cache.
+      exports : { ctorArities : Dict String Int, soleCtors : Dict String {} }
     }
 
 
@@ -337,6 +341,42 @@ loadPlatform permission entry expectedDigest =
         |> Task.onError (\_ -> Task.succeed Nothing)
 
 
+{-| D57: read the constructor facts an entry stored for itself. `Nothing` when
+the entry predates this field, in which case the caller falls back to the
+extract cache exactly as before.
+-}
+loadExports :
+    FileSystem.Permission
+    -> Path
+    -> Task x (Maybe { ctorArities : Dict String Int, soleCtors : Dict String {} })
+loadExports permission entry =
+    System.File.readText permission
+        (Path.join [ entry, Path.fromPosixString "manifest.json" ])
+        |> Task.map
+            (\text ->
+                when Decode.decodeString exportsDecoder text is
+                    Ok exports ->
+                        Just exports
+
+                    Err _ ->
+                        Nothing
+            )
+        |> Task.onError (\_ -> Task.succeed Nothing)
+
+
+exportsDecoder : Decode.Decoder { ctorArities : Dict String Int, soleCtors : Dict String {} }
+exportsDecoder =
+    Decode.map2
+        (\arities soles ->
+            { ctorArities = arities
+            , soleCtors =
+                Array.foldl (\name acc -> Dict.set name {} acc) Dict.empty soles
+            }
+        )
+        (Decode.field "ctorArities" (Decode.dict Decode.int))
+        (Decode.field "soleCtors" (Decode.array Decode.string))
+
+
 {-| Persist a verified package tree under the content-addressed entry path.
 Copies only the transform surface (src/, LICENSE*), never gren.json (which is
 resolution-specific), never `elm-stuff` / `.gren` build litter. Writes to a
@@ -353,8 +393,9 @@ store :
     -> String
     -> String
     -> String
+    -> { ctorArities : Dict String Int, soleCtors : Dict String {} }
     -> Task x {}
-store platform childProcess permission entry sourcePackageDir toolVersion digest platformName =
+store platform childProcess permission entry sourcePackageDir toolVersion digest platformName exports =
     freshUuid
         |> Task.andThen
             (\maybeUuid ->
@@ -371,11 +412,36 @@ store platform childProcess permission entry sourcePackageDir toolVersion digest
                             -- gren.json is resolution-specific (local: dep versions)
                             -- and is always re-planned on the hit path; caching it
                             -- would serve the wrong dep graph across projects.
+                            -- D57: the entry carries its OWN constructor facts.
+                            -- A dependency served from here never re-extracts,
+                            -- and the extract cache is keyed on different
+                            -- ingredients (review config + elm-review version),
+                            -- so the two drift. When they did, `cachedDepExports`
+                            -- silently returned EMPTY and the dependent compiled
+                            -- as if this package declared no constructors —
+                            -- proven to flip jfmengels/elm-review from PASS to
+                            -- a TYPE MISMATCH storm with no code change. A hit
+                            -- must be self-sufficient.
                             manifestText =
                                 Encode.object
                                     [ { key = "toolVersion", value = Encode.string toolVersion }
                                     , { key = "digest", value = Encode.string digest }
                                     , { key = "platform", value = Encode.string platformName }
+                                    , { key = "ctorArities"
+                                      , value =
+                                            Encode.object
+                                                (Dict.foldl
+                                                    (\name arity acc ->
+                                                        Array.pushLast { key = name, value = Encode.int arity } acc
+                                                    )
+                                                    []
+                                                    exports.ctorArities
+                                                )
+                                      }
+                                    , { key = "soleCtors"
+                                      , value =
+                                            Encode.array Encode.string (Dict.keys exports.soleCtors)
+                                      }
                                     ]
                                     |> Encode.encode 0
                         in

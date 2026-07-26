@@ -1215,7 +1215,7 @@ declaredModuleName source =
             Err (PortError.create "SOURCE_INVALID" "Elm source does not contain a module declaration.")
 
         Just found ->
-            when qualifiedNameAt source tokens (found.index + 1) is
+            when qualifiedNameAt tokens (found.index + 1) is
                 Nothing ->
                     Err (PortError.create "SOURCE_INVALID" "Elm module declaration does not contain a valid module name.")
 
@@ -1235,12 +1235,12 @@ mappedSymbol mapping symbol =
             Dict.get symbol mapping.types
 
 
-qualifiedNameAt : String -> Array CodeToken -> Int -> Maybe { name : String, afterIndex : Int }
-qualifiedNameAt source tokens start =
+qualifiedNameAt : Array CodeToken -> Int -> Maybe { name : String, afterIndex : Int }
+qualifiedNameAt tokens start =
     when Array.get start tokens is
         Just first ->
             if first.kind == IdentifierToken && startsUpper first.text then
-                qualifiedNameFrom source tokens (start + 1) first.text first.endOffset
+                qualifiedNameFrom tokens (start + 1) first.text first.endOffset
 
             else
                 Nothing
@@ -1249,8 +1249,17 @@ qualifiedNameAt source tokens start =
             Nothing
 
 
-qualifiedNameFrom : String -> Array CodeToken -> Int -> String -> Int -> Maybe { name : String, afterIndex : Int }
-qualifiedNameFrom source tokens cursor name previousEnd =
+{-| D80: adjacency is decided by OFFSETS, never by re-reading the source.
+
+`previousEnd == dot.startOffset && dot.endOffset == next.startOffset` already
+says the three tokens touch with nothing between them, and `scanCodeTokens`
+builds every `DotToken` as exactly `{ text = ".", endOffset = offset + 1 }`, so
+the span between them IS that dot. Confirming it by slicing the module source
+was a tautology that cost `Array.from(whole file)` per qualified-name step
+(`String.slice` is code-point indexed), i.e. quadratic in file size.
+-}
+qualifiedNameFrom : Array CodeToken -> Int -> String -> Int -> Maybe { name : String, afterIndex : Int }
+qualifiedNameFrom tokens cursor name previousEnd =
     when { dot = Array.get cursor tokens, next = Array.get (cursor + 1) tokens } is
         { dot = Just dot, next = Just next } ->
             if dot.kind == DotToken
@@ -1258,9 +1267,8 @@ qualifiedNameFrom source tokens cursor name previousEnd =
                 && startsUpper next.text
                 && previousEnd == dot.startOffset
                 && dot.endOffset == next.startOffset
-                && String.slice previousEnd next.startOffset source == "."
             then
-                qualifiedNameFrom source tokens (cursor + 2) (name ++ "." ++ next.text) next.endOffset
+                qualifiedNameFrom tokens (cursor + 2) (name ++ "." ++ next.text) next.endOffset
 
             else
                 Just { name = name, afterIndex = cursor }
@@ -1292,10 +1300,10 @@ requiredModules source =
             scanCodeTokens source
 
         existing =
-            importedModuleNames source tokens
+            importedModuleNames tokens
 
         referenced =
-            Array.indexedFoldl (collectReferencedModules source tokens) Dict.empty tokens
+            Array.indexedFoldl (collectReferencedModules tokens) Dict.empty tokens
 
         imports =
             referenced
@@ -1316,8 +1324,8 @@ requiredModules source =
             )
 
 
-collectReferencedModules : String -> Array CodeToken -> Int -> CodeToken -> Dict String {} -> Dict String {}
-collectReferencedModules source tokens index token found =
+collectReferencedModules : Array CodeToken -> Int -> CodeToken -> Dict String {} -> Dict String {}
+collectReferencedModules tokens index token found =
     if token.kind /= IdentifierToken then
         found
 
@@ -1339,7 +1347,7 @@ collectReferencedModules source tokens index token found =
             found
 
         else
-            when fullQualifiedNameAt source tokens index is
+            when fullQualifiedNameAt tokens index is
                 Nothing ->
                     found
 
@@ -1360,12 +1368,12 @@ collectReferencedModules source tokens index token found =
                         withAdapter
 
 
-fullQualifiedNameAt : String -> Array CodeToken -> Int -> Maybe { name : String, afterIndex : Int }
-fullQualifiedNameAt source tokens start =
+fullQualifiedNameAt : Array CodeToken -> Int -> Maybe { name : String, afterIndex : Int }
+fullQualifiedNameAt tokens start =
     when Array.get start tokens is
         Just first ->
             if first.kind == IdentifierToken && startsUpper first.text then
-                fullQualifiedNameFrom source tokens (start + 1) first.text first.endOffset
+                fullQualifiedNameFrom tokens (start + 1) first.text first.endOffset
 
             else
                 Nothing
@@ -1374,17 +1382,19 @@ fullQualifiedNameAt source tokens start =
             Nothing
 
 
-fullQualifiedNameFrom : String -> Array CodeToken -> Int -> String -> Int -> Maybe { name : String, afterIndex : Int }
-fullQualifiedNameFrom source tokens cursor name previousEnd =
+{-| Same law, and same D80 offset-only adjacency, as `qualifiedNameFrom`; this
+one keeps lowercase tails so `Module.value` resolves whole.
+-}
+fullQualifiedNameFrom : Array CodeToken -> Int -> String -> Int -> Maybe { name : String, afterIndex : Int }
+fullQualifiedNameFrom tokens cursor name previousEnd =
     when { dot = Array.get cursor tokens, next = Array.get (cursor + 1) tokens } is
         { dot = Just dot, next = Just next } ->
             if dot.kind == DotToken
                 && next.kind == IdentifierToken
                 && previousEnd == dot.startOffset
                 && dot.endOffset == next.startOffset
-                && String.slice previousEnd next.startOffset source == "."
             then
-                fullQualifiedNameFrom source tokens (cursor + 2) (name ++ "." ++ next.text) next.endOffset
+                fullQualifiedNameFrom tokens (cursor + 2) (name ++ "." ++ next.text) next.endOffset
 
             else
                 Just { name = name, afterIndex = cursor }
@@ -1393,12 +1403,12 @@ fullQualifiedNameFrom source tokens cursor name previousEnd =
             Just { name = name, afterIndex = cursor }
 
 
-importedModuleNames : String -> Array CodeToken -> Dict String {}
-importedModuleNames source tokens =
+importedModuleNames : Array CodeToken -> Dict String {}
+importedModuleNames tokens =
     Array.indexedFoldl
         (\index token names ->
             if token.kind == IdentifierToken && token.text == "import" then
-                when qualifiedNameAt source tokens (index + 1) is
+                when qualifiedNameAt tokens (index + 1) is
                     Just qualified ->
                         Dict.set qualified.name {} names
 
@@ -1441,7 +1451,7 @@ ensureModuleImports source requested =
             scanCodeTokens source
 
         existing =
-            importedModuleNames source tokens
+            importedModuleNames tokens
 
         missing =
             requested
@@ -1579,7 +1589,7 @@ addUnsupportedDiagnostics input extraction source diagnostics =
                 || Array.indexedFoldl
                     (\index _ found ->
                         found
-                            || when fullQualifiedNameAt source tokens index is
+                            || when fullQualifiedNameAt tokens index is
                                 Just qualified ->
                                     isKernelModule qualified.name
 
@@ -1630,7 +1640,7 @@ addGuaranteeDiagnostics input extraction source diagnostics =
             tokens
                 |> Array.indexedFoldl
                     (\index _ found ->
-                        when fullQualifiedNameAt source tokens index is
+                        when fullQualifiedNameAt tokens index is
                             Just qualified ->
                                 if Adapter.guaranteeForTarget qualified.name == Mapping.Types.Approximate then
                                     Dict.set qualified.name {} found

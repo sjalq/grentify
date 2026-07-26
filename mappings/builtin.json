@@ -228,7 +228,12 @@
         },
         { "source": "Bitwise", "target": "Bitwise", "values": {}, "types": {} },
         { "source": "Debug", "target": "Debug", "values": {}, "types": {} },
-        { "source": "Platform", "target": "Platform", "values": {}, "types": {} },
+        {
+          "source": "Platform",
+          "target": "Platform",
+          "values": { "worker": "ElmToGren.Compat.Platform.worker" },
+          "types": {}
+        },
         { "source": "Platform.Cmd", "target": "Platform.Cmd", "values": {}, "types": { "Cmd": "Cmd" } },
         { "source": "Platform.Sub", "target": "Platform.Sub", "values": {}, "types": { "Sub": "Sub" } },
         { "source": "Process", "target": "Process", "values": {}, "types": {} }
@@ -547,7 +552,12 @@
             "EmptyList": "EmptyArray",
             "ListDiff": "ArrayDiff"
           },
-          "types": { "Reason": "Reason", "InvalidReason": "InvalidReason" }
+          "types": { "Reason": "Reason", "InvalidReason": "InvalidReason" },
+          "constructorFields": {
+            "Equality": ["expected", "actual"],
+            "Comparison": ["expected", "actual"],
+            "ListDiff": ["expected", "actual"]
+          }
         },
         { "source": "Test.Runner.String", "target": "Test.Runner.String", "values": {}, "types": {} },
         { "source": "Test.Distribution", "target": "Test.Distribution", "values": {}, "types": { "ExpectedDistribution": "ExpectedDistribution" } },

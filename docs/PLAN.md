@@ -163,6 +163,141 @@ by being written through this law; nothing edits the ledger by hand.
 
 ## 6. Known defects register (2026-07-17 audit; independently verified)
 
+- **D80 `Transform.Pipeline` re-read the WHOLE MODULE SOURCE once per
+  qualified-name step, to confirm a fact it already held** (found by V8 tick
+  profile 2026-07-26; FIXED same day). `qualifiedNameFrom` /
+  `fullQualifiedNameFrom` walk `Module.Sub.name` token by token, and each step
+  guarded with `String.slice previousEnd next.startOffset source == "."`. Gren's
+  `String.slice` is CODE-POINT indexed — `Array.from(str).slice(a,b).join("")` —
+  so slicing one character out of a 1.7 MB module costs a full 1.7 MB array
+  build. Once per dotted step, over every identifier in the file: quadratic in
+  file size, and it fired in `collectReferencedModules`, which every port runs.
+  **The check was a tautology.** The same `if` already asserts
+  `previousEnd == dot.startOffset` and `dot.endOffset == next.startOffset`, and
+  `scanCodeTokens` constructs every `DotToken` as exactly
+  `{ text = ".", startOffset = offset, endOffset = offset + 1 }`. The sliced
+  span therefore IS that dot, always. Adjacency is an OFFSET fact; re-deriving
+  it from the source text bought nothing. Fix: drop the slice from both
+  functions; `source` then became an unthreaded dead parameter through
+  `qualifiedNameAt`/`fullQualifiedNameAt` and their five call sites, so it is
+  gone too (G3).
+  This is the same family as D58 (`String.toArray`) and D61 (the `2^depth`
+  double-walk): the cost was never in what the pass computes, only in how it
+  re-established what it already knew.
+  MEASURED, warm cache, `--no-ported-cache`, same machine, A/B on this one file:
+  `1602/elm-feather` 134.2s -> 12.1s (11x), and its emitted `src/` tree is
+  BYTE-IDENTICAL before and after, which is what a tautology has to be.
+  **RECEIPT: `icidasset/elm-material-icons@11.0.0` — the largest AST in the
+  universe at 134 MB extracted, 6.8 MB of Elm over five ~40k-line modules —
+  ports and gren-verifies in 180s.** It had never once completed: observed
+  >45 min inside `[phase] transform` before this. NO BUDGET RAISE IS OWED; it
+  now fits the walker's existing 360s default with room to spare, and §1's "no
+  size-based exemption" is honoured by a fix, not an exemption. Tier 0 319
+  checks; canary 14/14 (canary is unaffected — every canary package is small,
+  which is exactly why the class survived this long).
+
+- **D79 any download failure was banked as `EXEMPT(broken-upstream)`, so a
+  network drop mid-walk made 88 packages permanently invisible** (found while
+  verifying the two 404s of Item A; FIXED 2026-07-26). `walk-universe.cjs`
+  exempted on a bare `/DOWNLOAD_FAILED/`. That code is raised for EVERY network
+  outcome — timeout, DNS failure, GitHub 429 during a 2,000-package walk, 5xx,
+  a dropped connection — none of which say the source is gone. D51 is the same
+  mistake and this is its more expensive direction, because nothing revisits a
+  terminal verdict.
+  MEASURED by replaying every banked `evidence` string in `walk-log.jsonl` and
+  `core-run.jsonl` through the old and new classifiers: 178 distinct
+  coordinates matched the old pattern; 89 keep the exemption on a real 404/410
+  or `SOURCE_CLONE_FAILED`, and **88 currently sitting terminal lose it** — 87
+  on the single string `DOWNLOAD_FAILED: Unknown error: problem with request:
+  fetch failed` and one on `502 - Bad Gateway`. Nothing is gained (0 records
+  move the other way), so no exemption is lost, only unproven ones withdrawn.
+  The evidence was never upstream's: the 87 fall in one contiguous alphabetical
+  run of the walk (`lue-bird/*`, `m*`, `n*`, `o*`, `p*`), which is what a local
+  outage looks like, not what 87 independent repositories look like.
+  POSITIVE EVIDENCE, not reasoning: of four spot-checked, `3kyro/xsrf-protection@2.1.0`
+  and `miniBill/elm-result-extra@1.0.0` return HTTP 200 with real bytes from the
+  exact zipball URL Elm uses, and `miniBill/elm-result-extra@1.0.0` PORTS AND
+  GREN-VERIFIES CLEAN today. The other two are genuinely gone — which is the
+  point: some of the 88 are terminal, but that has to be re-established from a
+  404, never assumed from `fetch failed`.
+  FIX, two halves:
+  - Only a status meaning PERMANENTLY ABSENT exempts:
+    `/DOWNLOAD_FAILED[^\n]*\b(404|410)\b/`. Everything else is a working
+    failure to retry. `SOURCE_CLONE_FAILED` / `NO_ELM_SOURCES` / "couldn't find
+    a compatible version" are unchanged.
+  - **The diagnostic was itself the defect (D64).**
+    `DOWNLOAD_FAILED: Bad status: 404 - Not Found` names neither the package,
+    the artifact, nor the host, yet it is the whole of the evidence an
+    `EXEMPT(broken-upstream)` verdict rests on — and it is the string the new
+    rule must read. `Elm/Acquire.gren`'s `fetchString`/`fetchBytes` now share
+    one `downloadFailed url` and emit
+    `DOWNLOAD_FAILED: GET <url> failed: <reason>`.
+  PROOF: walker self-test 36 checks (was 32) — the URL-naming 404 form plus
+  three negatives (429, 503, bare Timeout). Tier 0 319 checks; canary 14/14.
+  CARRIED FORWARD: `walk-log.jsonl` is append-only, so all 88 still resolve as
+  terminal in `loadDoneSet` until a drain re-attempts them with `--only`. They
+  are a queue of 88, not a fix that lands by itself.
+  **ITEM A VERDICT — `Skinney/murmur3@2.0.8` and `ivadzy/bbase64@1.1.1` are
+  genuinely terminal `EXEMPT(broken-upstream:unfetchable)`, and this is THEIR
+  bug, not our policy.** Both repos were RENAMED (`Skinney/murmur3` ->
+  `robinheghan/murmur3`, `ivadzy/bbase64` -> `chelovek0v/bbase64`); GitHub
+  serves the 301 and our client follows it, so this is not a redirect defect.
+  The tags themselves were deleted. `git ls-remote --tags` — the authority,
+  independent of any HTTP client — shows `robinheghan/murmur3` holding only
+  `1.0.0`, `beta-2.0.7`, `rc1-2.0.7` (published: through 2.0.8) and
+  `chelovek0v/bbase64` only `1.0.0`, `1.0.1` (published: through 1.1.1). The
+  snapshot pins exactly the missing versions. So the zipball 404s, the
+  `cloneVersionTag` fallback cannot succeed either, and `elm install` would fail
+  identically. Recorded evidence, now self-identifying:
+  `DOWNLOAD_FAILED: GET https://github.com/Skinney/murmur3/zipball/2.0.8/ failed: Bad status: 404 - Not Found`.
+  NOT a fix: nothing to fix. The successor packages `robinheghan/murmur3` and
+  `chelovek0v/bbase64` are separate snapshot entries and port fine
+  (`robinheghan/murmur3` is a live dependency of the elm-css family).
+
+- **D78 `Platform.worker` had no adapter, so every Elm worker program got
+  `{ first, second }` where gren-lang/core wants `{ model, command }`**
+  (FIXED 2026-07-26). Elm's `Platform.worker` takes `(model, Cmd msg)` pairs,
+  which this port lowers to `{ first = …, second = … }`; Gren's takes
+  `{ model, command }`. That is the identical fact
+  `ElmToGren.Compat.Browser` has always stated for `Browser.element` /
+  `document` / `application` — the field names are dictated by the MAPPED
+  FUNCTION'S argument type, which the port never reads — and `Platform` simply
+  had `"values": {}`. No new mechanism: `Mapping.Adapter.Source.Platform`
+  reuses the same `teaPair` reshape, `PlatformAdapter` joins the catalog, and
+  `mappings/builtin.json` points `Platform.worker` at it. Deliberately not a
+  printer special case: a mapped function's argument shape is data about a
+  mapping and belongs in the mapping file (D71/D75).
+  **RECEIPT: `ThinkAlexandria/css-in-elm@2.0.1` ports and gren-verifies clean.**
+  Tier 0 319 checks (+1: adapter wiring, guarantee, and the reshape itself);
+  canary 14/14.
+
+- **D77 a mapped constructor renamed WITHIN its target module was keyed under a
+  name no printer emits, silently reinstating `first`/`second`** (FIXED
+  2026-07-26). D75 keys `Registry.constructorFieldShapes` by resolving the
+  source constructor through the module's `values` map, because that is what
+  `Ast.NameSub` does — but it took the `values` target as a WHOLE PATH. NameSub
+  does not: `subNamedRef` treats a target containing `.` as the full path and a
+  bare one as a rename inside `mapping.target`. Every `constructorFields` entry
+  that existed used either an empty `values` or a qualified target, so the bare
+  branch was never exercised and the divergence sat latent. The first bare
+  rename to need a shape — `Test.Runner.Failure` `ListDiff -> ArrayDiff` — would
+  have been keyed `"ArrayDiff"`, matching no print site and no
+  `unclaimedMappedShapes` own-module guard (whose `moduleOfKey` needs a
+  qualifier), so `ctorFieldLabels` would fall back to positional labels with no
+  error anywhere. Fix: `mappedConstructorName` mirrors NameSub's rule exactly.
+  With it, `Test.Runner.Failure` gains `constructorFields` for `Equality`,
+  `Comparison` and `ListDiff` — all `["expected", "actual"]`, read off both
+  declarations (Elm `Equality String String`, Gren
+  `Equality { expected : String, actual : String }`), not guessed.
+  **RECEIPT: `Janiczek/architecture-test@2.1.2` ports and gren-verifies clean**
+  (three TYPE MISMATCHes in `Test/Runner/Failure/Extra.gren` retired).
+  Tier 0 319 checks (+1, asserting both that the qualified key is present and
+  that the bare key is absent — the bug produced the bare key, so testing only
+  the first would not have caught it).
+  ALSO CLEARED, by today's earlier landings and needing no change here:
+  `tesk9/accessible-html-with-css@2.1.0` ports and verifies clean; its
+  "Something is off with the body of the `‹id›` definition" is gone.
+
 - **D75 the PRINTER decided multi-arg constructor payload names from a
   hardcoded module-name table, so every mapped constructor reached through an
   import alias was labelled `first`/`second`** (the defect D71 measured and

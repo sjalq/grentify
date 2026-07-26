@@ -172,13 +172,7 @@ constructorFieldShapes registry =
             Dict.foldl
                 (\constructor fields inner ->
                     Dict.set
-                        (when Dict.get constructor module_.values is
-                            Just mapped ->
-                                mapped
-
-                            Nothing ->
-                                module_.target ++ "." ++ constructor
-                        )
+                        (mappedConstructorName module_ constructor)
                         fields
                         inner
                 )
@@ -187,6 +181,28 @@ constructorFieldShapes registry =
         )
         Dict.empty
         registry.modules
+
+
+{-| The qualified Gren name `Ast.NameSub` gives a source constructor.
+
+A `values` target carrying a `.` is already the whole path; a bare rename
+(`"ListDiff": "ArrayDiff"`) is a rename WITHIN the target module, exactly as
+`NameSub.subNamedRef` reads it. Treating a bare rename as a whole path would key
+the shape under a name no printer ever emits, which is the silent failure this
+lookup exists to prevent.
+-}
+mappedConstructorName : ModuleMapping -> String -> String
+mappedConstructorName module_ constructor =
+    when Dict.get constructor module_.values is
+        Just mapped ->
+            if String.contains "." mapped then
+                mapped
+
+            else
+                module_.target ++ "." ++ mapped
+
+        Nothing ->
+            module_.target ++ "." ++ constructor
 
 
 {-| The mapped package that states `moduleName` has no Gren counterpart.

@@ -1,0 +1,792 @@
+module Ast.KeyEncode.Evidence exposing
+    ( Evidence
+    , Kind(..)
+    , Slot
+    , collect
+    , empty
+    , inlineSlot
+    , isEmpty
+    , kindOfRef
+    , returnedAliasName
+    )
+
+{-| D24b/D65 evidence: what the PACKAGE proves about tuple keys, decided
+once per package and before a single node is rewritten.
+
+Three indexes, all keyed by BARE name and all poisoned on ambiguity — a
+name that means two different things package-wide proves nothing and is
+dropped rather than guessed at (`poison` / `unpoisoned`):
+
+  * `aliases` — R1: tuple aliases whose every package occurrence is a
+    Dict/Set key or a literal-tail return.
+  * `keyFields` — R2: record-alias fields typed as a tuple-keyed
+    container.
+  * `tupleReturns` / `containerReturns` — R3: functions whose signature
+    returns a concrete encodable tuple, resp. a tuple-keyed container.
+
+The laws these feed are stated in `Ast.KeyEncode`; the key
+representation is `Ast.KeyEncode.Codec`. Nothing here rewrites.
+-}
+
+import Array exposing ( Array )
+import Ast.KeyEncode.Codec as Codec exposing ( KeyShape(..) )
+import Ast.Types exposing
+    ( Declaration(..)
+    , Expr(..)
+    , File
+    , NamedRef
+    , Pattern(..)
+    , TypeAnn(..)
+    )
+import Ast.Walk as Walk
+import Dict exposing ( Dict )
+
+
+{-| Which keyed container a piece of evidence is about. -}
+type Kind
+    = SetKind
+    | DictKind
+
+
+{-| A proven keyed container: its kind and its key's shape. -}
+type alias Slot =
+    { kind : Kind
+    , shapes : Array KeyShape
+    }
+
+
+type alias AliasInfo =
+    { shapes : Array KeyShape
+    , homeModule : String
+    }
+
+
+type alias Evidence =
+    { -- R1: eligible tuple aliases by bare name
+      aliases : Dict String AliasInfo
+    , -- R2: record-alias field name -> proven container slot
+      keyFields : Dict String Slot
+    , -- R3: package function -> the encodable tuple its signature returns
+      tupleReturns : Dict String (Array KeyShape)
+    , -- R3: package function -> the keyed container its signature returns
+      containerReturns : Dict String Slot
+    }
+
+
+empty : Evidence
+empty =
+    { aliases = Dict.empty
+    , keyFields = Dict.empty
+    , tupleReturns = Dict.empty
+    , containerReturns = Dict.empty
+    }
+
+
+{-| No index holds anything, so no witness can come from the package.
+A declaration can still carry its own inline container evidence.
+-}
+isEmpty : Evidence -> Bool
+isEmpty evidence =
+    Dict.isEmpty evidence.aliases
+        && Dict.isEmpty evidence.keyFields
+        && Dict.isEmpty evidence.tupleReturns
+        && Dict.isEmpty evidence.containerReturns
+
+
+
+-- CONTAINER ANNOTATIONS -------------------------------------------------------
+
+
+{-| The key-slot child annotation of a Dict/Set node, with its kind. -}
+keySlot : TypeAnn -> Maybe { kind : Kind, annotation : TypeAnn }
+keySlot annotation =
+    when annotation is
+        TypeTyped { ref = ref, arguments = arguments } ->
+            if isDictRef ref && Array.length arguments == 2 then
+                Array.get 0 arguments
+                    |> Maybe.map (\key -> { kind = DictKind, annotation = key })
+
+            else if isSetRef ref && Array.length arguments == 1 then
+                Array.get 0 arguments
+                    |> Maybe.map (\key -> { kind = SetKind, annotation = key })
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
+
+
+{-| Inline tuple key of a `Dict k v` / `Set k` annotation node. -}
+inlineSlot : TypeAnn -> Maybe Slot
+inlineSlot annotation =
+    when keySlot annotation is
+        Just { kind = kind, annotation = TypeTuple elements } ->
+            Codec.tupleShapes elements
+                |> Maybe.map (\shapes -> { kind = kind, shapes = shapes })
+
+        _ ->
+            Nothing
+
+
+isDictRef : NamedRef -> Bool
+isDictRef ref =
+    ref.name == "Dict" && (ref.moduleName == Nothing || ref.moduleName == Just "Dict")
+
+
+isSetRef : NamedRef -> Bool
+isSetRef ref =
+    ref.name == "Set" && (ref.moduleName == Nothing || ref.moduleName == Just "Set")
+
+
+{-| The keyed-container module a value reference belongs to. -}
+kindOfRef : NamedRef -> Maybe Kind
+kindOfRef ref =
+    when ref.moduleName is
+        Just "Set" ->
+            Just SetKind
+
+        Just "Dict" ->
+            Just DictKind
+
+        _ ->
+            Nothing
+
+
+
+-- EVIDENCE COLLECTION ---------------------------------------------------------
+
+
+{-| Alias occurrence classification while walking annotation trees. -}
+type alias UsageCounts =
+    { keyUses : Int
+    , returnUses : Int
+    , otherUses : Int
+    }
+
+
+noUses : UsageCounts
+noUses =
+    { keyUses = 0, returnUses = 0, otherUses = 0 }
+
+
+collect : Array File -> Evidence
+collect files =
+    let
+        candidates =
+            collectCandidateAliases files
+
+        usage =
+            Array.foldl (fileUsage candidates) Dict.empty files
+
+        returningOk =
+            aliasReturnLawHolds candidates files
+
+        destructured =
+            destructuredAliasNames candidates files
+
+        eligible =
+            Dict.foldl
+                (\name info acc ->
+                    let
+                        counts =
+                            Dict.get name usage
+                                |> Maybe.withDefault noUses
+                    in
+                    if
+                        counts.keyUses
+                            >= 1
+                            && counts.otherUses
+                            == 0
+                            && Dict.member name returningOk
+                            && not (Dict.member name destructured)
+                    then
+                        Dict.set name info acc
+
+                    else
+                        acc
+                )
+                Dict.empty
+                candidates
+    in
+    { aliases = eligible
+    , keyFields = collectKeyFields files
+    , tupleReturns = collectSignatureReturns tupleReturnShapes files
+    , containerReturns = collectSignatureReturns containerReturnSlot files
+    }
+
+
+{-| Aliases whose body is a tuple of encodable elements. Name collisions
+with differing shapes drop the name entirely (bare-name matching must be
+unambiguous package-wide).
+-}
+collectCandidateAliases : Array File -> Dict String AliasInfo
+collectCandidateAliases files =
+    let
+        gathered =
+            Array.foldl
+                (\file acc ->
+                    Array.foldl
+                        (\declaration inner ->
+                            when declaration is
+                                DeclAlias { name = name, generics = [], typeAnnotation = TypeTuple elements } ->
+                                    when Codec.tupleShapes elements is
+                                        Just shapes ->
+                                            Dict.update name
+                                                (\existing ->
+                                                    when existing is
+                                                        Nothing ->
+                                                            Just
+                                                                (Just
+                                                                    { shapes = shapes
+                                                                    , homeModule = file.moduleDefinition.moduleName
+                                                                    }
+                                                                )
+
+                                                        Just _ ->
+                                                            -- duplicate name: poison
+                                                            Just Nothing
+                                                )
+                                                inner
+
+                                        Nothing ->
+                                            inner
+
+                                _ ->
+                                    inner
+                        )
+                        acc
+                        file.declarations
+                )
+                Dict.empty
+                files
+    in
+    keepUnpoisoned gathered
+
+
+{-| Collapse a poisoned index (`Nothing` = the bare name is ambiguous
+package-wide) to the entries that survived.
+-}
+keepUnpoisoned : Dict String (Maybe a) -> Dict String a
+keepUnpoisoned gathered =
+    Dict.foldl
+        (\name entry acc ->
+            when entry is
+                Just value ->
+                    Dict.set name value acc
+
+                Nothing ->
+                    acc
+        )
+        Dict.empty
+        gathered
+
+
+{-| Does this annotation reference the candidate alias `name`? Bare refs
+match anywhere (candidate names are package-unique); qualified refs match
+when the qualifier is the home module or its last segment (import alias
+convention `import A.B.C as C`).
+-}
+refersToAlias : String -> AliasInfo -> TypeAnn -> Bool
+refersToAlias name info annotation =
+    when annotation is
+        TypeTyped { ref = ref, arguments = [] } ->
+            if ref.name /= name then
+                False
+
+            else
+                when ref.moduleName is
+                    Nothing ->
+                        True
+
+                    Just qualifier ->
+                        qualifier
+                            == info.homeModule
+                            || Just qualifier
+                            == lastSegment info.homeModule
+
+        _ ->
+            False
+
+
+lastSegment : String -> Maybe String
+lastSegment moduleName =
+    String.split "." moduleName
+        |> Array.last
+
+
+{-| Classify every occurrence of every candidate alias across a file's
+type annotations.
+-}
+fileUsage :
+    Dict String AliasInfo
+    -> File
+    -> Dict String UsageCounts
+    -> Dict String UsageCounts
+fileUsage candidates file usage =
+    Array.foldl
+        (\declaration acc ->
+            when declaration is
+                DeclFunction { signature = Just sig } ->
+                    signatureUsage candidates sig.typeAnnotation acc
+
+                DeclAlias { name = name, typeAnnotation = annotation } ->
+                    if Dict.member name candidates then
+                        -- the candidate's own definition is not a use
+                        acc
+
+                    else
+                        annUsage candidates { isKey = False } annotation acc
+
+                DeclCustomType { constructors = constructors } ->
+                    Array.foldl
+                        (\ctor inner ->
+                            Array.foldl
+                                (\argument deeper ->
+                                    annUsage candidates { isKey = False } argument deeper
+                                )
+                                inner
+                                ctor.arguments
+                        )
+                        acc
+                        constructors
+
+                DeclPort sig ->
+                    annUsage candidates { isKey = False } sig.typeAnnotation acc
+
+                _ ->
+                    acc
+        )
+        usage
+        file.declarations
+
+
+{-| A signature's spine: argument annotations are plain positions; the
+final return annotation is a RETURN position for a directly-referenced
+candidate alias.
+-}
+signatureUsage :
+    Dict String AliasInfo
+    -> TypeAnn
+    -> Dict String UsageCounts
+    -> Dict String UsageCounts
+signatureUsage candidates annotation usage =
+    when annotation is
+        TypeFunction { left = left, right = right } ->
+            signatureUsage candidates right (annUsage candidates { isKey = False } left usage)
+
+        _ ->
+            when directAliasName candidates annotation is
+                Just name ->
+                    bumpUsage name (\c -> { c | returnUses = c.returnUses + 1 }) usage
+
+                Nothing ->
+                    annUsage candidates { isKey = False } annotation usage
+
+
+directAliasName : Dict String AliasInfo -> TypeAnn -> Maybe String
+directAliasName candidates annotation =
+    Dict.foldl
+        (\name info found ->
+            when found is
+                Just _ ->
+                    found
+
+                Nothing ->
+                    if refersToAlias name info annotation then
+                        Just name
+
+                    else
+                        Nothing
+        )
+        Nothing
+        candidates
+
+
+{-| Walk an annotation tree counting candidate-alias occurrences; direct
+children in a Dict/Set key slot are KEY positions.
+-}
+annUsage :
+    Dict String AliasInfo
+    -> { isKey : Bool }
+    -> TypeAnn
+    -> Dict String UsageCounts
+    -> Dict String UsageCounts
+annUsage candidates position annotation usage =
+    let
+        self =
+            when directAliasName candidates annotation is
+                Just name ->
+                    if position.isKey then
+                        bumpUsage name (\c -> { c | keyUses = c.keyUses + 1 }) usage
+
+                    else
+                        bumpUsage name (\c -> { c | otherUses = c.otherUses + 1 }) usage
+
+                Nothing ->
+                    usage
+    in
+    when annotation is
+        TypeTyped { ref = ref, arguments = arguments } ->
+            let
+                -- Index-based: only slot 0 of a keyed container is a key
+                -- position (`Dict K K`'s value slot must stay `other`).
+                hasKeySlot =
+                    (isDictRef ref && Array.length arguments == 2)
+                        || (isSetRef ref && Array.length arguments == 1)
+            in
+            Array.indexedFoldl
+                (\index argument acc ->
+                    annUsage candidates
+                        { isKey = hasKeySlot && index == 0 }
+                        argument
+                        acc
+                )
+                self
+                arguments
+
+        TypeTuple elements ->
+            Array.foldl (annUsage candidates { isKey = False }) self elements
+
+        TypeRecord fields ->
+            Array.foldl
+                (\field acc -> annUsage candidates { isKey = False } field.typeAnnotation acc)
+                self
+                fields
+
+        TypeGenericRecord { fields = fields } ->
+            Array.foldl
+                (\field acc -> annUsage candidates { isKey = False } field.typeAnnotation acc)
+                self
+                fields
+
+        TypeFunction { left = left, right = right } ->
+            annUsage candidates
+                { isKey = False }
+                right
+                (annUsage candidates { isKey = False } left self)
+
+        _ ->
+            self
+
+
+bumpUsage :
+    String
+    -> (UsageCounts -> UsageCounts)
+    -> Dict String UsageCounts
+    -> Dict String UsageCounts
+bumpUsage name bump usage =
+    Dict.set name
+        (bump (Dict.get name usage |> Maybe.withDefault noUses))
+        usage
+
+
+{-| R1 return law: every function whose signature returns a candidate
+alias must have ONLY tuple-literal tail expressions (we must be able to
+wrap every construction). Returns the set of alias names for which the
+law holds across the package.
+-}
+aliasReturnLawHolds : Dict String AliasInfo -> Array File -> Dict String {}
+aliasReturnLawHolds candidates files =
+    let
+        violated =
+            Array.foldl
+                (\file acc ->
+                    Array.foldl
+                        (\declaration inner ->
+                            when declaration is
+                                DeclFunction { signature = Just sig, expression = expression } ->
+                                    when returnedAliasName candidates sig.typeAnnotation is
+                                        Just name ->
+                                            if allTailsAreTuples expression then
+                                                inner
+
+                                            else
+                                                Dict.set name {} inner
+
+                                        Nothing ->
+                                            inner
+
+                                _ ->
+                                    inner
+                        )
+                        acc
+                        file.declarations
+                )
+                Dict.empty
+                files
+    in
+    Dict.foldl
+        (\name _ acc ->
+            if Dict.member name violated then
+                acc
+
+            else
+                Dict.set name {} acc
+        )
+        Dict.empty
+        candidates
+
+
+returnedAliasName : Dict String AliasInfo -> TypeAnn -> Maybe String
+returnedAliasName candidates annotation =
+    when annotation is
+        TypeFunction { right = right } ->
+            returnedAliasName candidates right
+
+        _ ->
+            directAliasName candidates annotation
+
+
+allTailsAreTuples : Expr -> Bool
+allTailsAreTuples expr =
+    when expr is
+        ExprTuple _ ->
+            True
+
+        ExprLet { expression = body } ->
+            allTailsAreTuples body
+
+        ExprIf { then_ = then_, else_ = else_ } ->
+            allTailsAreTuples then_ && allTailsAreTuples else_
+
+        ExprCase { cases = arms } ->
+            Array.all (\arm -> allTailsAreTuples arm.body) arms
+
+        _ ->
+            False
+
+
+{-| Cheap destructuring guard: a candidate alias is ineligible when any
+tuple pattern destructures the direct result of a function returning it
+(`case toRangeLike x is ( a, b ) -> …` / `let ( a, b ) = toRangeLike x`).
+Deeper flows are not provable here and stay ledgered under D24b.
+-}
+destructuredAliasNames : Dict String AliasInfo -> Array File -> Dict String {}
+destructuredAliasNames candidates files =
+    let
+        returners =
+            Array.foldl
+                (\file acc ->
+                    Array.foldl
+                        (\declaration inner ->
+                            when declaration is
+                                DeclFunction { name = name, signature = Just sig } ->
+                                    when returnedAliasName candidates sig.typeAnnotation is
+                                        Just aliasName ->
+                                            Dict.set name aliasName inner
+
+                                        Nothing ->
+                                            inner
+
+                                _ ->
+                                    inner
+                        )
+                        acc
+                        file.declarations
+                )
+                Dict.empty
+                files
+    in
+    Array.foldl
+        (\file acc ->
+            Array.foldl
+                (\declaration inner ->
+                    when declaration is
+                        DeclFunction { expression = expression } ->
+                            scanDestructures returners expression inner
+
+                        _ ->
+                            inner
+                )
+                acc
+                file.declarations
+        )
+        Dict.empty
+        files
+
+
+scanDestructures :
+    Dict String String
+    -> Expr
+    -> Dict String {}
+    -> Dict String {}
+scanDestructures returners expr acc =
+    let
+        callAlias called =
+            when called is
+                ExprApplication parts ->
+                    when Array.get 0 parts is
+                        Just (ExprVar ref) ->
+                            Dict.get ref.name returners
+
+                        _ ->
+                            Nothing
+
+                _ ->
+                    Nothing
+
+        hasTuplePat pattern =
+            when pattern is
+                PatTuple _ ->
+                    True
+
+                PatAs { pattern = inner } ->
+                    hasTuplePat inner
+
+                _ ->
+                    False
+
+        self =
+            when expr is
+                ExprCase { expression = scrutinee, cases = arms } ->
+                    when callAlias scrutinee is
+                        Just aliasName ->
+                            if Array.any (\arm -> hasTuplePat arm.pattern) arms then
+                                Dict.set aliasName {} acc
+
+                            else
+                                acc
+
+                        Nothing ->
+                            acc
+
+                ExprLet { declarations = declarations } ->
+                    Array.foldl
+                        (\letDecl inner ->
+                            when letDecl is
+                                Ast.Types.LetDestructure { pattern = pattern, expression = rhs } ->
+                                    when callAlias rhs is
+                                        Just aliasName ->
+                                            if hasTuplePat pattern then
+                                                Dict.set aliasName {} inner
+
+                                            else
+                                                inner
+
+                                        Nothing ->
+                                            inner
+
+                                _ ->
+                                    inner
+                        )
+                        acc
+                        declarations
+
+                _ ->
+                    acc
+    in
+    Walk.foldExprChildren (\child inner -> scanDestructures returners child inner) self expr
+
+
+{-| R2 field evidence: record-alias fields typed `Dict ( enc, … ) v` /
+`Set ( enc, … )`. Field-name collisions with differing slots drop the
+field name.
+-}
+collectKeyFields : Array File -> Dict String Slot
+collectKeyFields files =
+    Array.foldl
+        (\file acc ->
+            Array.foldl
+                (\declaration inner ->
+                    when declaration is
+                        DeclAlias { typeAnnotation = TypeRecord fields } ->
+                            Array.foldl
+                                (\field deeper ->
+                                    when inlineSlot field.typeAnnotation is
+                                        Just slot ->
+                                            poison field.name slot deeper
+
+                                        Nothing ->
+                                            deeper
+                                )
+                                inner
+                                fields
+
+                        _ ->
+                            inner
+                )
+                acc
+                file.declarations
+        )
+        Dict.empty
+        files
+        |> keepUnpoisoned
+
+
+{-| R3 signature evidence: package functions indexed by BARE name (the
+same package-uniqueness convention R1 uses), poisoned on disagreement.
+-}
+collectSignatureReturns :
+    (TypeAnn -> Maybe a)
+    -> Array File
+    -> Dict String a
+collectSignatureReturns readReturn files =
+    Array.foldl
+        (\file acc ->
+            Array.foldl
+                (\declaration inner ->
+                    when declaration is
+                        DeclFunction { name = name, signature = Just sig } ->
+                            when readReturn (returnAnn sig.typeAnnotation) is
+                                Just value ->
+                                    poison name value inner
+
+                                Nothing ->
+                                    inner
+
+                        _ ->
+                            inner
+                )
+                acc
+                file.declarations
+        )
+        Dict.empty
+        files
+        |> keepUnpoisoned
+
+
+poison : String -> a -> Dict String (Maybe a) -> Dict String (Maybe a)
+poison name value acc =
+    Dict.update name
+        (\existing ->
+            when existing is
+                Nothing ->
+                    Just (Just value)
+
+                Just (Just previous) ->
+                    if previous == value then
+                        Just (Just previous)
+
+                    else
+                        Just Nothing
+
+                Just Nothing ->
+                    Just Nothing
+        )
+        acc
+
+
+returnAnn : TypeAnn -> TypeAnn
+returnAnn annotation =
+    when annotation is
+        TypeFunction { right = right } ->
+            returnAnn right
+
+        _ ->
+            annotation
+
+
+tupleReturnShapes : TypeAnn -> Maybe (Array KeyShape)
+tupleReturnShapes annotation =
+    when annotation is
+        TypeTuple elements ->
+            Codec.tupleShapes elements
+
+        _ ->
+            Nothing
+
+
+containerReturnSlot : TypeAnn -> Maybe Slot
+containerReturnSlot annotation =
+    inlineSlot annotation

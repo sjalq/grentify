@@ -790,6 +790,105 @@ Coverage and pipeline:
   not a first-party module known to lack the name, and the review run and
   the port must resolve the SAME dependency version (same class as D55's
   "which elm-review runs depends on whether node_modules exists").
+- **D65 tuple keys could be WRITTEN but never READ, and an unannotated
+  container was invisible** (the D24b residual named in §STATUS; FIXED
+  2026-07-26): D24b's R1/R2 encode a proven tuple key at write sites and
+  retype the container, but NOTHING EVER DECODES, so a package whose
+  public API hands keys back (`Set.toList`, `Dict.keys`, `Dict.foldr`)
+  could not be served at all — and both rules need an alias or an inline
+  annotation, which `ianmackenzie/elm-triangular-mesh` has neither of
+  (`Set.insert (canonicalize i j)` into a set built from `Set.empty`
+  inside an unannotated local helper, read back with `Set.toList`).
+  Three laws, one module each:
+  * REPRESENTATION (new `Ast/KeyEncode/Codec.gren`): the key is the FLAT,
+    POSITIONAL array of the tuple's leaves at their COMMON element type
+    (`( Int, Int )` -> `Array Int`), falling back to `Array String` only
+    when the leaves disagree. It replaces the length-prefixed String
+    concatenation. Arity is static, so it is injective with no separator,
+    no escaping and no prefix; every leaf sits at a statically known
+    index, which is what makes DECODE one expression per leaf and
+    therefore makes reading a rewritten container possible at all; and at
+    a common element type Gren's elementwise array comparison IS Elm's
+    lexicographic tuple order, so a rewritten `Dict ( Int, Int ) v` now
+    iterates EXACTLY as Elm's did. The D24b ordering caveat shrinks to
+    mixed-leaf shapes only.
+  * R3 DECLARATION LAW (`Ast/KeyEncode.gren`): a top-level declaration's
+    Set world (resp. Dict world) is SEEDED by an inline container in its
+    signature, a proven container expression in its body, or a
+    KEY-position argument that calls a package function whose signature
+    returns a concrete encodable tuple. That last witness is conclusive
+    by Elm's own typing — `Set.insert : comparable -> Set comparable ->
+    Set comparable`, so a tuple key means a tuple-keyed set — and it is
+    what sees through the unannotated helper. TOTALITY: every
+    `Set.`/`Dict.` reference in the declaration must be a saturated call
+    the operation table can carry, or the kind is dropped WHOLE; a key
+    may never escape half-rewritten. Then all keys encode, all key
+    RESULTS decode (`toList`/`keys`), and all key-taking callbacks are
+    wrapped (`foldl`/`foldr`/`map`/`filter`). R3 cannot regress a package
+    that ports today: a seed needs either a tuple key in a comparable
+    position (which Gren rejects today) or an inline tuple-keyed
+    annotation (which R2 already rewrote today), and a wrong seed cannot
+    unify — encoded arrays and lowered tuple records never unify, so a
+    mis-seed is always loud at gren-verify, never silently wrong.
+  * EVIDENCE (`Ast/KeyEncode/Evidence.gren`): all four package indexes,
+    keyed by bare name and poisoned on ambiguity. `Ast/KeyEncode.gren`
+    was 1309 lines before this and the three-way split is the G3 fix:
+    523 / 793 / 1034 (representation / evidence / rewrite).
+  Generated binders now carry the rewrite node's DEPTH, so a decoding
+  callback nested inside a decoding callback can never SHADOW — the D38
+  class, pre-empted rather than discovered.
+  Proofs: tier 0 **277** (was 267), 10 new checks covering the three R3
+  seeds, the totality refusal, the no-seed no-op, and the ROUND-TRIP
+  property `decode (encode v) == v` evaluated on the generated ASTs
+  through the P1 Eval oracle (Eval gained `Maybe.withDefault`,
+  `List.head/drop/map`, `String.toInt/toFloat/toList`,
+  `String.fromFloat/fromChar` for it). That property earned itself
+  immediately: Gren's `Array.append a b` is `b ++ a`, so nested leaves
+  were being flattened in the WRONG ORDER — every injectivity check
+  passed and the round trip failed. RECEIPTS:
+  `ianmackenzie/elm-triangular-mesh@1.1.0` ports and gren-verifies clean
+  (EXIT=0) for the first time in the project's history, and
+  `jfmengels/elm-review@2.16.6` re-ports clean (EXIT=0, 5 packages) with
+  `--no-ported-cache`, proving R1/R2 through the new representation.
+  Canary 14/14 (17.1s at -j4).
+  OPERATIONAL NOTE found while proving that: elm-review's CACHED path
+  fails with `Node.Node` never recordified, because
+  `stil4m__elm-syntax__7.3.9__1f5aae32baab` was banked 2026-07-25,
+  BEFORE D57, so its manifest carries no `ctorArities`. The
+  `…__dda3ccb953a9` entry banked today does. So the same pre-D57 entries
+  are masked for one mappings digest and fatal for another — every
+  ported-cache entry older than D57 is a latent silent-empty
+  constructor-facts bug and should be purged or re-banked before the next
+  drain. Nothing to do with this fix: with the cache off, the port is
+  clean.
+  NOT FIXED, and newly UNMASKED behind the mesh: `ianmackenzie/elm-geometry`
+  and `-svg` now fail one dependency later, in
+  `ianmackenzie/elm-units-interval`, where `aggregateOf` lowers to an
+  irrefutable `let` destructure whose ctor pattern Print then breaks
+  across lines — `(Interval { first = Quantity.Quantity a, second = … })`
+  on one line, a bare `=` on the next, UNFINISHED DEFINITION. A Print
+  layout defect, in the D42 family. PROVEN NOT OURS by A/B on this
+  worktree with `--no-ported-cache`: with D65 STASHED the same package
+  fails at the same line 720. (Two red herrings burnt on the way, both
+  worth knowing: with a WARM ported cache the module passes, because the
+  pre-D57 `elm-units` entry carries no `ctorArities`, so
+  `Quantity.Quantity` is not known to be a sole ctor and MatchCompile
+  emits the `when` form instead — CORRECT dependency facts are what
+  exposes the Print bug. And the main worktree's UNCOMMITTED
+  `mappings/builtin.json` edit also makes it pass, so a main-repo binary
+  disagrees with a clean-branch binary on this package.)
+  ACCOUNTING CORRECTED: of the twelve packages filed against this class,
+  only three are it (elm-triangular-mesh + the two geometry dependents).
+  `dtwrks/elm-book`, `ymtszw/elm-xml-decode`,
+  `folkertdev/one-true-path-experiment`, `folkertdev/svg-path-lowlevel`
+  and `dillonkearns/elm-markdown` all fail on elm/parser's
+  `Advanced.Token` arriving as `{ first, second }` where Gren wants
+  `{ str, expecting }` — the D63 dependency-constructor family, ONE fix
+  for five packages. `ThinkAlexandria/css-in-elm` is the same shape on
+  `Platform.worker`'s `{ model, command }`. `justgook/elm-image` is the
+  D24a residual: a `sortWith` whose comparator is `compare` over a
+  lowered tuple record, with no evidence for a generated lexicographic
+  one.
 - **D49 ctor-embedded list merge misfires when the list column is not
   argument 0** (found banking elm-css 2026-07-23: Css.Structure failed
   gren-verify with transform-introduced SHADOWING — `Selector sequence
@@ -931,6 +1030,11 @@ Coverage and pipeline:
   non-concrete element types, cross-package boundary drift when a
   dependent constructs keys for a rewritten signature. Tier 0: 253
   checks incl. Eval injectivity oracles.
+  SUPERSEDED 2026-07-26 by **D65**, which closed the round-trip and the
+  unannotated-flow residuals (R3 declaration law + decode-on-read) and
+  replaced the length-prefixed String encoding with the flat positional
+  array. Still open from this list: tuple keys with non-concrete element
+  types, and cross-package boundary drift.
 - **D41 MatchCompile leaked nested list patterns inside ctor-arg heads**
   (found by the unbounded elm-css hub seed 2026-07-23; FIXED same day,
   Fable): a cons arm whose head is a ctor pattern with nested list/cons
@@ -1577,6 +1681,23 @@ evidence base for the next fix campaign.
   every manifest in every port and its proof is a full core-set run.
   Tier 0 267 checks; `test:ledger` green (7 new signature checks);
   canary 14/14.
+- 2026-07-26 D65 (the D24b residual) CLOSED for the tuple-key class:
+  `ianmackenzie/elm-triangular-mesh@1.1.0` ports and gren-verifies clean
+  for the first time. KeyEncode gained the R3 declaration law
+  (unannotated containers, seeded by a tuple-returning signature at a key
+  position) and DECODE-ON-READ, and the key representation became the
+  flat positional leaf array at the leaves' common element type, so
+  homogeneous tuple keys now keep Elm's EXACT iteration order.
+  Tier 0 277, canary 14/14, elm-review re-ports clean.
+  THE QUEUE ACCOUNTING BELOW IS CORRECTED: the "12 packages across two
+  clusters are ONE class" line was wrong. Only three are this class
+  (elm-triangular-mesh + the two geometry dependents); five are
+  elm/parser's `Advanced.Token` arriving as `{ first, second }` (D63
+  family — ONE fix for five packages, and now the biggest single lever
+  left); one is `Platform.worker`'s `{ model, command }`; one is the D24a
+  comparator residual. `ianmackenzie/elm-geometry` and `-svg` now stop one
+  dependency later on a Print layout defect in `elm-units-interval` (D42
+  family), proven pre-existing by A/B with D65 stashed.
 - 2026-07-26 (end of session) CORE SET **189/232 = 81.5%**, up from 179
   (77.2%), zero regressions, 12.7 min wall at -j8, median 4.3s/package.
   Ten packages newly passing, six of them former timeouts and one
@@ -1730,6 +1851,12 @@ evidence base for the next fix campaign.
 
 ## CHANGELOG
 
+- 2026-07-26 D65: KeyEncode gained the R3 declaration law and decode-on-read;
+  the key representation is now the flat positional leaf array at the leaves'
+  common element type, so homogeneous tuple keys keep Elm's exact iteration
+  order. elm-triangular-mesh ports clean for the first time; elm-review
+  re-ports clean. Tier 0 277 (round-trip property added), canary 14/14.
+  `Ast/KeyEncode` split three ways under G3.
 - 2026-07-17 (plan) PLAN.md created; supersedes PHASE-ECOSYSTEM-HARDENING.md.
 - 2026-07-17 (plan) Revised after adversarial review: terminal states completed
   (PASS(compile-only), deviations, no-size-exemption), milestone tags + gate tasks,

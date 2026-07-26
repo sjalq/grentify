@@ -29,6 +29,7 @@ Terminal states, per package in the snapshot:
 | `EXEMPT(kernel)` | Contains `Elm.Kernel`/effect modules, or transitively requires an unmapped kernel package | offending module/dep chain |
 | `EXEMPT(glsl)` | Contains GLSL blocks, directly or transitively | offending module/dep |
 | `EXEMPT(broken-upstream)` | Original does not build with Elm 0.19.1 | recorded `elm make`/`elm docs` failure |
+| `EXEMPT(mapping-absent)` | A mapped package's Gren analogue does not provide a module the source imports | full `MAPPING_MODULE_ABSENT` refusal (importing module, absent module, mapped-from, mapped-to, reason from `absentModules`) |
 
 Both PASS states satisfy DONE. Accepted behavioral deviations (see W2.4, W7.1) must be
 stamped per package in the ledger `deviations` field; a deviation never blocks PASS but
@@ -250,8 +251,45 @@ by being written through this law; nothing edits the ledger by hand.
   `ianmackenzie/elm-triangular-mesh`, `jfmengels/elm-review` EXIT=0.
   Tier 0 **332** checks (was 326; 6 new: 3 TupleCompare structural +
   property, 3 KeyEncode R2b). Canary 14/14.
+- **D81 a mapped package's module with no Gren analogue was banked
+  `working-failure`, so three packages sat in the drain forever for something
+  no transform can fix** (found off D74's legibility work; FIXED 2026-07-26).
+  D74 correctly refuses `MAPPING_MODULE_ABSENT` when a package imports a
+  module that `mappings/builtin.json` marks absent from the Gren mapping
+  target (today: `Test.Html.*` and `Shrink` on `elm-explorations/test` →
+  `gren-lang/test 5.0.0`). The refusal is right; the STATE was wrong. The
+  walker left it as a working failure, so `avh4/elm-program-test`,
+  `NoRedInk/noredink-ui` (via that dependency), and `drathier/elm-graph` were
+  re-attempted forever. §1 had no terminal state for "the Gren analogue does
+  not provide this module": not kernel, not glsl, and not broken-upstream
+  (the Elm packages build fine — D51 forbids filing our own gap as upstream
+  breakage either).
+  **New terminal state `EXEMPT(mapping-absent)`.** Walker matches the tool's
+  exact refusal line only:
+  `/MAPPING_MODULE_ABSENT: \S+ imports \S+, which \S+ provides and its Gren mapping target \S+ does not: [^\n]+/`.
+  No bare-code match, no incidental "mapping"/"absent" substring (D66/D79).
+  Evidence is the refusal line(s) themselves — they already name importing
+  module, absent module, mapped-from, mapped-to, and the `absentModules`
+  reason. Ledger gains `EXEMPT-mapping-absent` as a seventh canonical state.
+  **absentModules coverage for gren-lang/test 5.0.0 verified against the
+  package on this machine:** exposed modules are exactly `Test`,
+  `Test.Runner`, `Test.Runner.Failure`, `Test.Runner.String`,
+  `Test.Distribution`, `Expect`, `Fuzz`. The four absent entries
+  (`Shrink`, `Test.Html.Event`, `Test.Html.Query`, `Test.Html.Selector`)
+  match; no extra entry added by guess. `Shrink` is still required: it was
+  exposed by elm-explorations/test 1.x and packages like elm-graph still
+  import it.
+  MEASURED by replaying every banked `evidence` string in `core-run.jsonl`
+  and `walk-log.jsonl` through old vs new classifier: **0 records change
+  state** — banked evidence is pre-D74 `MODULE NOT FOUND` / verify tails, so
+  the new match cannot fire on them and cannot reclassify anything else.
+  Fresh re-walk of the three (scratch log) lands each `EXEMPT` /
+  `mapping-absent` with the full refusal as evidence.
+  Walker self-test 36 → 46 (8 new exempt cases both directions + 2 evidence
+  shape checks). Tier 0 326 (ledger STATE_KEY extended; Gren suite unchanged).
 
 - **D80 `Transform.Pipeline` re-read the WHOLE MODULE SOURCE once per
+
   qualified-name step, to confirm a fact it already held** (found by V8 tick
   profile 2026-07-26; FIXED same day).
  `qualifiedNameFrom` /

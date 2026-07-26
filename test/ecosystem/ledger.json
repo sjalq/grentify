@@ -8,6 +8,7 @@
     "EXEMPT-kernel": "Out of scope: depends on Elm Kernel / effect-module native code.",
     "EXEMPT-glsl": "Out of scope: uses WebGL/GLSL shaders the target does not support.",
     "EXEMPT-broken-upstream": "Out of scope: the upstream Elm package is itself broken / unbuildable.",
+    "EXEMPT-mapping-absent": "Out of scope: a mapped package's Gren analogue does not provide a module the source imports (MAPPING_MODULE_ABSENT).",
     "working-failure": "Reproduced, evidenced failure to port on the stamped commit (reason + evidence required)."
   },
   "seededFrom": "documented seed (pure 201/202, browser 246/252) at commit 0d0ce41 — no LAST_RUN.json proof present",

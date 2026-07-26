@@ -11,7 +11,7 @@
  * use; the pure functions never call it.
  *
  * Laws enforced here:
- *  - State-key law: every entry.state MUST be one of the six canonical states
+ *  - State-key law: every entry.state MUST be one of the seven canonical states
  *    (see STATES / STATE_KEY). working-failure additionally REQUIRES reason +
  *    evidence.
  *  - STALE law (docs/PLAN.md §5): an entry is STALE when its stamped commit
@@ -28,13 +28,14 @@
 
 const { spawnSync } = require("node:child_process");
 
-/** The six canonical terminal states. Exact string encodings — do not alias. */
+/** The seven canonical terminal states. Exact string encodings — do not alias. */
 const STATES = Object.freeze([
   "PASS",
   "PASS-compile-only",
   "EXEMPT-kernel",
   "EXEMPT-glsl",
   "EXEMPT-broken-upstream",
+  "EXEMPT-mapping-absent",
   "working-failure",
 ]);
 
@@ -49,6 +50,8 @@ const STATE_KEY = Object.freeze({
     "Out of scope: uses WebGL/GLSL shaders the target does not support.",
   "EXEMPT-broken-upstream":
     "Out of scope: the upstream Elm package is itself broken / unbuildable.",
+  "EXEMPT-mapping-absent":
+    "Out of scope: a mapped package's Gren analogue does not provide a module the source imports (MAPPING_MODULE_ABSENT).",
   "working-failure":
     "Reproduced, evidenced failure to port on the stamped commit (reason + evidence required).",
 });
@@ -58,6 +61,7 @@ const EXEMPT_STATES = Object.freeze([
   "EXEMPT-kernel",
   "EXEMPT-glsl",
   "EXEMPT-broken-upstream",
+  "EXEMPT-mapping-absent",
 ]);
 
 function isValidState(state) {

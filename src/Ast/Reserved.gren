@@ -1,4 +1,4 @@
-module Ast.Reserved exposing ( apply, applyWith, exportRenames, exportRenamesFrom, renameMap, rewriteName )
+module Ast.Reserved exposing ( apply, applyWith, exportRenames, exportRenamesFrom, pickFree, renameMap, rewriteName )
 
 {-| Rename identifiers that are keywords in Gren but ordinary names in Elm.
 
@@ -192,6 +192,10 @@ buildRenameMap occupied =
 
 
 {-| `when` → try `when_`, then `when__`, … until not in `taken`.
+
+Shared occupancy escape: any pass that must mint a name nobody else holds uses
+this one (see `Ast.NameSub`'s import-qualifier law) so there is a single
+free-name scheme in the host.
 -}
 pickFree : String -> Dict String {} -> String
 pickFree name taken =

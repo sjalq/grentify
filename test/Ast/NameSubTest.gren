@@ -12,10 +12,18 @@ classList = classList }` had its own `classList` PARAMETER rewritten to the
 value substituted where a bare array was expected, a TYPE MISMATCH. NameSub
 must respect the same scope law `Ast.BareResolve` does (shared via
 `Ast.Scope`): a local binding always wins over an import.
+
+Also D68 (unique qualifiers): Elm lets several imports share one qualifier
+(`import Array` + `import Array.Extra as Array` + `import ArrayExtra as
+Array`) and picks the module that actually exposes each name; Gren calls that
+AMBIGUOUS NAME. Since every ref carries its resolved home module,
+`qualifyByImports` hands each import a qualifier nobody else holds and prints
+each ref under its own home module's qualifier.
 -}
 
 import Array exposing (Array)
 import Ast.NameSub as NameSub
+import Ast.Print as Print
 import Ast.Types as T exposing (Expr(..), LetDecl(..), Pattern(..))
 import Dict
 import Mapping.Types exposing (Registry)
@@ -182,7 +190,243 @@ tests =
     [ paramShadowStaysLocal
     , unboundBareIsRemapped
     , letBoundStaysLocalSiblingRemapped
+    , collidingAliasFallsBackToOwnModule
+    , fourWayCollisionGetsFourQualifiers
+    , freeAliasesAreLeftAlone
+    , exhaustedCollisionTakesOccupancyEscape
+    , siblingModuleKeepsItsOwnAlias
     ]
+
+
+-- D68: UNIQUE IMPORT QUALIFIERS -----------------------------------------------
+
+
+emptyRegistry : Registry
+emptyRegistry =
+    { packageOrder = []
+    , packages = Dict.empty
+    , versionedPackages = []
+    , modules = Dict.empty
+    }
+
+
+importOf : String -> Maybe String -> T.Import
+importOf moduleName alias =
+    { moduleName = moduleName, alias = alias, exposing_ = Nothing }
+
+
+{-| A module named `Repro` whose single declaration `use` applies every ref in
+`refs`, so both the import list and the resolved refs can be inspected after
+`NameSub.apply`.
+-}
+moduleUsing : Array T.Import -> Array Expr -> T.File
+moduleUsing imports refs =
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = T.NormalModule
+        , moduleName = "Repro"
+        , exposing_ = T.ExposeAll
+        }
+    , comments = []
+    , imports = imports
+    , declarations =
+        [ T.DeclFunction
+            { name = "use"
+            , documentation = Nothing
+            , signature = Nothing
+            , arguments = []
+            , expression = ExprApplication refs
+            }
+        ]
+    }
+
+
+{-| `moduleName` → printed qualifier, for every import of the file. -}
+qualifiersOf : T.File -> Array { moduleName : String, qualifier : String }
+qualifiersOf file =
+    Array.map
+        (\import_ ->
+            { moduleName = import_.moduleName
+            , qualifier = Maybe.withDefault import_.moduleName import_.alias
+            }
+        )
+        file.imports
+
+
+refsOf : T.File -> Array Expr
+refsOf file =
+    file.declarations
+        |> Array.first
+        |> Maybe.map
+            (\declaration ->
+                when declaration is
+                    T.DeclFunction function ->
+                        when function.expression is
+                            ExprApplication parts ->
+                                parts
+
+                            _ ->
+                                []
+
+                    _ ->
+                        []
+            )
+        |> Maybe.withDefault []
+
+
+{-| The `maca/elm-rose-tree` shape: `Array.update` was emitted for both the
+`Array` and the `Array.Extra as Array` import, and gren rejected the file with
+AMBIGUOUS NAME. The alias must give way, leaving `Array.Extra.update`.
+-}
+collidingAliasFallsBackToOwnModule : TestResult
+collidingAliasFallsBackToOwnModule =
+    let
+        result =
+            NameSub.apply emptyRegistry
+                (moduleUsing
+                    [ importOf "Array" Nothing
+                    , importOf "Array.Extra" (Just "Array")
+                    ]
+                    [ qualified "Array" "get", qualified "Array.Extra" "update" ]
+                )
+
+        printed =
+            Print.print result
+    in
+    { name = "rose-tree: `import Array.Extra as Array` drops its alias next to `import Array`"
+    , passed =
+        qualifiersOf result
+            == [ { moduleName = "Array", qualifier = "Array" }
+               , { moduleName = "Array.Extra", qualifier = "Array.Extra" }
+               ]
+            && refsOf result
+            == [ qualified "Array" "get", qualified "Array.Extra" "update" ]
+            && String.contains "import Array.Extra\n" printed
+            && String.contains "Array.Extra.update" printed
+    , details = "each ref carries its resolved home module, so the qualifier is ours to choose"
+    }
+
+
+{-| The `lue-bird/elm-typesafe-array` shape: three imports competing for
+`Array` plus an unaliased `Array.Linear`. Four imports, four qualifiers.
+-}
+fourWayCollisionGetsFourQualifiers : TestResult
+fourWayCollisionGetsFourQualifiers =
+    let
+        result =
+            NameSub.apply emptyRegistry
+                (moduleUsing
+                    [ importOf "Array" Nothing
+                    , importOf "Array.Extra" (Just "Array")
+                    , importOf "Array.Linear" Nothing
+                    , importOf "ArrayExtra" (Just "Array")
+                    ]
+                    [ qualified "Array" "length"
+                    , qualified "Array.Extra" "reverse"
+                    , qualified "Array.Linear" "element"
+                    , qualified "ArrayExtra" "allOk"
+                    ]
+                )
+
+        qualifiers =
+            Array.map .qualifier (qualifiersOf result)
+    in
+    { name = "typesafe-array: four imports sharing `Array` end up with four distinct qualifiers"
+    , passed =
+        qualifiers == [ "Array", "Array.Extra", "Array.Linear", "ArrayExtra" ]
+            && refsOf result
+            == [ qualified "Array" "length"
+               , qualified "Array.Extra" "reverse"
+               , qualified "Array.Linear" "element"
+               , qualified "ArrayExtra" "allOk"
+               ]
+    , details = "unaliased imports anchor their module name; colliding aliases fall back to theirs"
+    }
+
+
+{-| An alias nobody else wants is untouched — the pass must not requalify the
+whole world just because one file happens to collide.
+-}
+freeAliasesAreLeftAlone : TestResult
+freeAliasesAreLeftAlone =
+    let
+        result =
+            NameSub.apply emptyRegistry
+                (moduleUsing
+                    [ importOf "Json.Decode" (Just "Decode")
+                    , importOf "Json.Encode" (Just "Encode")
+                    ]
+                    [ qualified "Json.Decode" "field" ]
+                )
+    in
+    { name = "non-colliding aliases survive untouched"
+    , passed =
+        qualifiersOf result
+            == [ { moduleName = "Json.Decode", qualifier = "Decode" }
+               , { moduleName = "Json.Encode", qualifier = "Encode" }
+               ]
+            && refsOf result
+            == [ qualified "Decode" "field" ]
+    , details = "`import Json.Decode as Decode` still forbids `Json.Decode.field` in Gren"
+    }
+
+
+{-| Aliases naming each other's modules: `Zed as Bar` finds both its alias and
+its own module name taken, so it takes `Ast.Reserved.pickFree`'s escape — the
+host's single free-name scheme, not a second one.
+-}
+exhaustedCollisionTakesOccupancyEscape : TestResult
+exhaustedCollisionTakesOccupancyEscape =
+    let
+        result =
+            NameSub.apply emptyRegistry
+                (moduleUsing
+                    [ importOf "Q" (Just "Zed")
+                    , importOf "Foo" (Just "Bar")
+                    , importOf "Zed" (Just "Bar")
+                    ]
+                    [ qualified "Zed" "value" ]
+                )
+    in
+    { name = "alias and own module both taken: falls through to the occupancy escape"
+    , passed =
+        Array.map .qualifier (qualifiersOf result) == [ "Zed", "Bar", "Bar_" ]
+            && refsOf result == [ qualified "Bar_" "value" ]
+    , details = "`Ast.Reserved.pickFree` mints the name; qualifiers stay pairwise distinct"
+    }
+
+
+{-| The multi-module dimension: a sibling module importing the same modules
+without a collision keeps its own alias. Qualifier choice is per-file, and the
+refs (which carry home modules, not qualifiers) stay portable between them.
+-}
+siblingModuleKeepsItsOwnAlias : TestResult
+siblingModuleKeepsItsOwnAlias =
+    let
+        colliding =
+            NameSub.apply emptyRegistry
+                (moduleUsing
+                    [ importOf "Array" Nothing
+                    , importOf "Array.Extra" (Just "Array")
+                    ]
+                    [ qualified "Array.Extra" "reverse" ]
+                )
+
+        sibling =
+            NameSub.apply emptyRegistry
+                (moduleUsing
+                    [ importOf "Array.Extra" (Just "Arr") ]
+                    [ qualified "Array.Extra" "reverse" ]
+                )
+    in
+    { name = "a sibling module without the collision keeps `Array.Extra as Arr`"
+    , passed =
+        Array.map .qualifier (qualifiersOf colliding) == [ "Array", "Array.Extra" ]
+            && refsOf colliding == [ qualified "Array.Extra" "reverse" ]
+            && Array.map .qualifier (qualifiersOf sibling) == [ "Arr" ]
+            && refsOf sibling == [ qualified "Arr" "reverse" ]
+    , details = "the rename is a local print choice; no cross-module rename to desync (cf. D18)"
+    }
 
 
 paramShadowStaysLocal : TestResult

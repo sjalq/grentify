@@ -12,6 +12,7 @@ import Ast.Types exposing
     , Exposing(..)
     , Expr(..)
     , File
+    , LetDecl(..)
     , ModuleKind(..)
     , Pattern(..)
     )
@@ -31,7 +32,58 @@ tests =
     [ reservedEscapesAroundExistingUnderscore
     , docsRewriteKeepsCommasWhenNameUnchanged
     , crossModuleReferenceFollowsDefiningModuleEscape
+    , letBoundFunctionNameIsEscaped
     ]
+
+
+{-| D67 (json-tools/json-schema LET PROBLEM): `rewriteExpr` sent `ExprLet` to
+the generic walk, which maps a binding's patterns and body but never its
+`LetFunction` *name*. The call site was escaped to `when_` while the binding
+itself stayed `when`, so Gren's parser hit the keyword mid-`let`.
+-}
+letBoundFunctionNameIsEscaped : TestResult
+letBoundFunctionNameIsEscaped =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "validate"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "n" ]
+                    , expression =
+                        ExprLet
+                            { declarations =
+                                [ LetFunction
+                                    { name = "when"
+                                    , arguments = [ PatVar "propOf" ]
+                                    , expression =
+                                        ExprVar { moduleName = Nothing, name = "propOf" }
+                                    }
+                                ]
+                            , expression =
+                                ExprApplication
+                                    [ ExprVar { moduleName = Nothing, name = "when" }
+                                    , ExprVar { moduleName = Nothing, name = "n" }
+                                    ]
+                            }
+                    }
+                ]
+
+        printed =
+            file
+                |> Reserved.apply Dict.empty
+                |> Print.print
+
+        passed =
+            String.contains "when_ propOf =" printed
+                && String.contains "when_ n" printed
+                && not (String.contains "when propOf =" printed)
+    in
+    outcome
+        "reserved escape reaches let-bound function names"
+        passed
+        ("printed:\n" ++ printed)
 
 
 {-| `@docs a, b, c` must keep commas even when no reserved rename applies.

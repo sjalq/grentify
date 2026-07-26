@@ -163,6 +163,56 @@ by being written through this law; nothing edits the ledger by hand.
 
 ## 6. Known defects register (2026-07-17 audit; independently verified)
 
+- **D67 unparseable output from four packages — TWO causes, not one**
+  (found by the 2026-07-26 parse-failure sweep; both FIXED same day). The
+  four specimens presented as one family (LET PROBLEM / UNFINISHED
+  DEFINITION / UNFINISHED PARENTHESES) and are two unrelated bugs. Both
+  minimal repros are tier-0 checks.
+  - **D67a a definition header split across lines**
+    (folkertdev/elm-sha2, dillonkearns/elm-form,
+    ianmackenzie/elm-units-interval). NOT a `Ast/Print` bug: Print emits
+    the header on one line. gren-format wraps at ~80 columns and lays the
+    continuation of an over-wide `let`-destructure header at the
+    binding's OWN column; Gren's layout reads that column as a new
+    declaration, so the header is cut in half. One wrap, three faces —
+    break before the `=` gives UNFINISHED DEFINITION
+    (`(Interval { first = Quantity.Quantity a, second = … })\n=`), break
+    inside the parens gives UNFINISHED PARENTHESES
+    (`(DeltaState\n(Tuple8 { … })) =`), and a wider `let` around it gives
+    LET PROBLEM. Sibling of D25 (a let laid out below its own keyword)
+    and of the existing `joinTypeHeaders` repair (format wrapping a
+    `type alias` header to column 0). Fix: `joinSplitDefinitionHeaders`
+    in `tools/gren-format/collapse-record-patterns.cjs` — a definition
+    header must occupy ONE physical line. Candidates are indented lines
+    opening `(`/`{` (exactly what Print emits for a `LetDestructure`
+    pattern) that are not already complete; continuations are absorbed
+    only while they stay at or below the candidate's indent, and only
+    committed when the result is bracket-balanced, ends in `=`, and holds
+    no `->` — so type annotations, record-alias bodies and multi-line
+    parenthesized expressions are provably untouched.
+  - **D67b `Reserved` never renamed a `let`-bound function's own name**
+    (json-tools/json-schema). `rewriteExpr` sent `ExprLet` to the generic
+    `Walk.mapExprChildrenWithPatterns`, which maps a binding's patterns
+    and body but not its `LetFunction` name; `rewriteLetDecl` existed and
+    was correct but was never called (dead code, G3 violation). So
+    `let when propOf … =` kept the Gren keyword while every call site was
+    escaped to `when_`. Any Elm package with a local helper named `when`,
+    `is`, `type`, `alias`, `port` … hits it. Fix: an explicit `ExprLet`
+    arm in `src/Ast/Reserved.gren` that routes through `rewriteLetDecl`.
+  RECEIPT: all three parse symptoms retired on all four specimens.
+  json-tools/json-schema, folkertdev/elm-sha2 and dillonkearns/elm-form
+  now port and gren-verify clean (EXIT=0). Tier 0 268 checks (+1);
+  canary 14/14. UNMASKED (not caused by this fix, previously hidden
+  behind the parse abort — the pre-fix output carries the identical
+  lines): ianmackenzie/elm-units-interval now reaches type-check and
+  fails REDUNDANT PATTERN at `Quantity/Interval.gren` `hullHelp` — a
+  dead `_ ->` arm after elm-units' sole ctor `Quantity.Quantity`, i.e. a
+  live D45b gap (cross-package sole ctors reaching MatchCompile through
+  `Pipeline.DepMaps.soleCtors`). Belongs to the D45b drain, not here.
+  Residual: D67a is a REPAIR of a formatter we do not own — the durable
+  proof is W6.5's format-idempotence property, which this repair now
+  makes cheap to state (repair(format(x)) must be a fixed point).
+
 Throughput and accounting (2026-07-25 external review; all four reproduced):
 
 - **D50 every invocation ran the tool TWICE, concurrently** (FIXED 2026-07-25):

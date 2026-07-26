@@ -1,0 +1,520 @@
+module Ast.KeyEncode.Codec exposing
+    ( KeyShape(..)
+    , decodeKey
+    , decoderLambda
+    , encodeKey
+    , encoderLambda
+    , keyAnn
+    , tupleShapes
+    )
+
+{-| D24b/D65: the ONE representation of an Elm tuple used as a Gren
+Dict key / Set member, and the encode/decode pair that realises it.
+
+Law (representation): a tuple of concretely-typed encodable leaves is
+represented by the FLAT, POSITIONAL array of its leaves in left-to-right
+order, at the leaves' common element type; when the leaves do not share
+one type, at `String`.
+
+    ( 3, 7 )          <->  [ 3, 7 ]                 (Array Int)
+    ( 1, ( 2, 3 ) )   <->  [ 1, 2, 3 ]              (Array Int)
+    ( 3, "a" )        <->  [ "3", "a" ]             (Array String)
+
+Gren compares arrays elementwise, so this makes the key comparable
+(`Array comparable` is the one structural comparable Gren has). Three
+consequences, and they are the whole reason for the shape:
+
+1.  ARITY IS STATIC, so the mapping is a bijection on well-typed values
+    with no separator, no escaping and no length prefix.
+2.  EVERY LEAF SITS AT A KNOWN INDEX, so DECODE is one expression per
+    leaf. Encoding alone can only serve keys that are never read back;
+    a cheap decode is what lets a rewritten container be read (D65).
+3.  AT A COMMON ELEMENT TYPE THE ORDER IS EXACT: elementwise comparison
+    of `Array Int` IS Elm's lexicographic tuple order, so a rewritten
+    `Dict ( Int, Int ) v` iterates exactly as Elm's did.
+
+Ordering caveat (ledgered, mixed-leaf shapes only): when leaves do not
+share a type the array is `Array String` and numbers compare as their
+decimal renderings ("10" < "2"), so iteration order of such a container
+can differ from Elm's. Values never differ — decode is exact.
+
+This module is spelled in ELM names (`List`, `List.head`, `String.toInt`):
+the pass runs pre-NameSub, which maps `List` -> `Array`, `List.head` ->
+`Array.first`, `List.drop` -> `Array.dropFirst` like any ported source.
+-}
+
+import Array exposing ( Array )
+import Ast.Types exposing
+    ( Expr(..)
+    , Pattern(..)
+    , TypeAnn(..)
+    )
+
+
+{-| Concrete encodable shape of one tuple element. -}
+type KeyShape
+    = KInt
+    | KFloat
+    | KChar
+    | KString
+    | KNested (Array KeyShape)
+
+
+{-| The element type of the representing array. -}
+type KeyRep
+    = RepInt
+    | RepFloat
+    | RepChar
+    | RepString
+
+
+
+-- SHAPES ----------------------------------------------------------------------
+
+
+{-| Concrete encodable shape of a type annotation, if any. Type
+variables, custom types and records are never encodable; sites holding
+them stay untouched.
+-}
+encodableShape : TypeAnn -> Maybe KeyShape
+encodableShape annotation =
+    when annotation is
+        TypeTyped { ref = ref, arguments = [] } ->
+            if ref.name == "Int" && basicsQualified ref.moduleName then
+                Just KInt
+
+            else if ref.name == "Float" && basicsQualified ref.moduleName then
+                Just KFloat
+
+            else if
+                ref.name == "Char"
+                    && (ref.moduleName == Nothing || ref.moduleName == Just "Char")
+            then
+                Just KChar
+
+            else if
+                ref.name == "String"
+                    && (ref.moduleName == Nothing || ref.moduleName == Just "String")
+            then
+                Just KString
+
+            else
+                Nothing
+
+        TypeTuple elements ->
+            tupleShapes elements
+                |> Maybe.map KNested
+
+        _ ->
+            Nothing
+
+
+basicsQualified : Maybe String -> Bool
+basicsQualified moduleName =
+    moduleName == Nothing || moduleName == Just "Basics"
+
+
+tupleShapes : Array TypeAnn -> Maybe (Array KeyShape)
+tupleShapes elements =
+    if Array.length elements == 0 then
+        Nothing
+
+    else
+        Array.foldl
+            (\element acc ->
+                when acc is
+                    Nothing ->
+                        Nothing
+
+                    Just shapes ->
+                        encodableShape element
+                            |> Maybe.map (\shape -> Array.pushLast shape shapes)
+            )
+            (Just [])
+            elements
+
+
+{-| The tuple's leaves, left to right. Nesting is flattened away: the
+representation is positional and the arity is static, so a leaf's index
+is all the decoder needs.
+-}
+leafShapes : Array KeyShape -> Array KeyShape
+leafShapes shapes =
+    Array.foldl
+        (\shape acc ->
+            when shape is
+                KNested nested ->
+                    acc ++ leafShapes nested
+
+                leaf ->
+                    Array.pushLast leaf acc
+        )
+        []
+        shapes
+
+
+{-| The leaves' common element type, or `String` when they disagree. -}
+repOf : Array KeyShape -> KeyRep
+repOf shapes =
+    let
+        leaves =
+            leafShapes shapes
+
+        seed =
+            Array.first leaves
+                |> Maybe.andThen leafRep
+    in
+    Array.foldl
+        (\leaf acc ->
+            when { acc = acc, rep = leafRep leaf } is
+                { acc = Just found, rep = Just rep } ->
+                    if found == rep then
+                        acc
+
+                    else
+                        Nothing
+
+                _ ->
+                    Nothing
+        )
+        seed
+        leaves
+        |> Maybe.withDefault RepString
+
+
+leafRep : KeyShape -> Maybe KeyRep
+leafRep shape =
+    when shape is
+        KInt ->
+            Just RepInt
+
+        KFloat ->
+            Just RepFloat
+
+        KChar ->
+            Just RepChar
+
+        KString ->
+            Just RepString
+
+        KNested _ ->
+            Nothing
+
+
+{-| The key's type annotation, in Elm spelling (`List Int` -> `Array Int`). -}
+keyAnn : Array KeyShape -> TypeAnn
+keyAnn shapes =
+    TypeTyped
+        { ref = { moduleName = Nothing, name = "List" }
+        , arguments = [ elementAnn (repOf shapes) ]
+        }
+
+
+elementAnn : KeyRep -> TypeAnn
+elementAnn rep =
+    TypeTyped
+        { ref = { moduleName = Nothing, name = repName rep }
+        , arguments = []
+        }
+
+
+repName : KeyRep -> String
+repName rep =
+    when rep is
+        RepInt ->
+            "Int"
+
+        RepFloat ->
+            "Float"
+
+        RepChar ->
+            "Char"
+
+        RepString ->
+            "String"
+
+
+
+-- ENCODE ----------------------------------------------------------------------
+
+
+{-| Encode a key expression of known shape. A fully-literal tuple encodes
+inline; anything else goes through the destructuring lambda so the
+expression is evaluated exactly once.
+-}
+encodeKey : Int -> Array KeyShape -> Expr -> Expr
+encodeKey generation shapes key =
+    when literalLeaves shapes key is
+        Just leaves ->
+            ExprList
+                (Array.map
+                    (\leaf -> renderLeaf (repOf shapes) leaf.shape leaf.expression)
+                    leaves
+                )
+
+        Nothing ->
+            ExprApplication [ encoderLambda generation shapes, key ]
+
+
+{-| `\( d65e0, ( d65e1, d65e2 ) ) -> [ d65e0, d65e1, d65e2 ]` — the
+nested tuple pattern is lowered downstream like any source-level one.
+-}
+encoderLambda : Int -> Array KeyShape -> Expr
+encoderLambda generation shapes =
+    let
+        built =
+            encoderPattern generation 0 shapes
+    in
+    ExprLambda
+        { arguments = [ PatTuple built.patterns ]
+        , expression =
+            ExprList
+                (Array.indexedMap
+                    (\index leaf ->
+                        renderLeaf (repOf shapes) leaf
+                            (bareVar (encoderBinder generation index))
+                    )
+                    (leafShapes shapes)
+                )
+        }
+
+
+encoderPattern : Int -> Int -> Array KeyShape -> { next : Int, patterns : Array Pattern }
+encoderPattern generation start shapes =
+    Array.foldl
+        (\shape state ->
+            when shape is
+                KNested nested ->
+                    let
+                        inner =
+                            encoderPattern generation state.next nested
+                    in
+                    { next = inner.next
+                    , patterns = Array.pushLast (PatTuple inner.patterns) state.patterns
+                    }
+
+                _ ->
+                    { next = state.next + 1
+                    , patterns =
+                        Array.pushLast
+                            (PatVar (encoderBinder generation state.next))
+                            state.patterns
+                    }
+        )
+        { next = start, patterns = [] }
+        shapes
+
+
+encoderBinder : Int -> Int -> String
+encoderBinder generation index =
+    "d65e" ++ String.fromInt generation ++ "_" ++ String.fromInt index
+
+
+{-| The leaves of a tuple literal whose nesting is literal all the way
+down; `Nothing` when any component is a computed expression (then the
+lambda path binds it instead).
+-}
+literalLeaves :
+    Array KeyShape
+    -> Expr
+    -> Maybe (Array { shape : KeyShape, expression : Expr })
+literalLeaves shapes expr =
+    when expr is
+        ExprTuple items ->
+            if Array.length items /= Array.length shapes then
+                Nothing
+
+            else
+                Array.indexedFoldl
+                    (\index item acc ->
+                        when { acc = acc, shape = Array.get index shapes } is
+                            { acc = Just collected, shape = Just (KNested nested) } ->
+                                literalLeaves nested item
+                                    |> Maybe.map (\inner -> collected ++ inner)
+
+                            { acc = Just collected, shape = Just leaf } ->
+                                Just
+                                    (Array.pushLast
+                                        { shape = leaf, expression = item }
+                                        collected
+                                    )
+
+                            _ ->
+                                Nothing
+                    )
+                    (Just [])
+                    items
+
+        _ ->
+            Nothing
+
+
+{-| Leaf -> representation element. Identity when the leaf already has
+the representation's type. -}
+renderLeaf : KeyRep -> KeyShape -> Expr -> Expr
+renderLeaf rep shape leaf =
+    if leafRep shape == Just rep then
+        leaf
+
+    else
+        when shape is
+            KInt ->
+                ExprApplication [ stringFn "fromInt", leaf ]
+
+            KFloat ->
+                ExprApplication [ stringFn "fromFloat", leaf ]
+
+            KChar ->
+                ExprApplication [ stringFn "fromChar", leaf ]
+
+            _ ->
+                leaf
+
+
+
+-- DECODE ----------------------------------------------------------------------
+
+
+{-| Decode a key expression back to the tuple the source wrote. Always
+through the lambda: the key is read once per leaf, so it must be bound.
+-}
+decodeKey : Int -> Array KeyShape -> Expr -> Expr
+decodeKey generation shapes key =
+    ExprApplication [ decoderLambda generation shapes, key ]
+
+
+{-| `\d65k -> ( <leaf 0>, ( <leaf 1>, <leaf 2> ) )` -}
+decoderLambda : Int -> Array KeyShape -> Expr
+decoderLambda generation shapes =
+    ExprLambda
+        { arguments = [ PatVar (decoderBinder generation) ]
+        , expression =
+            (decoderTuple generation (repOf shapes) 0 shapes).expression
+        }
+
+
+decoderBinder : Int -> String
+decoderBinder generation =
+    "d65k" ++ String.fromInt generation
+
+
+decoderTuple : Int -> KeyRep -> Int -> Array KeyShape -> { next : Int, expression : Expr }
+decoderTuple generation rep start shapes =
+    let
+        built =
+            Array.foldl
+                (\shape state ->
+                    when shape is
+                        KNested nested ->
+                            let
+                                inner =
+                                    decoderTuple generation rep state.next nested
+                            in
+                            { next = inner.next
+                            , items = Array.pushLast inner.expression state.items
+                            }
+
+                        _ ->
+                            { next = state.next + 1
+                            , items =
+                                Array.pushLast
+                                    (parseLeaf rep shape
+                                        (slotExpr generation rep state.next)
+                                    )
+                                    state.items
+                            }
+                )
+                { next = start, items = [] }
+                shapes
+    in
+    { next = built.next, expression = ExprTuple built.items }
+
+
+{-| `Maybe.withDefault <zero> (List.head (List.drop i d65k))` -}
+slotExpr : Int -> KeyRep -> Int -> Expr
+slotExpr generation rep index =
+    let
+        source =
+            if index == 0 then
+                bareVar (decoderBinder generation)
+
+            else
+                ExprApplication
+                    [ ExprVar { moduleName = Just "List", name = "drop" }
+                    , ExprInt index
+                    , bareVar (decoderBinder generation)
+                    ]
+    in
+    ExprApplication
+        [ ExprVar { moduleName = Just "Maybe", name = "withDefault" }
+        , repZero rep
+        , ExprApplication
+            [ ExprVar { moduleName = Just "List", name = "head" }
+            , source
+            ]
+        ]
+
+
+{-| Representation element -> leaf. Identity when the leaf already has
+the representation's type; otherwise a total parse (the string was
+written by `renderLeaf`, so the default is unreachable by construction —
+the array only ever holds encoder output).
+-}
+parseLeaf : KeyRep -> KeyShape -> Expr -> Expr
+parseLeaf rep shape slot =
+    if leafRep shape == Just rep then
+        slot
+
+    else
+        when shape is
+            KInt ->
+                withDefaultOf (ExprInt 0) (ExprApplication [ stringFn "toInt", slot ])
+
+            KFloat ->
+                withDefaultOf (ExprFloat 0) (ExprApplication [ stringFn "toFloat", slot ])
+
+            KChar ->
+                withDefaultOf (ExprChar " ")
+                    (ExprApplication
+                        [ ExprVar { moduleName = Just "List", name = "head" }
+                        , ExprApplication [ stringFn "toList", slot ]
+                        ]
+                    )
+
+            _ ->
+                slot
+
+
+withDefaultOf : Expr -> Expr -> Expr
+withDefaultOf fallback maybeExpr =
+    ExprApplication
+        [ ExprVar { moduleName = Just "Maybe", name = "withDefault" }
+        , fallback
+        , maybeExpr
+        ]
+
+
+repZero : KeyRep -> Expr
+repZero rep =
+    when rep is
+        RepInt ->
+            ExprInt 0
+
+        RepFloat ->
+            ExprFloat 0
+
+        RepChar ->
+            ExprChar " "
+
+        RepString ->
+            ExprString ""
+
+
+stringFn : String -> Expr
+stringFn name =
+    ExprVar { moduleName = Just "String", name = name }
+
+
+bareVar : String -> Expr
+bareVar name =
+    ExprVar { moduleName = Nothing, name = name }

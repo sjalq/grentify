@@ -547,6 +547,35 @@ builtinFor ref =
         "String.length" ->
             builtin "String.length" 1
 
+        -- D65: the key codec is generated in terms of these; P1 evaluates
+        -- the emitted encode/decode pair to prove the round trip.
+        "String.fromFloat" ->
+            builtin "String.fromFloat" 1
+
+        "String.fromChar" ->
+            builtin "String.fromChar" 1
+
+        "String.toInt" ->
+            builtin "String.toInt" 1
+
+        "String.toFloat" ->
+            builtin "String.toFloat" 1
+
+        "String.toList" ->
+            builtin "String.toList" 1
+
+        "List.head" ->
+            builtin "List.head" 1
+
+        "List.drop" ->
+            builtin "List.drop" 2
+
+        "List.map" ->
+            builtin "List.map" 2
+
+        "Maybe.withDefault" ->
+            builtin "Maybe.withDefault" 2
+
         "Basics.identity" ->
             builtin "identity" 1
 
@@ -705,6 +734,40 @@ runBuiltin context fuel name args =
             -- name is String.count, the semantics here are unit count).
             done fuel (VInt (String.count s))
 
+        { name = "String.fromFloat", args = [ VFloat f ] } ->
+            done fuel (VString (String.fromFloat f))
+
+        { name = "String.fromFloat", args = [ VInt n ] } ->
+            done fuel (VString (String.fromFloat (toFloat n)))
+
+        { name = "String.fromChar", args = [ VChar c ] } ->
+            done fuel (VString c)
+
+        { name = "String.toInt", args = [ VString s ] } ->
+            done fuel (maybeValue (Maybe.map VInt (String.toInt s)))
+
+        { name = "String.toFloat", args = [ VString s ] } ->
+            done fuel (maybeValue (Maybe.map VFloat (String.toFloat s)))
+
+        { name = "String.toList", args = [ VString s ] } ->
+            done fuel
+                (VArray (Array.map (\c -> VChar (String.fromChar c)) (String.toArray s)))
+
+        { name = "List.head", args = [ VArray xs ] } ->
+            done fuel (maybeValue (Array.first xs))
+
+        { name = "List.drop", args = [ VInt n, VArray xs ] } ->
+            done fuel (VArray (Array.dropFirst n xs))
+
+        { name = "List.map", args = [ fn, VArray xs ] } ->
+            mapValues context fuel fn xs []
+
+        { name = "Maybe.withDefault", args = [ _, VCtor { name = "Just", args = [ payload ] } ] } ->
+            done fuel payload
+
+        { name = "Maybe.withDefault", args = [ fallback, VCtor { name = "Nothing" } ] } ->
+            done fuel fallback
+
         { name = "compare", args = [ left, right ] } ->
             -- D24 comparators are generated in terms of Basics.compare;
             -- primitives only, mirroring compareValues.
@@ -754,6 +817,30 @@ runBuiltin context fuel name args =
 
         _ ->
             stuck fuel ("builtin arg shape: " ++ name)
+
+
+mapValues : Context -> Int -> Value -> Array Value -> Array Value -> Step
+mapValues context fuel fn pending done_ =
+    when Array.popFirst pending is
+        Nothing ->
+            done fuel (VArray done_)
+
+        Just { first = first, rest = rest } ->
+            applyValue context fuel fn first
+                |> andThenValue
+                    (\mapped remaining ->
+                        mapValues context remaining fn rest (Array.pushLast mapped done_)
+                    )
+
+
+maybeValue : Maybe Value -> Value
+maybeValue value =
+    when value is
+        Just payload ->
+            justValue payload
+
+        Nothing ->
+            nothingValue
 
 
 justValue : Value -> Value

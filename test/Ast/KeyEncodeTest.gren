@@ -1,25 +1,31 @@
 module Ast.KeyEncodeTest exposing (tests)
 
-{-| D24b: tuple-keyed Dict/Set encoding.
+{-| D24b/D65: tuple-keyed Dict/Set encoding.
 
 Structural checks prove the pass rewrites exactly on positive evidence
-(R1 alias law, R2 inline law) and never without it; Eval checks prove
-the generated encoding is injective on the shapes elm-review needs.
+(R1 alias law, R2 inline law, R3 declaration law) and never without it.
+
+The Eval checks are the semantic oracle. The defect D65 fixes is that a
+key could be WRITTEN but never READ back, so the property that would have
+caught it is the ROUND TRIP: for every shape, `decode (encode v) == v`,
+evaluated on the generated ASTs — plus injectivity, which is what makes
+the container a faithful stand-in for the Elm one.
 -}
 
 import Array exposing ( Array )
 import Ast.Eval as Eval exposing ( Outcome(..), Value(..) )
-import Ast.KeyEncode as KeyEncode exposing ( KeyShape(..) )
+import Ast.KeyEncode as KeyEncode
+import Ast.KeyEncode.Codec as Codec exposing ( KeyShape(..) )
 import Ast.Types exposing
     ( Declaration(..)
     , Expr(..)
     , File
     , ModuleKind(..)
     , Exposing(..)
+    , LetDecl(..)
     , Pattern(..)
     , TypeAnn(..)
     )
-import Dict
 
 
 type alias Check =
@@ -31,16 +37,26 @@ type alias Check =
 
 tests : Array Check
 tests =
-    [ r1AliasBecomesString
+    [ r1AliasBecomesKeyType
     , r1ConstructionEncoded
     , r1DictAnnotationLeftToAlias
     , r1IneligibleWhenAliasIsArgument
     , r2FieldAnnotationRewritten
     , r2MemberKeyEncoded
     , r2UnprovenDictUntouched
+    , r3SetKeyEncodedFromTupleReturn
+    , r3SetReadDecoded
+    , r3DictKeyEncodedThroughLocalHelper
+    , r3FoldCallbackDecoded
+    , r3UncarriableOperationRefusesTheKind
+    , r3NoSeedLeavesDeclarationAlone
+    , roundTripIntPair
+    , roundTripMixedPair
+    , roundTripNestedTriple
     , encoderInjectiveOnStringPair
     , encoderInjectiveOnIntPair
     , encoderMatchesLiteralAndLambda
+    , homogeneousKeyKeepsElementType
     ]
 
 
@@ -81,9 +97,24 @@ dictOf key value =
         }
 
 
+listOf : TypeAnn -> TypeAnn
+listOf item =
+    TypeTyped { ref = { moduleName = Nothing, name = "List" }, arguments = [ item ] }
+
+
+intPair : TypeAnn
+intPair =
+    TypeTuple [ intType, intType ]
+
+
 bare : String -> Expr
 bare name =
     ExprVar { moduleName = Nothing, name = name }
+
+
+qualified : String -> String -> Expr
+qualified moduleName name =
+    ExprVar { moduleName = Just moduleName, name = name }
 
 
 fixtureModule : Array Declaration -> File
@@ -100,13 +131,48 @@ fixtureModule declarations =
     }
 
 
+applied : Array Declaration -> File
+applied declarations =
+    let
+        file =
+            fixtureModule declarations
+    in
+    KeyEncode.apply (KeyEncode.collectEvidence [ file ]) file
+
+
+{-| `canonicalize : Int -> Int -> ( Int, Int )` — the ianmackenzie/
+elm-triangular-mesh witness that seeds R3.
+-}
+canonicalizeDecl : Declaration
+canonicalizeDecl =
+    DeclFunction
+        { name = "canonicalize"
+        , documentation = Nothing
+        , signature =
+            Just
+                { name = "canonicalize"
+                , typeAnnotation =
+                    TypeFunction
+                        { left = intType
+                        , right = TypeFunction { left = intType, right = intPair }
+                        }
+                }
+        , arguments = [ PatVar "i", PatVar "j" ]
+        , expression = ExprTuple [ bare "i", bare "j" ]
+        }
+
+
+canonicalizeCall : Expr
+canonicalizeCall =
+    ExprApplication [ bare "canonicalize", bare "i", bare "j" ]
+
+
 {-| The elm-review shape, reduced:
 
     type alias RangeLike = ( Int, Int )
     type Table = Table (Dict RangeLike String)
     toRangeLike : Int -> Int -> RangeLike
     toRangeLike a b = ( a, b )
-    look : Int -> Int -> Dict RangeLike String -> Maybe String
     look a b dict = Dict.get (toRangeLike a b) dict
 -}
 r1Declarations : Array Declaration
@@ -115,7 +181,7 @@ r1Declarations =
         { name = "RangeLike"
         , documentation = Nothing
         , generics = []
-        , typeAnnotation = TypeTuple [ intType, intType ]
+        , typeAnnotation = intPair
         }
     , DeclCustomType
         { name = "Table"
@@ -146,7 +212,7 @@ r1Declarations =
         , arguments = [ PatVar "a", PatVar "b", PatVar "dict" ]
         , expression =
             ExprApplication
-                [ ExprVar { moduleName = Just "Dict", name = "get" }
+                [ qualified "Dict" "get"
                 , ExprApplication [ bare "toRangeLike", bare "a", bare "b" ]
                 , bare "dict"
                 ]
@@ -156,11 +222,7 @@ r1Declarations =
 
 r1Applied : File
 r1Applied =
-    let
-        file =
-            fixtureModule r1Declarations
-    in
-    KeyEncode.apply (KeyEncode.collectEvidence [ file ]) file
+    applied r1Declarations
 
 
 declNamed : String -> File -> Maybe Declaration
@@ -201,27 +263,37 @@ declNamed wanted file =
         file.declarations
 
 
+bodyOf : String -> File -> Maybe Expr
+bodyOf name file =
+    when declNamed name file is
+        Just (DeclFunction { expression = expression }) ->
+            Just expression
+
+        _ ->
+            Nothing
+
+
 
 -- R1 CHECKS -------------------------------------------------------------------
 
 
-r1AliasBecomesString : Check
-r1AliasBecomesString =
+{-| `( Int, Int )` is homogeneous, so the key type is `List Int`
+(`Array Int` after NameSub) and the container's ORDER stays exact.
+-}
+r1AliasBecomesKeyType : Check
+r1AliasBecomesKeyType =
     when declNamed "RangeLike" r1Applied is
-        Just (DeclAlias { typeAnnotation = TypeTyped { ref = { name = "String" } } }) ->
-            ok "r1AliasBecomesString"
+        Just (DeclAlias { typeAnnotation = TypeTyped { ref = { name = "List" }, arguments = [ TypeTyped { ref = { name = "Int" } } ] } }) ->
+            ok "r1AliasBecomesKeyType"
 
         other ->
-            fail "r1AliasBecomesString" ("got: " ++ Debug.toString other)
+            fail "r1AliasBecomesKeyType" ("got: " ++ Debug.toString other)
 
 
 r1ConstructionEncoded : Check
 r1ConstructionEncoded =
-    when declNamed "toRangeLike" r1Applied is
-        Just (DeclFunction { expression = ExprTuple _ }) ->
-            fail "r1ConstructionEncoded" "tail tuple literal was not encoded"
-
-        Just (DeclFunction { expression = ExprBinop { operator = "++" } }) ->
+    when bodyOf "toRangeLike" r1Applied is
+        Just (ExprList [ ExprVar { name = "a" }, ExprVar { name = "b" } ]) ->
             ok "r1ConstructionEncoded"
 
         other ->
@@ -229,7 +301,7 @@ r1ConstructionEncoded =
 
 
 {-| The Dict annotation refers to the alias — no inline rewrite happens
-there; the alias itself carries the String through.
+there; the alias itself carries the key type through.
 -}
 r1DictAnnotationLeftToAlias : Check
 r1DictAnnotationLeftToAlias =
@@ -258,7 +330,7 @@ r1IneligibleWhenAliasIsArgument : Check
 r1IneligibleWhenAliasIsArgument =
     let
         file =
-            fixtureModule
+            applied
                 (Array.pushLast
                     (DeclFunction
                         { name = "useIt"
@@ -275,14 +347,11 @@ r1IneligibleWhenAliasIsArgument =
                     )
                     r1Declarations
                 )
-
-        applied =
-            KeyEncode.apply (KeyEncode.collectEvidence [ file ]) file
     in
-    when declNamed "RangeLike" applied is
+    when declNamed "RangeLike" file is
         Just (DeclAlias { typeAnnotation = TypeTuple _ }) ->
-            when declNamed "toRangeLike" applied is
-                Just (DeclFunction { expression = ExprTuple _ }) ->
+            when bodyOf "toRangeLike" file is
+                Just (ExprTuple _) ->
                     ok "r1IneligibleWhenAliasIsArgument"
 
                 other ->
@@ -301,7 +370,6 @@ r1IneligibleWhenAliasIsArgument =
 {-| The suppressions shape, reduced:
 
     type alias Options = { suppressions : Dict ( String, String ) Int }
-    check : Options -> Bool
     check options =
         Dict.member ( options.rule, options.path ) options.suppressions
 -}
@@ -326,7 +394,7 @@ r2Declarations =
         , arguments = [ PatVar "options" ]
         , expression =
             ExprApplication
-                [ ExprVar { moduleName = Just "Dict", name = "member" }
+                [ qualified "Dict" "member"
                 , ExprTuple
                     [ ExprAccess { record = bare "options", field = "rule" }
                     , ExprAccess { record = bare "options", field = "path" }
@@ -339,11 +407,7 @@ r2Declarations =
 
 r2Applied : File
 r2Applied =
-    let
-        file =
-            fixtureModule r2Declarations
-    in
-    KeyEncode.apply (KeyEncode.collectEvidence [ file ]) file
+    applied r2Declarations
 
 
 r2FieldAnnotationRewritten : Check
@@ -359,7 +423,7 @@ r2FieldAnnotationRewritten =
                     Nothing
     in
     when fieldAnn is
-        Just (TypeTyped { arguments = [ TypeTyped { ref = { name = "String" } }, _ ] }) ->
+        Just (TypeTyped { arguments = [ TypeTyped { ref = { name = "List" }, arguments = [ TypeTyped { ref = { name = "String" } } ] }, _ ] }) ->
             ok "r2FieldAnnotationRewritten"
 
         other ->
@@ -368,25 +432,25 @@ r2FieldAnnotationRewritten =
 
 r2MemberKeyEncoded : Check
 r2MemberKeyEncoded =
-    when declNamed "check" r2Applied is
-        Just (DeclFunction { expression = ExprApplication [ _, ExprTuple _, _ ] }) ->
+    when bodyOf "check" r2Applied is
+        Just (ExprApplication [ _, ExprTuple _, _ ]) ->
             fail "r2MemberKeyEncoded" "member key left as a tuple literal"
 
-        Just (DeclFunction { expression = ExprApplication [ _, ExprBinop { operator = "++" }, _ ] }) ->
+        Just (ExprApplication [ _, ExprList _, _ ]) ->
             ok "r2MemberKeyEncoded"
 
         other ->
             fail "r2MemberKeyEncoded" ("got: " ++ Debug.toString other)
 
 
-{-| A Dict.member on an UNPROVEN dict (plain var, no evidence) keeps its
-tuple key.
+{-| A Dict.member on an UNPROVEN dict (plain var, no evidence anywhere in
+the declaration) keeps its tuple key.
 -}
 r2UnprovenDictUntouched : Check
 r2UnprovenDictUntouched =
     let
         file =
-            fixtureModule
+            applied
                 [ DeclFunction
                     { name = "check"
                     , documentation = Nothing
@@ -394,18 +458,15 @@ r2UnprovenDictUntouched =
                     , arguments = [ PatVar "somewhere" ]
                     , expression =
                         ExprApplication
-                            [ ExprVar { moduleName = Just "Dict", name = "member" }
+                            [ qualified "Dict" "member"
                             , ExprTuple [ bare "x", bare "y" ]
                             , bare "somewhere"
                             ]
                     }
                 ]
-
-        applied =
-            KeyEncode.apply (KeyEncode.collectEvidence [ file ]) file
     in
-    when declNamed "check" applied is
-        Just (DeclFunction { expression = ExprApplication [ _, ExprTuple _, _ ] }) ->
+    when bodyOf "check" file is
+        Just (ExprApplication [ _, ExprTuple _, _ ]) ->
             ok "r2UnprovenDictUntouched"
 
         other ->
@@ -413,23 +474,365 @@ r2UnprovenDictUntouched =
 
 
 
--- BEHAVIOR (Eval oracle on the emitted encoding) ------------------------------
+-- R3 CHECKS -------------------------------------------------------------------
 
 
-evalToString : Expr -> Result String String
-evalToString expr =
-    when Eval.run Eval.emptyContext 10000 expr is
-        Done (VString s) ->
-            Ok s
+{-| elm-triangular-mesh's `edgeIndices`, reduced:
 
-        Done _ ->
-            Err "non-string result"
+    edgeIndices mesh =
+        let addFace edgeSet = Set.insert (canonicalize i j) edgeSet
+        in Set.toList (List.foldl addFace Set.empty faces)
+
+Neither R1 nor R2 sees this set: no tuple alias, no inline `Set (Int,Int)`
+annotation. The seed is `canonicalize`'s SIGNATURE at a key position.
+-}
+edgeIndicesDecl : Declaration
+edgeIndicesDecl =
+    DeclFunction
+        { name = "edgeIndices"
+        , documentation = Nothing
+        , signature =
+            Just
+                { name = "edgeIndices"
+                , typeAnnotation =
+                    TypeFunction { left = intType, right = listOf intPair }
+                }
+        , arguments = [ PatVar "faces" ]
+        , expression =
+            ExprLet
+                { declarations =
+                    [ LetFunction
+                        { name = "addFace"
+                        , arguments = [ PatVar "edgeSet" ]
+                        , expression =
+                            ExprBinop
+                                { operator = "|>"
+                                , left = bare "edgeSet"
+                                , right =
+                                    ExprApplication
+                                        [ qualified "Set" "insert"
+                                        , canonicalizeCall
+                                        ]
+                                }
+                        }
+                    ]
+                , expression =
+                    ExprBinop
+                        { operator = "|>"
+                        , left =
+                            ExprApplication
+                                [ qualified "List" "foldl"
+                                , bare "addFace"
+                                , qualified "Set" "empty"
+                                , bare "faces"
+                                ]
+                        , right = qualified "Set" "toList"
+                        }
+                }
+        }
+
+
+edgeIndicesApplied : File
+edgeIndicesApplied =
+    applied [ canonicalizeDecl, edgeIndicesDecl ]
+
+
+{-| The insert key must be encoded through the destructuring lambda (the
+key is a call, not a literal).
+-}
+r3SetKeyEncodedFromTupleReturn : Check
+r3SetKeyEncodedFromTupleReturn =
+    let
+        insertKey =
+            when bodyOf "edgeIndices" edgeIndicesApplied is
+                Just (ExprLet { declarations = [ LetFunction { expression = ExprApplication parts } ] }) ->
+                    Array.get 1 parts
+
+                _ ->
+                    Nothing
+    in
+    when insertKey is
+        Just (ExprApplication [ ExprLambda { arguments = [ PatTuple _ ] }, ExprApplication _ ]) ->
+            ok "r3SetKeyEncodedFromTupleReturn"
+
+        other ->
+            fail "r3SetKeyEncodedFromTupleReturn" ("got: " ++ Debug.toString other)
+
+
+{-| …and `Set.toList` must be DECODED, or the declaration would return
+encoded arrays where its signature promises tuples. This is the half
+that R1/R2 could never do.
+-}
+r3SetReadDecoded : Check
+r3SetReadDecoded =
+    when bodyOf "edgeIndices" edgeIndicesApplied is
+        Just (ExprLet { expression = ExprApplication [ ExprVar { moduleName = Just "List", name = "map" }, ExprLambda _, ExprApplication toListParts ] }) ->
+            when Array.first toListParts is
+                Just (ExprVar { moduleName = Just "Set", name = "toList" }) ->
+                    ok "r3SetReadDecoded"
+
+                other ->
+                    fail "r3SetReadDecoded" ("inner: " ++ Debug.toString other)
+
+        other ->
+            fail "r3SetReadDecoded" ("got: " ++ Debug.toString other)
+
+
+{-| elm-triangular-mesh's `edgeFaceCounts`, reduced: the Dict flows
+through an UNANNOTATED local helper, so the key argument at the
+`Dict.update` site has no local proof. The declaration's signature is the
+seed; the declaration scope carries the key from there.
+-}
+edgeFaceCountsDecl : Declaration
+edgeFaceCountsDecl =
+    DeclFunction
+        { name = "edgeFaceCounts"
+        , documentation = Nothing
+        , signature =
+            Just
+                { name = "edgeFaceCounts"
+                , typeAnnotation =
+                    TypeFunction { left = intType, right = dictOf intPair intType }
+                }
+        , arguments = [ PatVar "faces" ]
+        , expression =
+            ExprLet
+                { declarations =
+                    [ LetFunction
+                        { name = "add"
+                        , arguments = [ PatVar "edgeKey", PatVar "edgeDict" ]
+                        , expression =
+                            ExprApplication
+                                [ qualified "Dict" "update"
+                                , bare "edgeKey"
+                                , bare "increment"
+                                , bare "edgeDict"
+                                ]
+                        }
+                    ]
+                , expression =
+                    ExprApplication
+                        [ qualified "List" "foldl"
+                        , bare "add"
+                        , qualified "Dict" "empty"
+                        , bare "faces"
+                        ]
+                }
+        }
+
+
+r3DictKeyEncodedThroughLocalHelper : Check
+r3DictKeyEncodedThroughLocalHelper =
+    let
+        file =
+            applied [ canonicalizeDecl, edgeFaceCountsDecl ]
+
+        updateKey =
+            when bodyOf "edgeFaceCounts" file is
+                Just (ExprLet { declarations = [ LetFunction { expression = ExprApplication parts } ] }) ->
+                    Array.get 1 parts
+
+                _ ->
+                    Nothing
+    in
+    when updateKey is
+        Just (ExprApplication [ ExprLambda { arguments = [ PatTuple _ ] }, ExprVar { name = "edgeKey" } ]) ->
+            ok "r3DictKeyEncodedThroughLocalHelper"
+
+        other ->
+            fail "r3DictKeyEncodedThroughLocalHelper" ("got: " ++ Debug.toString other)
+
+
+{-| elm-triangular-mesh's `openEdges`: the container is proven by the
+CALLEE's signature and the key comes out through a fold callback, which
+must be wrapped with the decoder.
+-}
+r3FoldCallbackDecoded : Check
+r3FoldCallbackDecoded =
+    let
+        file =
+            applied
+                [ canonicalizeDecl
+                , edgeFaceCountsDecl
+                , DeclFunction
+                    { name = "openEdges"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "faces" ]
+                    , expression =
+                        ExprApplication
+                            [ qualified "Dict" "foldr"
+                            , bare "prependIfOpen"
+                            , ExprList []
+                            , ExprApplication [ bare "edgeFaceCounts", bare "faces" ]
+                            ]
+                    }
+                ]
+    in
+    when bodyOf "openEdges" file is
+        Just (ExprApplication [ _, ExprLambda { arguments = [ _, _, _ ], expression = ExprApplication callbackParts }, _, _ ]) ->
+            when Array.get 1 callbackParts is
+                Just (ExprApplication [ ExprLambda { arguments = [ PatVar binder ] }, _ ]) ->
+                    if String.startsWith "d65k" binder then
+                        ok "r3FoldCallbackDecoded"
+
+                    else
+                        fail "r3FoldCallbackDecoded" ("binder: " ++ binder)
+
+                other ->
+                    fail "r3FoldCallbackDecoded" ("key arg: " ++ Debug.toString other)
+
+        other ->
+            fail "r3FoldCallbackDecoded" ("got: " ++ Debug.toString other)
+
+
+{-| TOTALITY. `Set.map` is not carriable, so the whole Set kind of the
+declaration is refused — the insert key stays a raw tuple and the module
+fails at gren-verify exactly as it does today. Half a rewrite would leak
+an unencoded key.
+-}
+r3UncarriableOperationRefusesTheKind : Check
+r3UncarriableOperationRefusesTheKind =
+    let
+        file =
+            applied
+                [ canonicalizeDecl
+                , DeclFunction
+                    { name = "leaky"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "s" ]
+                    , expression =
+                        ExprApplication
+                            [ qualified "Set" "map"
+                            , bare "f"
+                            , ExprApplication
+                                [ qualified "Set" "insert"
+                                , canonicalizeCall
+                                , bare "s"
+                                ]
+                            ]
+                    }
+                ]
+    in
+    when bodyOf "leaky" file is
+        Just (ExprApplication [ _, _, ExprApplication [ _, ExprApplication [ ExprVar { name = "canonicalize" }, _, _ ], _ ] ]) ->
+            ok "r3UncarriableOperationRefusesTheKind"
+
+        other ->
+            fail "r3UncarriableOperationRefusesTheKind" ("got: " ++ Debug.toString other)
+
+
+{-| No witness anywhere: an ordinary `Set.insert x s` on a set of
+unknown element type is left alone. -}
+r3NoSeedLeavesDeclarationAlone : Check
+r3NoSeedLeavesDeclarationAlone =
+    let
+        file =
+            applied
+                [ DeclFunction
+                    { name = "plain"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "x", PatVar "s" ]
+                    , expression =
+                        ExprApplication
+                            [ qualified "Set" "insert", bare "x", bare "s" ]
+                    }
+                ]
+    in
+    when bodyOf "plain" file is
+        Just (ExprApplication [ _, ExprVar { name = "x" }, _ ]) ->
+            ok "r3NoSeedLeavesDeclarationAlone"
+
+        other ->
+            fail "r3NoSeedLeavesDeclarationAlone" ("got: " ++ Debug.toString other)
+
+
+
+-- BEHAVIOR (Eval oracle on the emitted codec) ---------------------------------
+
+
+evalValue : Expr -> Result String Value
+evalValue expr =
+    when Eval.run Eval.emptyContext 100000 expr is
+        Done value ->
+            Ok value
 
         Crashed message ->
             Err ("crashed: " ++ message)
 
         Stuck reason ->
             Err ("stuck: " ++ reason)
+
+
+evalToString : Expr -> Result String String
+evalToString expr =
+    evalValue expr
+        |> Result.andThen
+            (\value ->
+                when value is
+                    VArray _ ->
+                        Ok (Debug.toString value)
+
+                    _ ->
+                        Err "encoded key is not an array"
+            )
+
+
+{-| THE D65 PROPERTY: whatever the shape, decoding an encoded tuple gives
+that tuple back. A write-only encoding passes every injectivity check and
+still cannot serve `Set.toList`; this is the check that fails without a
+decoder.
+-}
+roundTrip : String -> Array KeyShape -> Expr -> Check
+roundTrip name shapes value =
+    let
+        encoded =
+            Codec.encodeKey 0 shapes value
+
+        decoded =
+            Codec.decodeKey 0 shapes encoded
+    in
+    when { original = evalValue value, back = evalValue decoded } is
+        { original = Ok before, back = Ok after } ->
+            if before == after then
+                ok name
+
+            else
+                fail name
+                    (Debug.toString before ++ " -> " ++ Debug.toString after)
+
+        { original = Err e } ->
+            fail name ("original: " ++ e)
+
+        { back = Err e } ->
+            fail name ("round trip: " ++ e)
+
+
+roundTripIntPair : Check
+roundTripIntPair =
+    roundTrip "roundTripIntPair"
+        [ KInt, KInt ]
+        (ExprTuple [ ExprInt 12, ExprInt 3 ])
+
+
+roundTripMixedPair : Check
+roundTripMixedPair =
+    roundTrip "roundTripMixedPair"
+        [ KInt, KString ]
+        (ExprTuple [ ExprInt 7, ExprString "x:y" ])
+
+
+roundTripNestedTriple : Check
+roundTripNestedTriple =
+    roundTrip "roundTripNestedTriple"
+        [ KString, KNested [ KInt, KString ] ]
+        (ExprTuple
+            [ ExprString "outer"
+            , ExprTuple [ ExprInt 42, ExprString "inner" ]
+            ]
+        )
 
 
 distinctEncodings : String -> Expr -> Expr -> Check
@@ -449,17 +852,17 @@ distinctEncodings name left right =
             fail name ("right: " ++ e)
 
 
-{-| ("ab","c") vs ("a","bc") — naive concatenation collides; the
-length-prefix must not.
+{-| ("ab","c") vs ("a","bc") — concatenation collides; the positional
+array must not.
 -}
 encoderInjectiveOnStringPair : Check
 encoderInjectiveOnStringPair =
     distinctEncodings "encoderInjectiveOnStringPair"
-        (KeyEncode.encodeTupleLiteral [ KString, KString ]
-            [ ExprString "ab", ExprString "c" ]
+        (Codec.encodeKey 0 [ KString, KString ]
+            (ExprTuple [ ExprString "ab", ExprString "c" ])
         )
-        (KeyEncode.encodeTupleLiteral [ KString, KString ]
-            [ ExprString "a", ExprString "bc" ]
+        (Codec.encodeKey 0 [ KString, KString ]
+            (ExprTuple [ ExprString "a", ExprString "bc" ])
         )
 
 
@@ -467,40 +870,73 @@ encoderInjectiveOnStringPair =
 encoderInjectiveOnIntPair : Check
 encoderInjectiveOnIntPair =
     distinctEncodings "encoderInjectiveOnIntPair"
-        (KeyEncode.encodeTupleLiteral [ KInt, KInt ]
-            [ ExprInt 12, ExprInt 3 ]
+        (Codec.encodeKey 0 [ KInt, KInt ]
+            (ExprTuple [ ExprInt 12, ExprInt 3 ])
         )
-        (KeyEncode.encodeTupleLiteral [ KInt, KInt ]
-            [ ExprInt 1, ExprInt 23 ]
+        (Codec.encodeKey 0 [ KInt, KInt ]
+            (ExprTuple [ ExprInt 1, ExprInt 23 ])
         )
 
 
 {-| The inline literal path and the destructuring-lambda path must agree
-byte-for-byte (both feed the same Dict).
+value-for-value (both feed the same Dict).
 -}
 encoderMatchesLiteralAndLambda : Check
 encoderMatchesLiteralAndLambda =
     let
+        value =
+            ExprTuple [ ExprInt 7, ExprString "x:y" ]
+
         viaLiteral =
-            KeyEncode.encodeTupleLiteral [ KInt, KString ]
-                [ ExprInt 7, ExprString "x:y" ]
+            Codec.encodeKey 0 [ KInt, KString ] value
 
         viaLambda =
-            ExprApplication
-                [ KeyEncode.encoderLambda [ KInt, KString ]
-                , ExprTuple [ ExprInt 7, ExprString "x:y" ]
-                ]
+            ExprApplication [ Codec.encoderLambda 0 [ KInt, KString ], value ]
     in
-    when { l = evalToString viaLiteral, r = evalToString viaLambda } is
+    when { l = evalValue viaLiteral, r = evalValue viaLambda } is
         { l = Ok a, r = Ok b } ->
             if a == b then
                 ok "encoderMatchesLiteralAndLambda"
 
             else
-                fail "encoderMatchesLiteralAndLambda" (a ++ " /= " ++ b)
+                fail "encoderMatchesLiteralAndLambda"
+                    (Debug.toString a ++ " /= " ++ Debug.toString b)
 
         { l = Err e } ->
             fail "encoderMatchesLiteralAndLambda" ("literal: " ++ e)
 
         { r = Err e } ->
             fail "encoderMatchesLiteralAndLambda" ("lambda: " ++ e)
+
+
+{-| Homogeneous leaves keep their own element type, so Gren's elementwise
+array comparison IS Elm's tuple order — no conversion, no ordering drift.
+Mixed leaves fall back to `String`.
+-}
+homogeneousKeyKeepsElementType : Check
+homogeneousKeyKeepsElementType =
+    let
+        elementName shapes =
+            when Codec.keyAnn shapes is
+                TypeTyped { ref = { name = "List" }, arguments = [ TypeTyped { ref = { name = name } } ] } ->
+                    name
+
+                other ->
+                    "not a key type: " ++ Debug.toString other
+
+        homogeneous =
+            elementName [ KInt, KNested [ KInt, KInt ] ]
+
+        mixed =
+            elementName [ KInt, KString ]
+
+        identityOnLeaves =
+            Codec.encodeKey 0 [ KInt, KInt ] (ExprTuple [ ExprInt 1, ExprInt 2 ])
+                == ExprList [ ExprInt 1, ExprInt 2 ]
+    in
+    if homogeneous == "Int" && mixed == "String" && identityOnLeaves then
+        ok "homogeneousKeyKeepsElementType"
+
+    else
+        fail "homogeneousKeyKeepsElementType"
+            (homogeneous ++ " / " ++ mixed ++ " / identity=" ++ Debug.toString identityOnLeaves)

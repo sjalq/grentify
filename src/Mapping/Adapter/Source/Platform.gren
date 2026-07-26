@@ -1,0 +1,28 @@
+module Mapping.Adapter.Source.Platform exposing (source)
+
+source : String
+source =
+    """
+module ElmToGren.Compat.Platform exposing (worker)
+
+import Platform
+
+
+teaPair : { first : model, second : Cmd msg } -> { model : model, command : Cmd msg }
+teaPair pair =
+    { model = pair.first, command = pair.second }
+
+
+worker :
+    { init : flags -> { first : model, second : Cmd msg }
+    , update : msg -> model -> { first : model, second : Cmd msg }
+    , subscriptions : model -> Sub msg
+    }
+    -> Program flags model msg
+worker config =
+    Platform.worker
+        { init = \\flags -> teaPair (config.init flags)
+        , update = \\msg model -> teaPair (config.update msg model)
+        , subscriptions = config.subscriptions
+        }
+"""

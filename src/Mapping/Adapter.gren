@@ -32,6 +32,7 @@ import Mapping.Adapter.Source.JsonEncode as JsonEncodeSource
 import Mapping.Adapter.Source.List as ListSource
 import Mapping.Adapter.Source.Markdown as MarkdownSource
 import Mapping.Adapter.Source.Maybe as MaybeSource
+import Mapping.Adapter.Source.Platform as PlatformSource
 import Mapping.Adapter.Source.Random as RandomSource
 import Mapping.Adapter.Source.Result as ResultSource
 import Mapping.Adapter.Source.Set as SetSource
@@ -76,6 +77,7 @@ all =
     , ListAdapter
     , MarkdownAdapter
     , MaybeAdapter
+    , PlatformAdapter
     , RandomAdapter
     , ResultAdapter
     , SetAdapter
@@ -170,6 +172,9 @@ guarantee adapterId =
             RepresentationChange
 
         MaybeAdapter ->
+            RepresentationChange
+
+        PlatformAdapter ->
             RepresentationChange
 
         RandomAdapter ->
@@ -387,6 +392,9 @@ sourceFor adapterId =
 
         MaybeAdapter ->
             MaybeSource.source
+
+        PlatformAdapter ->
+            PlatformSource.source
 
         RandomAdapter ->
             RandomSource.source

@@ -303,6 +303,7 @@ type AdapterId
     | ListAdapter
     | MarkdownAdapter
     | MaybeAdapter
+    | PlatformAdapter
     | RandomAdapter
     | ResultAdapter
     | SetAdapter
@@ -364,6 +365,9 @@ adapterIdName adapterId =
 
         MaybeAdapter ->
             "Maybe"
+
+        PlatformAdapter ->
+            "Platform"
 
         RandomAdapter ->
             "Random"

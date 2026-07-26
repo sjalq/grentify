@@ -512,6 +512,19 @@ cachedArtifact permissions options cachePath url decode =
             )
 
 
+{-| A download failure must name the URL that failed.
+
+`DOWNLOAD_FAILED: Bad status: 404 - Not Found` identifies nothing: not the
+package, not the artifact, not the host. It is the difference between "this
+package is unfetchable" and "this exact GitHub zipball is gone", which is the
+whole of the evidence an `EXEMPT(broken-upstream)` verdict rests on (D64).
+-}
+downloadFailed : String -> HttpClient.Error -> Error
+downloadFailed url error =
+    PortError.create "DOWNLOAD_FAILED"
+        ("GET " ++ url ++ " failed: " ++ HttpClient.errorToString error)
+
+
 fetchString : HttpClient.Permission -> String -> Task Error String
 fetchString permission url =
     HttpClient.get url
@@ -523,10 +536,7 @@ fetchString permission url =
         |> HttpClient.withHeader "user-agent" "elm-to-gren/0.1 (Gren acquisition provider)"
         |> HttpClient.expectString
         |> HttpClient.send permission
-        |> Task.mapError
-            (HttpClient.errorToString
-                >> PortError.create "DOWNLOAD_FAILED"
-            )
+        |> Task.mapError (downloadFailed url)
         |> Task.map .data
 
 
@@ -538,10 +548,7 @@ fetchBytes permission url =
         |> HttpClient.withHeader "user-agent" "elm-to-gren/0.1 (Gren acquisition provider)"
         |> HttpClient.expectBytes
         |> HttpClient.send permission
-        |> Task.mapError
-            (HttpClient.errorToString
-                >> PortError.create "DOWNLOAD_FAILED"
-            )
+        |> Task.mapError (downloadFailed url)
         |> Task.map .data
 
 

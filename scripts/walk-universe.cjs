@@ -113,10 +113,18 @@ const EXEMPT_SIGNATURES = [
   // A literal Elm shader block echoed back from the offending source.
   { pattern: /\[glsl\|/, reason: "glsl:source" },
   // Genuinely gone upstream: the coordinate's GitHub tag no longer exists, so
-  // `elm install` cannot fetch it either (spot-checked against the zipball URL
-  // Elm itself uses). Terminal per §1.
+  // `elm install` cannot fetch it either (verified against the zipball URL Elm
+  // itself uses, and against `git ls-remote --tags`). Terminal per §1.
+  //
+  // D79: a bare `DOWNLOAD_FAILED` is NOT that fact. The tool raises it for every
+  // network outcome — timeout, DNS failure, GitHub 429 rate-limiting mid-walk,
+  // a 5xx — and a terminal verdict is the one thing no drain revisits. Only a
+  // status that means PERMANENTLY ABSENT counts (404/410); everything else is a
+  // working failure to retry. `Elm/Acquire.gren` names the URL in the message,
+  // so the banked evidence identifies the artifact, not just the code (D64).
   {
-    pattern: /SOURCE_CLONE_FAILED|DOWNLOAD_FAILED|couldn't find a compatible version|NO_ELM_SOURCES/,
+    pattern:
+      /(DOWNLOAD_FAILED[^\n]*\b(404|410)\b)|SOURCE_CLONE_FAILED|couldn't find a compatible version|NO_ELM_SOURCES/,
     reason: "broken-upstream:unfetchable",
   },
 ];
@@ -356,6 +364,25 @@ function selfTest() {
       "DOWNLOAD_FAILED: Bad status: 404 - Not Found",
       "broken-upstream:unfetchable",
     ],
+    // D79: the URL-naming form, which is what the tool emits now.
+    [
+      "Skinney/murmur3@2.0.8",
+      "DOWNLOAD_FAILED: GET https://github.com/Skinney/murmur3/zipball/2.0.8/ failed: Bad status: 404 - Not Found",
+      "broken-upstream:unfetchable",
+    ],
+    // D79 negatives: a transient network outcome is a working failure. Banking
+    // any of these terminal is the D51 mistake with a fresh face.
+    [
+      "some/pkg@1.0.0",
+      "DOWNLOAD_FAILED: GET https://github.com/some/pkg/zipball/1.0.0/ failed: Bad status: 429 - Too Many Requests",
+      null,
+    ],
+    [
+      "some/pkg@1.0.0",
+      "DOWNLOAD_FAILED: GET https://package.elm-lang.org/packages/some/pkg/1.0.0/endpoint.json failed: Bad status: 503 - Service Unavailable",
+      null,
+    ],
+    ["some/pkg@1.0.0", "DOWNLOAD_FAILED: Timeout", null],
     ["some/pkg@1.0.0", "TYPE MISMATCH in Main.elm", null],
     // D51: our own refusals must NOT be exempt — they stay in the queue.
     ["some/pkg@1.0.0", "ARCHIVE_INVALID: Package archive contains a symbolic link.", null],

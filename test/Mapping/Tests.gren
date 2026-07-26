@@ -45,7 +45,9 @@ checks =
     , check "record alias shapes decode and key by target module" recordAliasShapesDecode
     , check "malformed record alias shapes are rejected" malformedRecordAliasShapesRejected
     , check "constructor payload shapes key by the name the port will print" constructorFieldShapesDecode
+    , check "a bare constructor rename keys inside the target module" constructorFieldShapesFollowBareRenames
     , check "constructor payload shapes with nothing to say are rejected" malformedConstructorFieldShapesRejected
+    , check "Platform.worker reaches the pair-reshaping Compat adapter" platformWorkerAdapterWiring
     , check "absent modules decode and name the mapped package pair" absentModulesDecode
     , check "absent modules without a stated reason are rejected" unexplainedAbsentModuleRejected
     ]
@@ -136,10 +138,66 @@ constructorFieldShapesDecode =
                         |> Dict.set "Parser.Advanced.Token" [ "str", "expecting" ]
                         |> Dict.set "ElmToGren.Compat.Http.BadPayload"
                             [ "message", "response" ]
+                        |> Dict.set "Test.Runner.Failure.ArrayDiff"
+                            [ "expected", "actual" ]
                    )
 
         Err _ ->
             False
+
+
+{-| D77: a `values` target with no `.` is a rename WITHIN the target module —
+`Ast.NameSub` reads it that way, so `ListDiff -> ArrayDiff` prints as
+`Test.Runner.Failure.ArrayDiff`. Keying the shape under the bare `ArrayDiff`
+matches no print site, and the labels silently fall back to `first`/`second`.
+-}
+constructorFieldShapesFollowBareRenames : Bool
+constructorFieldShapesFollowBareRenames =
+    when MappingDecode.decodeString "ctors.json" constructorFieldDocumentJson is
+        Ok document ->
+            let
+                shapes =
+                    Registry.constructorFieldShapes (Registry.fromDocument document)
+            in
+            Dict.get "Test.Runner.Failure.ArrayDiff" shapes
+                == Just [ "expected", "actual" ]
+                && Dict.get "ArrayDiff" shapes
+                == Nothing
+
+        Err _ ->
+            False
+
+
+{-| D78: Elm's `Platform.worker` takes `(model, Cmd msg)` pairs, which port to
+`{ first, second }`; gren-lang/core's takes `{ model, command }`. Same fact as
+`Browser.element`, and it has to reach the same adapter.
+-}
+platformWorkerAdapterWiring : Bool
+platformWorkerAdapterWiring =
+    let
+        platformMapping =
+            { source = "Platform"
+            , target = "Platform"
+            , values =
+                Dict.singleton "worker" "ElmToGren.Compat.Platform.worker"
+            , types = Dict.empty
+            , recordAliases = Dict.empty
+            , constructorFields = Dict.empty
+            }
+
+        generated =
+            Adapter.sourceFor PlatformAdapter
+    in
+    Adapter.moduleName PlatformAdapter
+        == "ElmToGren.Compat.Platform"
+        && Adapter.adapterIdForTarget "ElmToGren.Compat.Platform.worker"
+        == Just PlatformAdapter
+        && Adapter.requiredForModules [ platformMapping ]
+        == [ PlatformAdapter ]
+        && Adapter.guaranteeForTarget "ElmToGren.Compat.Platform.worker"
+        == RepresentationChange
+        && String.contains "{ model = pair.first, command = pair.second }" generated
+        && String.contains "Platform.worker" generated
 
 
 {-| A one-field entry is not a Gren record payload — a single-argument
@@ -194,6 +252,21 @@ constructorFieldDocumentJson =
         "values": { "BadPayload": "ElmToGren.Compat.Http.BadPayload" },
         "types": {},
         "constructorFields": { "BadPayload": ["message", "response"] }
+      }
+    ]
+  }, {
+    "kind": "gren-analogue",
+    "elmPackage": "elm-explorations/test",
+    "grenPackage": "gren-lang/test",
+    "grenVersion": "5.0.0",
+    "platform": "common",
+    "modules": [
+      {
+        "source": "Test.Runner.Failure",
+        "target": "Test.Runner.Failure",
+        "values": { "ListDiff": "ArrayDiff" },
+        "types": {},
+        "constructorFields": { "ListDiff": ["expected", "actual"] }
       }
     ]
   }]

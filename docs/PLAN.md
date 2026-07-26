@@ -1272,6 +1272,46 @@ evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-26 THE CORE SET IS THE TARGET. `test/ecosystem/packages-core.json`
+  is the 232 packages (11.3% of the registry) that carry **88.8% of every
+  import in the ecosystem**; 1,561 of the 2,055 snapshot packages are imported
+  by nobody at all. Measured with `test/ecosystem/demand-set.cjs`.
+  **185/232 PASS (79.7%)**, up from 179 (77.2%) at session start, zero
+  regressions. The whole set runs in **10.3 min at -j8, median 4.9s/package**
+  (was 22.1 min, median 16.0s), so it is a loop, not an expedition.
+  Latest run banked at `test/ecosystem/core-run.jsonl`.
+  Speed came from three separate quadratics, each root-caused by profiling
+  rather than guessed (D58 String.toArray, D59 double lowering, D61 the
+  Reserved double-walk). D61 was the one that mattered most: a 10-deep cons
+  pattern cost 2^10 AST visits, and `ktonon/elm-word` had never once completed
+  a port. Newly passing: elm-word, elm-crypto, both elm-aws-cores,
+  elm-fontawesome (all ex-timeouts) and elm-pointer-events (D62).
+  THE REMAINING 47, by root cause — this is the queue, not a bucket count:
+
+      5 pkgs fan 45  TYPE MISMATCH @ dep     tuple-keyed Set/Dict (D24b residual)
+      6 pkgs fan 34  TYPE MISMATCH @ root    same class, root package
+      6 pkgs fan 33  UNSUPPORTED_FEATURE     multi-arg dep ctor unresolved
+      4 pkgs fan 20  GREN_VERIFY_FAILED
+      4 pkgs fan 17  UNSUPPORTED_KERNEL      legitimately EXEMPT
+      2 pkgs fan 12  NAMING ERROR
+      2 pkgs fan  7  timeout                 elm-unicode, elm-material-icons
+      2 pkgs fan  6  AMBIGUOUS NAME          two imports collapsing to one alias
+      ... 8 more causes, 1 package each
+
+  The two biggest are ONE class: `ianmackenzie/elm-triangular-mesh` does
+  `Set.insert (canonicalize i j)` where `canonicalize : Int -> Int -> (Int, Int)`,
+  and Gren cannot compare records. KeyEncode's R1/R2 do not see it: there is
+  no tuple type alias and no inline `Set (Int, Int)` annotation — the container
+  flows through an unannotated local helper. The honest fix is an R3 law
+  ("a function returning a concrete encodable tuple whose every result flows
+  into a key position gets its return encoded"), which needs value-flow
+  analysis one level into local helpers. That single fix unblocks the geometry
+  family and its dependents.
+  AMBIGUOUS NAME is a different, self-contained bug: `import Array exposing (Array)`
+  plus `import Array.Extra as Array` is legal Elm, and the port emits both, so
+  `Array.update` is ambiguous in Gren. The resolved AST knows each ref's true
+  home module; the printer should use it instead of the source alias when two
+  imports share a qualifier.
 - 2026-07-25 EXTERNAL REVIEW — D50/D51/D52/D53 found and fixed; M5 REOPENED.
   **D50 is the headline: every invocation of the tool has been running the
   whole pipeline twice, concurrently, since the first commit** (bundle

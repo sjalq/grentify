@@ -453,8 +453,28 @@ normalizeSections sections =
 
 validateModuleArray : String -> Array String -> Decoder (Array String)
 validateModuleArray fieldName modules =
-    validateModules fieldName Dict.empty modules
-        |> Result.map (\_ -> Array.sort modules)
+    let
+        -- D64: a repeat inside the FLAT list is a cosmetic wart in the author's
+        -- manifest, not a broken package — jonathanfishbein1/numeric-typeclasses
+        -- lists `Semigroup` twice and is published and building. Rejecting it
+        -- was our policy, and the `oneOf` around this decoder reported the
+        -- failure as "Expecting an OBJECT", naming neither the module nor the
+        -- real problem. Dedupe here; a module exposed by two SECTIONS stays an
+        -- error (that one is ambiguous, not cosmetic).
+        deduped =
+            Array.foldl
+                (\name acc ->
+                    if Array.member name acc then
+                        acc
+
+                    else
+                        Array.pushLast name acc
+                )
+                []
+                modules
+    in
+    validateModules fieldName Dict.empty deduped
+        |> Result.map (\_ -> Array.sort deduped)
         |> resultToDecoder
 
 

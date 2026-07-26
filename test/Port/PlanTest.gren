@@ -298,14 +298,17 @@ exposedModuleCollisionNamesBothPackages =
                         && String.contains "viz/host" text
                         && String.contains "units/dep" text
                         && String.contains "Gren forbids" text
+                        && String.contains "language-level difference" text
+                        && String.contains "What you can do" text
+                        && String.contains "Elm." text
             in
-            { name = "buildManifest: collision refusal names module and both packages (D64)"
+            { name = "buildManifest: collision refusal names module, packages, and user action (D64/D83)"
             , passed = ok
             , details = text
             }
 
         Ok _ ->
-            { name = "buildManifest: collision refusal names module and both packages (D64)"
+            { name = "buildManifest: collision refusal names module, packages, and user action (D64/D83)"
             , passed = False
             , details = "expected a refusal, got Ok"
             }

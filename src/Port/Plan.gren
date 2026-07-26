@@ -18,14 +18,24 @@ with the set vendored by this port. Never "every package planned so far".
 Every entry is derived from a declared dependency edge; membership in the
 port's identity table is a filter, never a source.
 
-LAW (exposed module names, D82): Gren forbids two packages in one dependency
-graph from exposing the same module name. Elm allows it so long as no single
-module imports both. When this package's exposed set intersects a vendored
-dependency's exposed set, the port refuses with `AMBIGUOUS_MODULE_NAME` rather
-than renaming (a rename changes the public API and is not a pure function of
-the module name alone — both packages share the name, so D72's law does not
-apply). D76 residues are NOT this: the colliding dependency must be in
-`localClosure`, i.e. reachable from a declared edge.
+LAW (exposed module names, D82/D83): Gren forbids two packages in one
+dependency graph from exposing the same module name. Elm allows it so long as
+no single module imports both. When this package's exposed set intersects a
+vendored dependency's exposed set, the port refuses with
+`AMBIGUOUS_MODULE_NAME` rather than renaming.
+
+Why rename is refused (D83 reaffirmed D82): a collision-driven rename is not a
+pure function of the module name alone (both packages share the name, so D72
+does not apply). A pure function of (package, module) would require always
+package-qualifying modules and ownership-aware import rewrite — that changes
+every package's public API and is not this refusal's job. A rename that
+depends on which co-ported packages share the name would make the same package
+emit different Gren under different roots, breaking the ported-cache law
+(output is a function of coordinate + tool + mappings + platform +
+namespace flag only). The `add` path's `Elm.` prefix does not fix this either:
+both packages become `Elm.Force` and still collide. D76 residues are NOT this:
+the colliding dependency must be in `localClosure`, i.e. reachable from a
+declared edge.
 -}
 
 import Ast.ModuleName as ModuleName
@@ -287,11 +297,21 @@ ambiguousModuleMessage self moduleName dependency =
         ++ ") already exposes that name. "
         ++ "Elm allows two packages to share a module name when no single "
         ++ "module imports both; Gren forbids the collision at the package "
-        ++ "graph. Renaming would change this package's public API and is "
-        ++ "not a pure function of the module name alone (both packages use "
-        ++ "the same name), so the port refuses rather than inventing a "
-        ++ "rename. Import under a different name in the Elm source, or drop "
-        ++ "the dependency that is not needed."
+        ++ "graph (even when no module imports both). "
+        ++ "This is a language-level difference, not a porting bug. "
+        ++ "Automatic rename is refused: it would change a public API, is not "
+        ++ "a pure function of the module name alone (both packages use the "
+        ++ "same name, so D72 does not apply), and a graph-dependent rename "
+        ++ "would make the same package emit different Gren under different "
+        ++ "roots. The `add` command's Elm. module prefix does not help "
+        ++ "(both sides become Elm."
+        ++ moduleName
+        ++ " and still collide). "
+        ++ "What you can do: fork one of the two Elm packages and rename the "
+        ++ "colliding module there (and its importers) so the exposed names no "
+        ++ "longer clash, then port the fork; or drop a dependency only when "
+        ++ "the edge is false (see D76). There is no namespacing flag that "
+        ++ "resolves a same-name collision between two vendored packages."
 
 
 {-| The vendored packages `source` may legally see: every package reachable

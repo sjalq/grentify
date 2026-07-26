@@ -1859,19 +1859,44 @@ isInsertion edit =
     edit.range.start == edit.range.end
 
 
+{-| Merge `candidate` into the first co-located insertion in `accepted`.
+
+Uses `List.foldl` (a while-loop even under elm `--debug`) rather than a
+hand-rolled recursive walk. NamedCharacterReferences-scale modules emit
+thousands of tuple-expression insertions; the previous non-tail recursion
+stack-overflowed the review app under D26's forced `--debug` (D83).
+-}
 mergeWithCoLocatedInsertion : SourceEdit -> List SourceEdit -> Maybe (List SourceEdit)
 mergeWithCoLocatedInsertion candidate accepted =
-    case accepted of
-        [] ->
+    let
+        step :
+            SourceEdit
+            -> ( List SourceEdit, Maybe SourceEdit, List SourceEdit )
+            -> ( List SourceEdit, Maybe SourceEdit, List SourceEdit )
+        step current ( beforeAcc, found, afterAcc ) =
+            case found of
+                Just _ ->
+                    ( beforeAcc, found, current :: afterAcc )
+
+                Nothing ->
+                    if isInsertion current && current.range.start == candidate.range.start then
+                        ( beforeAcc, Just current, afterAcc )
+
+                    else
+                        ( current :: beforeAcc, Nothing, afterAcc )
+
+        ( beforeRev, matched, afterRev ) =
+            List.foldl step ( [], Nothing, [] ) accepted
+    in
+    case matched of
+        Nothing ->
             Nothing
 
-        current :: remaining ->
-            if isInsertion current && current.range.start == candidate.range.start then
-                Just (mergeInsertions candidate current :: remaining)
-
-            else
-                mergeWithCoLocatedInsertion candidate remaining
-                    |> Maybe.map (\mergedRemaining -> current :: mergedRemaining)
+        Just current ->
+            Just
+                (List.reverse beforeRev
+                    ++ (mergeInsertions candidate current :: List.reverse afterRev)
+                )
 
 
 mergeInsertions : SourceEdit -> SourceEdit -> SourceEdit

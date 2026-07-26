@@ -1171,6 +1171,35 @@ Throughput and accounting (2026-07-25 external review; all four reproduced):
   a shrug.
   STATE NOW: all four hubs banked under the live digest
   (`npm run ecosystem:cache-health` exits 0), so the next drain starts warm.
+- **D83 extractor stack-overflows on megamodule tuple edits** (FIXED 2026-07-26):
+  `hecrj/html-parser` (and every dependent: `avh4/elm-program-test`,
+  `NoRedInk/noredink-ui`, …) died in the elm-review extract step with
+  `RangeError: Maximum call stack size exceeded` inside the compiled
+  review app (`…-debug.js`, the D26-forced `--debug` build). Trigger
+  module: `Html.Parser.NamedCharacterReferences` — a ~2124-pair list
+  literal of `("name", "char")` tuples. The expression visitor emits
+  three tuple-expression edits per pair (~6375 total: open/`second =`/
+  close). `selectNonOverlapping` → `mergeWithCoLocatedInsertion` walked
+  the accepted-edits list with a hand-rolled non-tail recursion
+  (`Maybe.map` after the recursive call). Under `--debug` Elm disables
+  TCO; Node's default stack is ~8k frames; 6k+ edit walks overflow.
+  WHOSE BUG: **ours** (the review rule), not elm-review and not "need more
+  stack". Proof: (1) stack frame names `$author$project$ElmToGren$Rule$mergeWithCoLocatedInsertion`;
+  (2) NCR alone under default stack was flaky (edge of limit); full package
+  reliably failed; `node --stack-size=16384` papered over it; (3) after the
+  rule fix both are solid under default stack with no raise. Recursion was
+  bounded by edit count (O(n)), not unbounded — but O(n) stack is still a
+  bug when n is package-scale and `--debug` is non-negotiable (D26).
+  FIX: rewrite `mergeWithCoLocatedInsertion` with `List.foldl` (compiles
+  to a while-loop even under `--debug`) plus reverse-accumulator before/
+  after split. No stack raise; no silent partial extract; no EXEMPT.
+  Closes the open "D40a extractor megamodule ASTs" note for this shape.
+  RECEIPT: direct `elm-review --extract --debug` on html-parser EXIT=0
+  (4 modules, NCR 6375 edits + full AST); NCR solo 5/5 under default stack
+  (was flaky); `hecrj/html-parser` port EXIT=0; `avh4/elm-program-test` and
+  `NoRedInk/noredink-ui` clear extract and stop on a NEW residual
+  (`MAPPING_MODULE_ABSENT` for `Test.Html.*` — gren-lang/test has no HTML
+  analogue; not this class). Tier 0 354; canary 14/14; `test:rule:fast` green.
 - **D54 extraction stdout ceiling too low** (FIXED 2026-07-25): the resolved
   AST arrives on a pipe with `maximumOutputBytes = 64MB`;
   `Chadtech/elm-vector` (generated Vector1..VectorN modules) blew it and died
@@ -2467,14 +2496,21 @@ sources elmcraft/core-extra@2.3.0 (13), zwilias/elm-rosetree@1.5.0
 candidate by leverage.
 
 Open items carried forward (see register): D44 digest hardening +
-cache prune (release prep), D40a extractor megamodule ASTs,
-scanCodeTokens linearization, D24b residual key classes, D45b
-RecordAlias/Reserved siblings, collapse-script idempotency,
-elm-markdown melt triage, and the 396-failure histogram as the
-evidence base for the next fix campaign.
+cache prune (release prep), D40a residual megamodule shapes beyond
+D83's tuple-edit overflow, scanCodeTokens linearization, D24b residual
+key classes, D45b RecordAlias/Reserved siblings, collapse-script
+idempotency, elm-markdown melt triage, and the 396-failure histogram
+as the evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-26 D83 CLOSED — extractor stack-overflow on megamodule tuple edits.
+  Trigger: `Html.Parser.NamedCharacterReferences` (~2124 tuple pairs → ~6375
+  edits). Cause: our `mergeWithCoLocatedInsertion` non-tail recursion under
+  D26 `--debug` (no TCO), not elm-review and not "raise Node stack". Fix:
+  `List.foldl` rewrite in `review/src/ElmToGren/Rule.elm`. html-parser ports;
+  program-test / noredink-ui clear extract then residual `MAPPING_MODULE_ABSENT`
+  (`Test.Html.*`). Tier 0 354; canary 14/14; `test:rule:fast` green.
 - 2026-07-26 D82 CLOSED — extract vs port dependency-version skew. elm-review
   loads package-dep docs at `constraint.split(' ')[0]` (the range floor);
   the port solver vendors newest-compatible. `Array.interweave` resolved to

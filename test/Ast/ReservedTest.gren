@@ -128,7 +128,7 @@ aliasQualifiedReferenceFollowsDefiningModuleEscape =
             Dict.set "Elm.Annotation.alias" "alias_" Dict.empty
 
         printed =
-            Print.print (Reserved.apply packageExports caller)
+            Print.print Dict.empty (Reserved.apply packageExports caller)
 
         passed =
             String.contains "Type.alias_" printed
@@ -410,7 +410,7 @@ letBoundFunctionNameIsEscaped =
         printed =
             file
                 |> Reserved.apply Dict.empty
-                |> Print.print
+                |> Print.print Dict.empty
 
         passed =
             String.contains "when_ propOf =" printed

@@ -1011,6 +1011,11 @@ planOne cliOptions registry resolution drafts name state =
                         |> Dict.keys
                         |> Array.mapAndKeepJust (\dependency -> Dict.get dependency state.identities)
                         |> Array.map .platform
+
+                -- The Elm dependency graph of everything this port vendors;
+                -- Plan.localClosure reads each package's own reach off it.
+                portedManifests =
+                    Dict.map (\_ other -> other.source.manifest) drafts
             in
             Result.map2
                 (\grenName platform -> { grenName = grenName, platform = platform })
@@ -1045,7 +1050,8 @@ planOne cliOptions registry resolution drafts name state =
                                     , identity = identityRecord
                                     , registry = registry
                                     , rootElmName = rootKey
-                                    , localDependencies = state.identities
+                                    , portedManifests = portedManifests
+                                    , plannedIdentities = state.identities
                                     }
                                     |> Result.map
                                         (\manifest ->

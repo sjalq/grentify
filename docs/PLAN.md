@@ -248,7 +248,82 @@ by being written through this law; nothing edits the ledger by hand.
     `ElmToGren.Compat.Browser` adapter exists to do for `Browser.element` /
     `document` / `application`. `Platform.worker` simply has no adapter. A
     missing adapter, filed as its own gap.
+- **D76 the local-dependency hoist declared every sibling in the port instead
+  of the package's own dependency closure** (diagnosed as **D70** on
+  2026-07-26 off D69's evidence; FIXED same day). `Plan.hoistTransitiveLocals`
+  walked `state.identities` — every package planned SO FAR — and wrote each
+  one into the manifest of the package being planned as a `local:` dependency.
+  D47 needed the TRANSITIVE CLOSURE (elm-review → elm-syntax →
+  structured-writer); what it got was EVERY SIBLING IN THE PORT. The two are
+  the same set for exactly one package — the workspace root — which is why
+  every one of the five failures landed at a vendored DEPENDENCY and never at
+  a root, and why the defect survived D47's own receipt.
+  A hoisted sibling is a real, importable dependency, so it collided two ways:
+  by module name (`elmcraft/core-extra` and `elm-community/dict-extra` both
+  exposing `Dict.Extra`) and by platform (a `common` package handed a
+  `browser` sibling is refused outright; `--platform browser` does not help,
+  because `applyRequestedPlatform` only applies to the root, so the dependency
+  stays `common`).
+  **Fix — positive evidence, one law, one home.** New
+  `Port.Plan.localClosure`: seeded from the package's OWN declared
+  `dependencies`, it walks the ported Elm dependency graph and keeps every
+  name that has a planned Gren identity. Membership in the identity table is
+  now only a FILTER (is this name vendored?), never a SOURCE (what should this
+  package see?) — every entry traces back to a declared dependency edge. The
+  graph it walks was already at the `Plan.buildManifest` call site: `drafts`,
+  mapped to `.source.manifest`. `buildManifest` takes `portedManifests` +
+  `plannedIdentities` and derives the closure itself, so the two call sites
+  (`Port.Orchestrator.planOne`, `Port.Graph.planOne`) cannot drift apart;
+  `addDependency` and `hoistTransitiveLocals` share one `Context` carrying the
+  computed closure. Traversal stops at any name with no planned identity —
+  analogue and absorbed mappings are not vendored, so nothing local lies
+  beyond them.
+  **D47 STILL HOLDS, narrower not weaker.** gren requires the VERIFYING ROOT
+  to declare every transitive local dep, and each vendored package verifies
+  standalone as its own root — so the closure, not the direct dependencies, is
+  what every manifest carries. The workspace root still receives every
+  vendored package for free, and by construction rather than by accident:
+  `Resolve.Solver.visit` derives `resolution.order` by walking the root's own
+  `dependencies` edges (test-dependencies never enter the solve), so the
+  ROOT'S CLOSURE IS THE PORTED SET.
+  **Regression check**: `test/Port/PlanTest.gren` — a 7-package fixture
+  carrying both shapes at once (the elm-dagre shape, where `path/lowlevel`
+  must NOT see the unrelated `browser` sibling `svg/typed`, and the D47 chain
+  `review → syntax → structured-writer`, which must still reach two deep).
+  Both directions are asserted, on `localClosure` and on the emitted manifest.
+  The narrow direction falsifies the old behaviour outright.
+  RECEIPTS: tier 0 317 checks (310 + 7), 0 failures; canary 14/14.
+  NON-REGRESSION, warm cache: `jfmengels/elm-review` EXIT=0 (200s) — the
+  package D47 was written for, so it is the direct proof D47 is intact — and
+  `ianmackenzie/elm-triangular-mesh` EXIT=0 (6s). The elm-review port's own
+  manifests are the fix in one screenful: root declares all four locals
+  (including `structured-writer`, transitive through elm-syntax — D47);
+  `stil4m/elm-syntax` declares exactly `elm-hex` + `structured-writer`; and
+  `project-metadata-utils`, `elm-hex` and `structured-writer` declare NO
+  locals at all, where before each carried every sibling planned ahead of it.
+  THE FIVE: the D76 fault is gone from all of them. Every one now fails
+  FURTHER ON, at a different, separately-named fault:
 
+        elm-cli-options-parser  dict-extra + elm-ts-json + core-extra +
+                                  elm-ansi all VERIFY; stops at its own root on
+                                  `Platform.worker` (port emits `{first, second}`,
+                                  gren wants `{model, command}`) — a mapping defect
+        elm-visualization       list-extra VERIFIES; stops at dep
+                                  svg-path-lowlevel on `Parser.Token` (wants
+                                  `{expecting, str}`) — the tuple→record class
+        elm-dagre               svg-path-lowlevel now builds as `common` (the
+                                  INCOMPATIBLE PACKAGE is gone); same
+                                  `Parser.Token` fault, which that package also
+                                  shows standalone as a root, so it is its own
+        elm-syntax-dsl          EVERY dependency verifies (the AMBIGUOUS IMPORT
+                                  is gone); stops at its own root on
+                                  ENDLESS STRING — D71
+        noredink-ui             never reaches planning at HEAD: transform refuses
+                                  avh4/elm-program-test with MAPPING_MODULE_ABSENT
+                                  (Test.Html.Event has no Gren analogue).
+                                  IDENTICAL on the pre-fix build, so no regression;
+                                  the hoist is simply not reachable in this
+                                  configuration.
 - **D72 Elm module names may contain `_` and Gren module names may not, and
   the port never renamed them** (found 2026-07-26 from two different-looking
   refusals — `GREN_MANIFEST_INVALID` on AdrianRibao/elm-derberos-date and
@@ -603,8 +678,9 @@ Throughput and accounting (2026-07-25 external review; all four reproduced):
   named fault, and they are ONE class, not five bugs (see D70). Tier 0 267;
   `test:ledger` green with 7 new signature checks; canary 14/14.
 - **D70 the local-dependency hoist declares every sibling in every vendored
-  manifest** (DIAGNOSED 2026-07-26 by D69's evidence; NOT FIXED — one fix
-  unblocks all five): `Plan.hoistTransitiveLocals` (added by D47) walks
+  manifest** (DIAGNOSED 2026-07-26 by D69's evidence; FIXED same day — see
+  **D76**, which carries the fix and its receipts): `Plan.hoistTransitiveLocals`
+  (added by D47) walks
   `state.identities` — every package planned SO FAR — and declares each one as
   a `local:` dependency of the package being planned. D47 needed the
   transitive closure (elm-review → elm-syntax → structured-writer); what it
@@ -1959,6 +2035,19 @@ evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-26 D76 CLOSED — D70's fix shape taken. `Plan.hoistTransitiveLocals`
+  no longer walks `state.identities`; `Plan.localClosure` derives each
+  manifest's `local:` set from that package's OWN declared dependencies,
+  walked transitively through the ported dependency graph (`drafts`, already
+  at the call site) and filtered by the planned identities. The identity table
+  is now a filter, never a source. D47 is intact and now holds by
+  construction, not by coincidence: the solver builds `resolution.order` from
+  the root's own dependency edges, so the root's closure IS the ported set,
+  while a vendored dependency verifying standalone gets exactly its own
+  closure. Proof: tier 0 317 checks (7 new, both directions of the law);
+  canary 14/14; `jfmengels/elm-review` (D47's own package) and
+  `ianmackenzie/elm-triangular-mesh` still EXIT=0. All five D70 packages are
+  past the hoist fault; what remains in them are separately-named defects.
 - 2026-07-26 D69 CLOSED — the 5 GREN_VERIFY_FAILED packages are ONE cause.
   Their evidence said only "gren exited with code N"; three separate losses
   were throwing the compiler's diagnostic away (verify never named the

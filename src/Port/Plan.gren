@@ -2,6 +2,7 @@ module Port.Plan exposing
     ( Identity
     , LocalDependency
     , buildManifest
+    , localClosure
     , inferPackagePlatform
     , targetName
     , analogueRoot
@@ -10,6 +11,12 @@ module Port.Plan exposing
 
 {-| Deterministic planning from resolved Elm package identities to Gren package
 names, platforms, dependency requirements, and package manifests.
+
+LAW (local dependencies): a package's manifest declares exactly the packages
+in the transitive closure of its OWN declared Elm dependencies, intersected
+with the set vendored by this port. Never "every package planned so far".
+Every entry is derived from a declared dependency edge; membership in the
+port's identity table is a filter, never a source.
 -}
 
 import Ast.ModuleName as ModuleName
@@ -37,6 +44,17 @@ type alias Identity =
 type alias LocalDependency =
     { identity : Identity
     , isRootDependency : Bool
+    }
+
+
+{-| What the manifest builders below need once the local closure is known.
+-}
+type alias Context =
+    { source : Manifest
+    , identity : Identity
+    , registry : Registry
+    , rootElmName : String
+    , localDependencies : Dict String Identity
     }
 
 
@@ -132,56 +150,128 @@ applyRequestedPlatform requested inferred =
                         )
 
 
+{-| `portedManifests` is the Elm dependency graph of everything this port
+vendors (keyed by Elm coordinate); `plannedIdentities` is the Gren identity
+of every package planned so far. The closure is read off the first and only
+filtered by the second — see `localClosure`.
+-}
 buildManifest
     : { source : Manifest
       , identity : Identity
       , registry : Registry
       , rootElmName : String
-      , localDependencies : Dict String Identity
+      , portedManifests : Dict String Manifest
+      , plannedIdentities : Dict String Identity
       }
     -> Result Error Spec
 buildManifest options =
+    let
+        context =
+            { source = options.source
+            , identity = options.identity
+            , registry = options.registry
+            , rootElmName = options.rootElmName
+            , localDependencies =
+                localClosure options.portedManifests options.plannedIdentities options.source
+            }
+    in
     Dict.foldl
-        (addDependency options)
+        (addDependency context)
         (Ok Dict.empty)
-        options.source.dependencies
-        |> Result.andThen (hoistTransitiveLocals options)
+        context.source.dependencies
+        |> Result.andThen (hoistTransitiveLocals context)
         |> Result.map
             (\dependencies ->
                 { kind =
-                    if options.source.isApplication then
+                    if context.source.isApplication then
                         ApplicationKind
 
                     else
                         PackageKind
-                , platform = toCompilerPlatform options.identity.platform
-                , name = options.identity.grenName
-                , summary = options.source.summary
-                , license = options.source.license
-                , version = options.identity.version
+                , platform = toCompilerPlatform context.identity.platform
+                , name = context.identity.grenName
+                , summary = context.source.summary
+                , license = context.source.license
+                , version = context.identity.version
                 , exposedModules =
                     -- Same rename the emitted module headers carry (Ast.ModuleName).
-                    ExposedArray (Array.map ModuleName.toGren options.source.exposedModules)
+                    ExposedArray (Array.map ModuleName.toGren context.source.exposedModules)
                 , grenVersion =
-                    if options.source.isApplication then
+                    if context.source.isApplication then
                         "0.6.6"
 
                     else
                         "0.6.0 <= v < 0.7.0"
                 , dependencies = dependencies
                 , sourceDirectories =
-                    if Array.isEmpty options.source.sourceDirectories then
+                    if Array.isEmpty context.source.sourceDirectories then
                         [ "src" ]
 
                     else
-                        options.source.sourceDirectories
+                        context.source.sourceDirectories
                 }
             )
 
 
+{-| The vendored packages `source` may legally see: every package reachable
+from its OWN declared dependencies through the ported dependency graph.
+
+D76: this used to be `state.identities` — every package planned so far — so
+a package was handed siblings it never depended on. A hoisted sibling is a
+real, importable dependency, and it collided two ways: by module name (two
+unrelated siblings both exposing `Dict.Extra`) and by platform (a `common`
+package handed a `browser` sibling is rejected outright).
+
+D47 still holds. gren requires the VERIFYING ROOT to declare every
+transitive local dep, and each vendored package verifies standalone as its
+own root — hence the closure, not just the direct dependencies. The
+workspace root still gets every vendored package for free: `Resolve.Solver`
+derives the ported set by walking the root's own dependency edges, so the
+root's closure IS the ported set.
+
+Traversal stops at any name with no planned identity. Analogue and absorbed
+mappings are not vendored, so no local package lies beyond them.
+-}
+localClosure : Dict String Manifest -> Dict String Identity -> Manifest -> Dict String Identity
+localClosure portedManifests plannedIdentities source =
+    reachLocals portedManifests plannedIdentities (Dict.keys source.dependencies) Dict.empty
+
+
+reachLocals : Dict String Manifest -> Dict String Identity -> Array String -> Dict String Identity -> Dict String Identity
+reachLocals portedManifests plannedIdentities frontier found =
+    when Array.popFirst frontier is
+        Nothing ->
+            found
+
+        Just { first, rest } ->
+            if Dict.member first found then
+                reachLocals portedManifests plannedIdentities rest found
+
+            else
+                when Dict.get first plannedIdentities is
+                    Nothing ->
+                        reachLocals portedManifests plannedIdentities rest found
+
+                    Just identity ->
+                        reachLocals portedManifests
+                            plannedIdentities
+                            (Array.append rest (elmDependencyNames portedManifests first))
+                            (Dict.set first identity found)
+
+
+elmDependencyNames : Dict String Manifest -> String -> Array String
+elmDependencyNames portedManifests elmName =
+    when Dict.get elmName portedManifests is
+        Just manifest ->
+            Dict.keys manifest.dependencies
+
+        Nothing ->
+            []
+
+
 {-| Gren rejects nested `local:` deps unless the root also declares the same
-local package. EVERY package manifest surfaces every generated sibling (even
-if only transitive in the Elm graph) so nested local paths resolve compatibly
+local package. Every package manifest therefore surfaces the packages that
+are only TRANSITIVE in its own Elm graph, not just its direct dependencies
 (e.g. elm-review → elm-syntax → structured-writer).
 
 D47: vendored packages verify standalone (`gren docs` in their own
@@ -189,78 +279,68 @@ directory), where each acts as its own root — so the hoist must apply to
 all of them, not just the workspace root. A vendored elm-review whose
 manifest omitted structured-writer failed the solver with INDIRECT LOCAL
 DEPENDENCY even though every pointer was layout-consistent.
+
+D76: the set hoisted is `localClosure`, i.e. what this package's declared
+dependencies reach. It used to be every package planned so far.
 -}
-hoistTransitiveLocals
-    : { source : Manifest
-      , identity : Identity
-      , registry : Registry
-      , rootElmName : String
-      , localDependencies : Dict String Identity
-      }
-    -> Dict String Dependency
-    -> Result Error (Dict String Dependency)
-hoistTransitiveLocals options dependencies =
+hoistTransitiveLocals : Context -> Dict String Dependency -> Result Error (Dict String Dependency)
+hoistTransitiveLocals context dependencies =
     Dict.foldl
             (\_ local accumulated ->
                 accumulated
                     |> Result.andThen
                         (\deps ->
-                            if local.grenName == options.identity.grenName then
+                            if local.grenName == context.identity.grenName then
                                 Ok deps
 
                             else
                                 setDependency local.grenName
-                                    (LocalPath (localPath options local))
+                                    (LocalPath (localPath context local))
                                     deps
                         )
             )
             (Ok dependencies)
-            options.localDependencies
+            context.localDependencies
 
 
 addDependency
-    : { source : Manifest
-      , identity : Identity
-      , registry : Registry
-      , rootElmName : String
-      , localDependencies : Dict String Identity
-      }
+    : Context
     -> String
     -> Elm.Manifest.Dependency
     -> Result Error (Dict String Dependency)
     -> Result Error (Dict String Dependency)
-addDependency options elmName _ accumulated =
+addDependency context elmName _ accumulated =
     accumulated
         |> Result.andThen
             (\dependencies ->
-                when Dict.get elmName options.localDependencies is
+                when Dict.get elmName context.localDependencies is
                     Just local ->
-                        if local.grenName == options.identity.grenName then
+                        if local.grenName == context.identity.grenName then
                             Ok dependencies
 
                         else
                             setDependency local.grenName
-                                (LocalPath (localPath options local))
+                                (LocalPath (localPath context local))
                                 dependencies
 
                     Nothing ->
-                        when MappingRegistry.mappingFor elmName options.registry is
+                        when MappingRegistry.mappingFor elmName context.registry is
                             Just (GrenAnalogue details) ->
-                                addMapped options details dependencies
+                                addMapped context details dependencies
 
                             Just (Absorbed details) ->
-                                addMapped options details dependencies
+                                addMapped context details dependencies
 
                             Just (Transpile _) ->
-                                Err (missingLocal options elmName)
+                                Err (missingLocal context elmName)
 
                             Nothing ->
-                                Err (missingLocal options elmName)
+                                Err (missingLocal context elmName)
             )
 
 
-addMapped options details dependencies =
-    if details.grenPackage == options.identity.grenName then
+addMapped context details dependencies =
+    if details.grenPackage == context.identity.grenName then
         Ok dependencies
 
     else
@@ -301,7 +381,7 @@ mappedRange source =
             )
 
 
-localPath options dependency =
+localPath context dependency =
     let
         directory =
             Emit.Workspace.packageDirectoryName
@@ -309,17 +389,17 @@ localPath options dependency =
                 , version = dependency.version
                 }
     in
-    if options.identity.elmName == options.rootElmName then
+    if context.identity.elmName == context.rootElmName then
         ".elm-to-gren/packages/" ++ directory
 
     else
         "../" ++ directory
 
 
-missingLocal options dependencyName =
+missingLocal context dependencyName =
     PortError.create "GREN_MANIFEST_INVALID"
         ("Elm package "
-            ++ options.identity.elmName
+            ++ context.identity.elmName
             ++ " depends on "
             ++ dependencyName
             ++ ", but no generated local package was supplied."

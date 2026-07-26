@@ -1,0 +1,271 @@
+module Port.PlanTest exposing (tests)
+
+{-| D76: a package's manifest declares exactly the vendored packages its OWN
+declared Elm dependencies reach — never every sibling in the port.
+
+Law under test (`Port.Plan.localClosure` and the manifest it feeds):
+
+    package manifest + ported dependency graph + planned identities
+        -> the transitive local closure of that package's declared deps
+
+Two directions, both required:
+
+  - NARROW ENOUGH (this defect): a leaf package must NOT see an unrelated
+    sibling. A hoisted sibling is importable, so it collides by module name
+    (two siblings exposing `Dict.Extra`) and by platform (a `common` package
+    handed a `browser` sibling is rejected outright by gren).
+  - WIDE ENOUGH (D47): gren requires the verifying ROOT to declare every
+    TRANSITIVE local dep, and every vendored package verifies standalone as
+    its own root. `elm-review -> elm-syntax -> structured-writer` must reach
+    structured-writer from elm-review, and the workspace root must still see
+    every vendored package.
+
+-}
+
+import Array exposing (Array)
+import Dict exposing (Dict)
+import Elm.Manifest exposing (Manifest)
+import Emit.Manifest exposing (Dependency(..))
+import Mapping.Registry as MappingRegistry
+import Mapping.Types as Mapping
+import Port.Plan as Plan
+
+
+type alias Check =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array Check
+tests =
+    [ leafNeverSeesAnUnrelatedSibling
+    , directDependencyIsSeen
+    , transitiveLocalIsSeen
+    , rootStillSeesEveryVendoredPackage
+    , closureStopsAtUnportedPackages
+    , manifestOmitsTheUnrelatedSibling
+    , manifestKeepsTheTransitiveLocal
+    ]
+
+
+
+-- FIXTURE ---------------------------------------------------------------
+-- The elm-dagre shape that this defect was opened on, plus the elm-review
+-- chain D47 was written for, in one port:
+--
+--   app/root ---> graph/dagre ---> path/lowlevel
+--            \--> svg/typed                        (browser, unrelated)
+--            \--> review/review --> syntax/syntax --> writer/structured
+--
+-- path/lowlevel and svg/typed are siblings that share no edge.
+
+
+packageJson : String -> Array String -> String
+packageJson name dependencies =
+    let
+        deps =
+            dependencies
+                |> Array.map (\dependency -> "\"" ++ dependency ++ "\": \"1.0.0 <= v < 2.0.0\"")
+                |> String.join ", "
+    in
+    "{ \"type\": \"package\""
+        ++ ", \"name\": \""
+        ++ name
+        ++ "\""
+        ++ ", \"summary\": \"fixture\""
+        ++ ", \"license\": \"BSD-3-Clause\""
+        ++ ", \"version\": \"1.0.0\""
+        ++ ", \"exposed-modules\": [ \"Fixture\" ]"
+        ++ ", \"elm-version\": \"0.19.0 <= v < 0.20.0\""
+        ++ ", \"dependencies\": { "
+        ++ deps
+        ++ " }"
+        ++ ", \"test-dependencies\": {} }"
+
+
+fixture : Dict String { dependencies : Array String, platform : Mapping.Platform }
+fixture =
+    Dict.empty
+        |> Dict.set "app/root" { dependencies = [ "graph/dagre", "svg/typed", "review/review" ], platform = Mapping.Browser }
+        |> Dict.set "graph/dagre" { dependencies = [ "path/lowlevel", "elm/core" ], platform = Mapping.Common }
+        |> Dict.set "path/lowlevel" { dependencies = [ "elm/core" ], platform = Mapping.Common }
+        |> Dict.set "svg/typed" { dependencies = [ "elm/core" ], platform = Mapping.Browser }
+        |> Dict.set "review/review" { dependencies = [ "syntax/syntax" ], platform = Mapping.Common }
+        |> Dict.set "syntax/syntax" { dependencies = [ "writer/structured" ], platform = Mapping.Common }
+        |> Dict.set "writer/structured" { dependencies = [ "elm/core" ], platform = Mapping.Common }
+
+
+{-| Decoded through the real manifest decoder. A fixture that stopped
+decoding drops out of the graph, which shows up as a failing check below
+rather than as a silent pass.
+-}
+portedManifests : Dict String Manifest
+portedManifests =
+    Dict.foldl
+        (\elmName entry decoded ->
+            when Elm.Manifest.decodeString (packageJson elmName entry.dependencies) is
+                Ok manifest ->
+                    Dict.set elmName manifest decoded
+
+                Err _ ->
+                    decoded
+        )
+        Dict.empty
+        fixture
+
+
+{-| Every fixture package is planned, which is exactly the condition the old
+code mistook for "is a dependency of the package being planned".
+-}
+plannedIdentities : Dict String Plan.Identity
+plannedIdentities =
+    Dict.map
+        (\elmName entry ->
+            { elmName = elmName
+            , grenName = elmName
+            , version = "1.0.0"
+            , platform = entry.platform
+            }
+        )
+        fixture
+
+
+closureOf : String -> Array String
+closureOf elmName =
+    when Dict.get elmName portedManifests is
+        Just manifest ->
+            Plan.localClosure portedManifests plannedIdentities manifest
+                |> Dict.keys
+
+        Nothing ->
+            [ "MISSING FIXTURE " ++ elmName ]
+
+
+{-| elm/core is the one dependency in the fixture that is mapped to a Gren
+analogue rather than vendored, so `buildManifest` must resolve it through the
+registry and `localClosure` must stop at it.
+-}
+registry : Mapping.Registry
+registry =
+    MappingRegistry.overlayDocument
+        { schemaVersion = 1
+        , packages =
+            [ Mapping.GrenAnalogue
+                { elmPackage = "elm/core"
+                , grenPackage = "gren-lang/core"
+                , grenVersion = "6.0.0"
+                , platform = Mapping.Common
+                , modules = []
+                , absentModules = Dict.empty
+                }
+            ]
+        , versionedPackages = []
+        }
+        MappingRegistry.empty
+
+
+localDependencyNames : String -> Array String
+localDependencyNames elmName =
+    Maybe.map2
+        (\manifest identity ->
+            Plan.buildManifest
+                { source = manifest
+                , identity = identity
+                , registry = registry
+                , rootElmName = "app/root"
+                , portedManifests = portedManifests
+                , plannedIdentities = plannedIdentities
+                }
+                |> Result.map
+                    (\spec ->
+                        spec.dependencies
+                            |> Dict.foldl
+                                (\name requirement found ->
+                                    when requirement is
+                                        LocalPath _ ->
+                                            Array.pushLast name found
+
+                                        VersionRange _ ->
+                                            found
+                                )
+                                []
+                    )
+                |> Result.withDefault [ "BUILD FAILED for " ++ elmName ]
+        )
+        (Dict.get elmName portedManifests)
+        (Dict.get elmName plannedIdentities)
+        |> Maybe.withDefault [ "MISSING FIXTURE " ++ elmName ]
+
+
+
+-- CHECKS ----------------------------------------------------------------
+
+
+leafNeverSeesAnUnrelatedSibling : Check
+leafNeverSeesAnUnrelatedSibling =
+    expectEqual "localClosure: a leaf never sees an unrelated sibling"
+        []
+        (closureOf "path/lowlevel")
+
+
+directDependencyIsSeen : Check
+directDependencyIsSeen =
+    expectEqual "localClosure: a direct local dependency is declared"
+        [ "path/lowlevel" ]
+        (closureOf "graph/dagre")
+
+
+transitiveLocalIsSeen : Check
+transitiveLocalIsSeen =
+    -- D47: elm-review -> elm-syntax -> structured-writer.
+    expectEqual "localClosure: a transitive local is declared (D47)"
+        [ "syntax/syntax", "writer/structured" ]
+        (closureOf "review/review")
+
+
+rootStillSeesEveryVendoredPackage : Check
+rootStillSeesEveryVendoredPackage =
+    -- The solver derives the ported set from the root's own dependency
+    -- edges, so the root's closure is the whole port (itself excepted).
+    expectEqual "localClosure: the root still declares every vendored package (D47)"
+        [ "graph/dagre", "path/lowlevel", "review/review", "svg/typed", "syntax/syntax", "writer/structured" ]
+        (closureOf "app/root")
+
+
+closureStopsAtUnportedPackages : Check
+closureStopsAtUnportedPackages =
+    -- elm/core is mapped to a Gren analogue, never vendored: it has no
+    -- planned identity, so nothing local lies beyond it.
+    expectEqual "localClosure: traversal stops at packages that are not vendored"
+        []
+        (closureOf "svg/typed")
+
+
+manifestOmitsTheUnrelatedSibling : Check
+manifestOmitsTheUnrelatedSibling =
+    -- The defect: path/lowlevel (common) was handed svg/typed (browser),
+    -- and gren answered INCOMPATIBLE PACKAGE.
+    expectEqual "buildManifest: no local: entry for an unrelated sibling"
+        []
+        (localDependencyNames "path/lowlevel")
+
+
+manifestKeepsTheTransitiveLocal : Check
+manifestKeepsTheTransitiveLocal =
+    expectEqual "buildManifest: the transitive local is still declared (D47)"
+        [ "syntax/syntax", "writer/structured" ]
+        (localDependencyNames "review/review")
+
+
+
+-- HELPERS ---------------------------------------------------------------
+
+
+expectEqual : String -> Array String -> Array String -> Check
+expectEqual name expected actual =
+    { name = name
+    , passed = expected == actual
+    , details = "expected [" ++ String.join ", " expected ++ "], got [" ++ String.join ", " actual ++ "]"
+    }

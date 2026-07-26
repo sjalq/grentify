@@ -1295,21 +1295,58 @@ Coverage and pipeline:
   lue-bird/elm-typesafe-array clears every AMBIGUOUS NAME and then stops
   on a DIFFERENT, newly-visible defect — filed as D69.
 - **D69 lookup-table alias fallback resolves to the wrong home under
-  dependency version skew** (found behind D68 2026-07-25, OPEN,
-  extractor-side): in ArraySized/Internal.elm `Array.interweave` is
-  extracted with home module `ArrayExtra` — lue-bird's own module, which
-  exposes only `allOk`. When a qualifier maps to several modules
-  elm-review picks the one that exposes the name and, finding none, falls
-  back to the head of the candidate list. It found none because the
-  review run resolves against elm-community/array-extra **2.4.0** (the
-  floor of the package's `2.4.0 <= v < 3.0.0`), and `interweave` only
-  exists from 2.6.0 — which is the version the port itself vendors.
-  Sibling refs (`reverse`, `zip`, `filterMap`, present in 2.4.0) resolve
-  correctly, so the skew is per-symbol and silent. Two independent things
-  to settle: the extractor's fallback should prefer a candidate that is
-  not a first-party module known to lack the name, and the review run and
-  the port must resolve the SAME dependency version (same class as D55's
-  "which elm-review runs depends on whether node_modules exists").
+  dependency version skew** (found behind D68 2026-07-25, OPEN → **CLOSED
+  as D82**): root cause is extract vs port dependency-version skew; fix
+  and receipts live under D82.
+- **D82 extract loads dependency docs at the range FLOOR while the port
+  vendors the solver's selection** (found as D69 behind D68 2026-07-25;
+  FIXED 2026-07-26, whole-project consistency): in
+  ArraySized/Internal.elm `Array.interweave` was extracted with home
+  module `ArrayExtra` — lue-bird's own module, which exposes only
+  `allOk`. When a qualifier maps to several modules, elm-review picks the
+  one that exposes the name and, finding none, falls back to the head of
+  the candidate list. It found none because the review run resolved
+  against elm-community/array-extra **2.4.0** (the floor of the package's
+  `2.4.0 <= v < 3.0.0`), and `interweave` only exists from 2.6.0 — which
+  is the version the port itself vendors. Sibling refs (`reverse`,
+  `zip`, `filterMap`, present in 2.4.0) resolved correctly, so the skew
+  was per-symbol and silent.
+  WHICH SIDE WAS WRONG: the extractor. Extraction exists to name the true
+  homes of symbols the port will emit against; those homes must match the
+  API of the dependency version the port vendors. The solver (newest
+  compatible) is the authority; extract must follow it.
+  ROOT CAUSE (verified in elm-review 2.13.x source):
+  `project-dependencies.js` does `constraint.split(' ')[0]` for every
+  package-type dependency and loads that version's `docs.json` into
+  `ModuleNameLookupTable`. For a range the first token is always the
+  floor. The port's `Resolve.Online` / `Resolve.Solver` correctly pick
+  newest compatible.
+  FIX (one law, `Review.DependencyPins`): before extract, stage a
+  disposable copy of the package and rewrite `elm.json` so every
+  dependency the solver selected is pinned with that version as the
+  constraint's first token (package form: `X.Y.Z <= v < X.Y.(Z+1)`;
+  application form: exact `X.Y.Z`). Mapped packages omitted from the
+  solver graph are left unchanged. The extract-cache digest gains a
+  `pins:` segment (`Review.DependencyPins.digest`) so every package
+  re-extracts once against the correct docs — expected, not a problem.
+  SILENT FALLBACK: elm-review's "nobody exposes the name → head of
+  candidate list" still exists inside elm-review and is not host-
+  patchable without forking. With pins aligned it no longer fires for
+  this class. Residual silent wrong homes remain possible only for
+  symbols elm-review cannot resolve for other reasons (missing docs,
+  parse gaps); those still look like answers. A host-side "home must
+  expose the name" refusal is not implemented here — positive evidence
+  only, and the knowledge of every candidate's exports is not held
+  after extract.
+  RECEIPT: re-extract of `lue-bird/elm-typesafe-array` records
+  `Array.interweave` home as `Array.Extra` (was `ArrayExtra`); the
+  `ArrayExtra.interweave` NAMING ERROR is gone. Package then stops on a
+  NEW distinct class (`N.Down` variant under a multi-import qualifier —
+  not version skew). Non-regression: `maca/elm-rose-tree` (D68) EXIT=0,
+  `jfmengels/elm-review` (deepest local dep tree) EXIT=0. Tier 0: 346
+  checks (+7 DependencyPins). Canary 14/14.
+  EXPECTED CACHE EFFECT: extract-cache digest now includes `pins:…`, so
+  every package re-extracts once on next cold hit.
 - **D65 tuple keys could be WRITTEN but never READ, and an unannotated
   container was invisible** (the D24b residual named in §STATUS; FIXED
   2026-07-26): D24b's R1/R2 encode a proven tuple key at write sites and
@@ -2297,6 +2334,15 @@ evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-26 D82 CLOSED — extract vs port dependency-version skew. elm-review
+  loads package-dep docs at `constraint.split(' ')[0]` (the range floor);
+  the port solver vendors newest-compatible. `Array.interweave` resolved to
+  `ArrayExtra` against array-extra 2.4.0 while the port vendored 2.6.0.
+  Fix: `Review.DependencyPins` rewrites staged elm.json before extract so
+  every solver-selected dep's first token is that version; extract-cache
+  digest gains `pins:…`. Receipt: typesafe-array re-extract homes
+  `Array.interweave` at `Array.Extra` (then a new residual `N.Down`);
+  rose-tree + elm-review EXIT=0; tier 0 346; canary 14/14.
 - 2026-07-26 D76 CLOSED — D70's fix shape taken. `Plan.hoistTransitiveLocals`
   no longer walks `state.identities`; `Plan.localClosure` derives each
   manifest's `local:` set from that package's OWN declared dependencies,

@@ -81,6 +81,9 @@ run options =
                                             , offline = options.offline
                                             , reviewAppCache = Nothing
                                             , extractCache = Nothing
+                                            , -- Local single-package path has no solver graph; empty
+                                              -- pins digest matches Review.DependencyPins.digest Dict.empty.
+                                              dependencyPinsDigest = "none"
                                             , logStream = Nothing
                                             , fileSystem = options.fileSystem
                                             }

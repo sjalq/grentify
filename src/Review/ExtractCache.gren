@@ -105,12 +105,16 @@ cacheFileName coordinate digestHex =
 
 
 {-| SHA-256 hex digest of the review-config sources, the elm-review CLI version
-marker, and the reviewed file set. Returns `""` when any ingredient is
-unreadable so the caller can fall back to a fresh, uncached extraction rather
-than reuse a possibly-stale entry.
+marker, the reviewed file set, and the dependency pins the extract run sees
+(D82). Returns `""` when any ingredient is unreadable so the caller can fall
+back to a fresh, uncached extraction rather than reuse a possibly-stale entry.
+
+`dependencyPinsDigest` is the canonical pin map from `Review.DependencyPins.digest`.
+Changing which dependency versions the extractor loads must change this digest
+so every package re-extracts once against the correct docs.
 -}
-digestFor : FileSystem.Permission -> Path -> String -> Array String -> Task x String
-digestFor permission reviewConfig cliVersionMarker files =
+digestFor : FileSystem.Permission -> Path -> String -> Array String -> String -> Task x String
+digestFor permission reviewConfig cliVersionMarker files dependencyPinsDigest =
     System.File.listFilesRecursively permission reviewConfig
         |> Task.andThen
             (\paths ->
@@ -125,6 +129,7 @@ digestFor permission reviewConfig cliVersionMarker files =
                     canonical =
                         [ "cli:" ++ cliVersionMarker
                         , "files:" ++ String.join "," files
+                        , "pins:" ++ dependencyPinsDigest
                         ]
                             ++ entries
                             |> String.join "\n---extract-cache---\n"

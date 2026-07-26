@@ -1,0 +1,291 @@
+module Review.DependencyPins exposing
+    ( Pins
+    , fromResolution
+    , digest
+    , pinElmJson
+    )
+
+{-| LAW (extractor dependency versions): extract must resolve names against the
+SAME dependency versions the port will vendor.
+
+elm-review's `project-dependencies.js` takes the first space-separated token of
+each package constraint as the exact version whose `docs.json` feeds
+`ModuleNameLookupTable` (`constraint.split(' ')[0]`). For a package range
+`2.4.0 <= v < 3.0.0` that token is the FLOOR, not the solver's selection. Any
+symbol introduced after the floor is invisible to the lookup table; multi-
+candidate qualifiers then fall back to the head of the candidate list and
+silently record a wrong home (D69/D82 — `Array.interweave` → `ArrayExtra`
+because array-extra 2.4.0 lacks `interweave`, which exists from 2.6.0).
+
+Fix: before extract, rewrite the package's `elm.json` so every dependency the
+solver selected is pinned with that version as the constraint's first token.
+The extract cache digests those pins so a skew-era entry cannot hit.
+-}
+
+import Array exposing (Array)
+import Dict exposing (Dict)
+import Elm.Semver as Semver exposing (Version)
+import Json.Decode as Decode
+import Json.Encode as Encode
+import Resolve.Solver as Solver exposing (Resolution)
+import Result exposing (Result)
+import String
+
+
+{-| Package name (`author/project`) to the exact version string the port
+selected for that package.
+-}
+type alias Pins =
+    Dict String String
+
+
+{-| Every package the solver selected, keyed by `author/project`. The root is
+included; it is harmless if a package does not list itself as a dependency.
+-}
+fromResolution : Resolution -> Pins
+fromResolution resolution =
+    Dict.map
+        (\_ resolved -> Semver.versionToString resolved.manifest.version)
+        resolution.packages
+
+
+{-| Canonical, order-stable digest ingredient for the extract cache. Empty pins
+still produce a fixed marker so the digest shape is uniform.
+-}
+digest : Pins -> String
+digest pins =
+    if Dict.isEmpty pins then
+        "none"
+
+    else
+        Dict.foldl
+            (\name version entries -> Array.pushLast (name ++ "@" ++ version) entries)
+            []
+            pins
+            |> Array.sort
+            |> String.join ","
+
+
+{-| Rewrite an `elm.json` text so every dependency present in `pins` has that
+version as its constraint's first token (what elm-review loads docs for).
+
+Package manifests keep a single-version range (`X.Y.Z <= v < X.Y.(Z+1)`);
+application manifests keep exact pins (`X.Y.Z`). Dependencies not in `pins`
+are left unchanged (mapped packages omitted from the solver graph).
+-}
+pinElmJson : Pins -> String -> Result String String
+pinElmJson pins source =
+    if Dict.isEmpty pins then
+        Ok source
+
+    else
+        Decode.decodeString (Decode.keyValuePairs Decode.value) source
+            |> Result.mapError Decode.errorToString
+            |> Result.andThen
+                (\topPairs ->
+                    when pairString "type" topPairs is
+                        Just "package" ->
+                            pinPackageManifest pins topPairs
+
+                        Just "application" ->
+                            pinApplicationManifest pins topPairs
+
+                        Just other ->
+                            Err ("Unsupported elm.json type '" ++ other ++ "'.")
+
+                        Nothing ->
+                            Err "elm.json is missing a type field."
+                )
+
+
+pinPackageManifest : Pins -> Array Pair -> Result String String
+pinPackageManifest pins topPairs =
+    Result.map2
+        (\deps tests ->
+            let
+                newTop =
+                    topPairs
+                        |> setPair "dependencies" (objectFromPairs (pinStringMap pins deps))
+                        |> setPair "test-dependencies" (objectFromPairs (pinStringMap pins tests))
+            in
+            Encode.encode 4 (objectFromPairs newTop) ++ "\n"
+        )
+        (objectPairs "dependencies" topPairs)
+        (objectPairsOrEmpty "test-dependencies" topPairs)
+
+
+pinApplicationManifest : Pins -> Array Pair -> Result String String
+pinApplicationManifest pins topPairs =
+    Result.map2
+        (\deps tests ->
+            Result.map2
+                (\direct indirect ->
+                    Result.map2
+                        (\testDirect testIndirect ->
+                            let
+                                newDeps =
+                                    deps
+                                        |> setPair "direct" (objectFromPairs (pinExactMap pins direct))
+                                        |> setPair "indirect" (objectFromPairs (pinExactMap pins indirect))
+
+                                newTests =
+                                    tests
+                                        |> setPair "direct" (objectFromPairs (pinExactMap pins testDirect))
+                                        |> setPair "indirect" (objectFromPairs (pinExactMap pins testIndirect))
+
+                                newTop =
+                                    topPairs
+                                        |> setPair "dependencies" (objectFromPairs newDeps)
+                                        |> setPair "test-dependencies" (objectFromPairs newTests)
+                            in
+                            Encode.encode 4 (objectFromPairs newTop) ++ "\n"
+                        )
+                        (objectPairsOrEmpty "direct" tests)
+                        (objectPairsOrEmpty "indirect" tests)
+                )
+                (objectPairs "direct" deps)
+                (objectPairsOrEmpty "indirect" deps)
+        )
+        (objectPairs "dependencies" topPairs)
+        (objectPairsOrEmpty "test-dependencies" topPairs)
+        |> Result.andThen identity
+        |> Result.andThen identity
+
+
+{-| Package-style: rewrite known deps to a single-version range whose first
+token is the selected version.
+-}
+pinStringMap : Pins -> Array Pair -> Array Pair
+pinStringMap pins pairs =
+    Array.map
+        (\pair ->
+            when Dict.get pair.key pins is
+                Just version ->
+                    { key = pair.key
+                    , value = Encode.string (packagePinConstraint version)
+                    }
+
+                Nothing ->
+                    pair
+        )
+        pairs
+
+
+{-| Application-style: rewrite known deps to an exact version pin.
+-}
+pinExactMap : Pins -> Array Pair -> Array Pair
+pinExactMap pins pairs =
+    Array.map
+        (\pair ->
+            when Dict.get pair.key pins is
+                Just version ->
+                    { key = pair.key
+                    , value = Encode.string version
+                    }
+
+                Nothing ->
+                    pair
+        )
+        pairs
+
+
+{-| Closed single-version range. elm-review only reads the first token, and a
+package-form range stays valid if anything else inspects the constraint.
+-}
+packagePinConstraint : String -> String
+packagePinConstraint version =
+    when Semver.parseVersion version is
+        Ok parsed ->
+            Semver.versionToString parsed
+                ++ " <= v < "
+                ++ nextPatchBound parsed
+
+        Err _ ->
+            -- Unparseable pin should not happen (solver only emits valid versions).
+            -- Fall back to a bare pin so the first token is still the version.
+            version
+
+
+nextPatchBound : Version -> String
+nextPatchBound version =
+    String.fromInt version.major
+        ++ "."
+        ++ String.fromInt version.minor
+        ++ "."
+        ++ String.fromInt (version.patch + 1)
+
+
+-- JSON object-pair helpers (same shape as Orchestrator's gren.json surgery).
+
+
+type alias Pair =
+    { key : String
+    , value : Decode.Value
+    }
+
+
+pairString : String -> Array Pair -> Maybe String
+pairString key pairs =
+    when Array.findFirst (\pair -> pair.key == key) pairs is
+        Just found ->
+            Decode.decodeValue Decode.string found.value.value
+                |> Result.toMaybe
+
+        Nothing ->
+            Nothing
+
+
+objectPairs : String -> Array Pair -> Result String (Array Pair)
+objectPairs key pairs =
+    when Array.findFirst (\pair -> pair.key == key) pairs is
+        Nothing ->
+            Err ("elm.json is missing \"" ++ key ++ "\".")
+
+        Just found ->
+            Decode.decodeValue (Decode.keyValuePairs Decode.value) found.value.value
+                |> Result.mapError
+                    (\problem ->
+                        "elm.json field \""
+                            ++ key
+                            ++ "\" is not a JSON object: "
+                            ++ Decode.errorToString problem
+                    )
+
+
+objectPairsOrEmpty : String -> Array Pair -> Result String (Array Pair)
+objectPairsOrEmpty key pairs =
+    when Array.findFirst (\pair -> pair.key == key) pairs is
+        Nothing ->
+            Ok []
+
+        Just found ->
+            Decode.decodeValue (Decode.keyValuePairs Decode.value) found.value.value
+                |> Result.mapError
+                    (\problem ->
+                        "elm.json field \""
+                            ++ key
+                            ++ "\" is not a JSON object: "
+                            ++ Decode.errorToString problem
+                    )
+
+
+setPair : String -> Decode.Value -> Array Pair -> Array Pair
+setPair key value pairs =
+    if Array.any (\pair -> pair.key == key) pairs then
+        Array.map
+            (\pair ->
+                if pair.key == key then
+                    { key = key, value = value }
+
+                else
+                    pair
+            )
+            pairs
+
+    else
+        Array.pushLast { key = key, value = value } pairs
+
+
+objectFromPairs : Array Pair -> Decode.Value
+objectFromPairs pairs =
+    Encode.object (Array.map (\pair -> { key = pair.key, value = pair.value }) pairs)

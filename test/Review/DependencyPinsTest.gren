@@ -1,0 +1,248 @@
+module Review.DependencyPinsTest exposing (tests)
+
+{-| D82: extract pins must make elm-review's first-token version selection
+agree with the port solver. Pure checks for rewrite + digest.
+-}
+
+import Array exposing (Array)
+import Dict
+import Json.Decode as Decode
+import Review.DependencyPins as DependencyPins
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ emptyPinsLeaveSourceUnchanged
+    , packageFloorBecomesSelectedVersion
+    , unselectedDepsAreUntouched
+    , applicationGetsExactPin
+    , digestIsOrderStable
+    , emptyDigestIsMarker
+    , pinIsFirstToken
+    ]
+
+
+samplePackageElmJson : String
+samplePackageElmJson =
+    """
+{
+    "type": "package",
+    "name": "lue-bird/elm-typesafe-array",
+    "summary": "array with a typed length range",
+    "license": "MIT",
+    "version": "34.0.1",
+    "exposed-modules": [
+        "ArraySized"
+    ],
+    "elm-version": "0.19.0 <= v < 0.20.0",
+    "dependencies": {
+        "elm/core": "1.0.5 <= v < 2.0.0",
+        "elm-community/array-extra": "2.4.0 <= v < 3.0.0"
+    },
+    "test-dependencies": {}
+}
+"""
+
+
+sampleApplicationElmJson : String
+sampleApplicationElmJson =
+    """
+{
+    "type": "application",
+    "source-directories": [
+        "src"
+    ],
+    "elm-version": "0.19.1",
+    "dependencies": {
+        "direct": {
+            "elm/core": "1.0.5",
+            "elm-community/array-extra": "2.4.0"
+        },
+        "indirect": {}
+    },
+    "test-dependencies": {
+        "direct": {},
+        "indirect": {}
+    }
+}
+"""
+
+
+emptyPinsLeaveSourceUnchanged : TestResult
+emptyPinsLeaveSourceUnchanged =
+    when DependencyPins.pinElmJson Dict.empty samplePackageElmJson is
+        Ok rewritten ->
+            outcome
+                "empty pins leave elm.json bytes unchanged"
+                ("got " ++ rewritten)
+                (rewritten == samplePackageElmJson)
+
+        Err message ->
+            outcome "empty pins leave elm.json bytes unchanged" message False
+
+
+packageFloorBecomesSelectedVersion : TestResult
+packageFloorBecomesSelectedVersion =
+    let
+        pins =
+            Dict.singleton "elm-community/array-extra" "2.6.0"
+    in
+    when DependencyPins.pinElmJson pins samplePackageElmJson is
+        Ok rewritten ->
+            when dependencyValue rewritten "elm-community/array-extra" is
+                Just constraint ->
+                    outcome
+                        "package pin raises the constraint floor to the selected version"
+                        ("constraint=" ++ constraint)
+                        (constraint == "2.6.0 <= v < 2.6.1")
+
+                Nothing ->
+                    outcome
+                        "package pin raises the constraint floor to the selected version"
+                        "missing array-extra after pin"
+                        False
+
+        Err message ->
+            outcome "package pin raises the constraint floor to the selected version" message False
+
+
+unselectedDepsAreUntouched : TestResult
+unselectedDepsAreUntouched =
+    let
+        pins =
+            Dict.singleton "elm-community/array-extra" "2.6.0"
+    in
+    when DependencyPins.pinElmJson pins samplePackageElmJson is
+        Ok rewritten ->
+            when dependencyValue rewritten "elm/core" is
+                Just constraint ->
+                    outcome
+                        "deps not in the pin map keep their original constraint"
+                        ("core=" ++ constraint)
+                        (constraint == "1.0.5 <= v < 2.0.0")
+
+                Nothing ->
+                    outcome
+                        "deps not in the pin map keep their original constraint"
+                        "missing elm/core after pin"
+                        False
+
+        Err message ->
+            outcome "deps not in the pin map keep their original constraint" message False
+
+
+applicationGetsExactPin : TestResult
+applicationGetsExactPin =
+    let
+        pins =
+            Dict.singleton "elm-community/array-extra" "2.6.0"
+    in
+    when DependencyPins.pinElmJson pins sampleApplicationElmJson is
+        Ok rewritten ->
+            when applicationDirectValue rewritten "elm-community/array-extra" is
+                Just pin ->
+                    outcome
+                        "application pin writes an exact version, not a range"
+                        ("pin=" ++ pin)
+                        (pin == "2.6.0")
+
+                Nothing ->
+                    outcome
+                        "application pin writes an exact version, not a range"
+                        "missing array-extra in direct"
+                        False
+
+        Err message ->
+            outcome "application pin writes an exact version, not a range" message False
+
+
+digestIsOrderStable : TestResult
+digestIsOrderStable =
+    let
+        left =
+            Dict.empty
+                |> Dict.set "zzz/pkg" "1.0.0"
+                |> Dict.set "aaa/pkg" "2.0.0"
+
+        right =
+            Dict.empty
+                |> Dict.set "aaa/pkg" "2.0.0"
+                |> Dict.set "zzz/pkg" "1.0.0"
+    in
+    outcome
+        "pin digest is order-stable across Dict insertion order"
+        ("left=" ++ DependencyPins.digest left ++ " right=" ++ DependencyPins.digest right)
+        (DependencyPins.digest left == DependencyPins.digest right
+            && DependencyPins.digest left == "aaa/pkg@2.0.0,zzz/pkg@1.0.0"
+        )
+
+
+emptyDigestIsMarker : TestResult
+emptyDigestIsMarker =
+    outcome
+        "empty pin digest is the fixed marker 'none'"
+        ("got " ++ DependencyPins.digest Dict.empty)
+        (DependencyPins.digest Dict.empty == "none")
+
+
+pinIsFirstToken : TestResult
+pinIsFirstToken =
+    let
+        pins =
+            Dict.singleton "elm-community/array-extra" "2.6.0"
+    in
+    when DependencyPins.pinElmJson pins samplePackageElmJson is
+        Ok rewritten ->
+            when dependencyValue rewritten "elm-community/array-extra" is
+                Just constraint ->
+                    let
+                        firstToken =
+                            constraint
+                                |> String.split " "
+                                |> Array.first
+                                |> Maybe.withDefault ""
+                    in
+                    outcome
+                        "pinned constraint's first token is the selected version (elm-review rule)"
+                        ("firstToken=" ++ firstToken ++ " constraint=" ++ constraint)
+                        (firstToken == "2.6.0")
+
+                Nothing ->
+                    outcome
+                        "pinned constraint's first token is the selected version (elm-review rule)"
+                        "missing array-extra"
+                        False
+
+        Err message ->
+            outcome "pinned constraint's first token is the selected version (elm-review rule)" message False
+
+
+dependencyValue : String -> String -> Maybe String
+dependencyValue elmJson name =
+    Decode.decodeString
+        (Decode.at [ "dependencies", name ] Decode.string)
+        elmJson
+        |> Result.toMaybe
+
+
+applicationDirectValue : String -> String -> Maybe String
+applicationDirectValue elmJson name =
+    Decode.decodeString
+        (Decode.at [ "dependencies", "direct", name ] Decode.string)
+        elmJson
+        |> Result.toMaybe
+
+
+outcome : String -> String -> Bool -> TestResult
+outcome name details passed =
+    { name = name
+    , passed = passed
+    , details = details
+    }

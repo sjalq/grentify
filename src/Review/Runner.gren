@@ -38,6 +38,10 @@ type alias Options =
       -- registry packages when caching is enabled; `Nothing` bypasses (local
       -- paths, `--no-extract-cache`) and always shells out to elm-review.
       extractCache : Maybe ExtractCache.Key
+    , -- D82: canonical digest of the dependency versions this extract run is
+      -- pinned to (from Review.DependencyPins.digest). Part of the extract-
+      -- cache key so a skew-era entry cannot be reused after pins change.
+      dependencyPinsDigest : String
     , -- Progress sink for the honest "(extract cached)" note on a cache hit.
       logStream : Maybe (Writable Bytes)
     , fileSystem : FileSystem.Permission
@@ -80,6 +84,7 @@ run platform childProcess options =
                 options.reviewConfig
                 reviewCliRelative
                 options.files
+                options.dependencyPinsDigest
                 |> Task.andThen
                     (\digestHex ->
                         if String.isEmpty digestHex then
@@ -123,10 +128,11 @@ loadCachedExtraction :
     FileSystem.Permission
     -> Path
     -> Array String
+    -> String
     -> ExtractCache.Key
     -> Task x (Maybe Extraction)
-loadCachedExtraction fileSystem reviewConfig files key =
-    ExtractCache.digestFor fileSystem reviewConfig reviewCliRelative files
+loadCachedExtraction fileSystem reviewConfig files dependencyPinsDigest key =
+    ExtractCache.digestFor fileSystem reviewConfig reviewCliRelative files dependencyPinsDigest
         |> Task.andThen
             (\digestHex ->
                 if String.isEmpty digestHex then

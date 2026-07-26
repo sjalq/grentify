@@ -32,6 +32,7 @@ import Resolve.SolverTest
 import Port.PlanTest
 import Port.PortedCacheTest
 import Port.AddTransactionTest
+import Review.DependencyPinsTest
 import Review.RunnerTest
 import Stream.Log
 import Task exposing (Task)
@@ -101,6 +102,7 @@ allChecks =
     , Transform.SourceEditTest.tests
     , Resolve.SolverTest.tests
     , Review.RunnerTest.tests
+    , Review.DependencyPinsTest.tests
     , Verify.PackageTest.tests
     , Port.PlanTest.tests
     , Port.PortedCacheTest.tests

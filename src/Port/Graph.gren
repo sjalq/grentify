@@ -412,6 +412,9 @@ transformOne permissions options registry source =
                 Nothing ->
                     Nothing
         , extractCache = Nothing
+        , -- Graph path is test/legacy; pins are applied on the main
+          -- Orchestrator extract path (D82). Empty digest is honest here.
+          dependencyPinsDigest = "none"
         , logStream = Nothing
         , fileSystem = permissions.fileSystem
         }

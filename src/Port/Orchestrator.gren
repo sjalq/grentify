@@ -40,6 +40,7 @@ import Port.Plan as Plan
 import Resolve.Online
 import Resolve.Solver as Solver exposing (Resolution)
 import Port.PortedCache as PortedCache
+import Review.DependencyPins as DependencyPins
 import Review.ExtractCache as ExtractCache
 import Review.Runner
 import Stream exposing (Writable)
@@ -371,7 +372,7 @@ transformSources context permissions cache offline namespaceModules extractCache
                                                 -- D45: deps transform before dependents
                                                 -- (resolution.order), so each package sees
                                                 -- every prior package's ctor arities.
-                                                transformOne context permissions cache elmHome reviewAppCache offline namespaceModules extractCacheEnabled portedCacheEnabled platformLabel assets registry state.depMaps source withTests (key == rootName)
+                                                transformOne context permissions cache elmHome reviewAppCache offline namespaceModules extractCacheEnabled portedCacheEnabled platformLabel assets registry state.depMaps resolution source withTests (key == rootName)
                                                     |> Task.map
                                                         (\draft ->
                                                             { drafts = Dict.set key draft state.drafts
@@ -408,11 +409,12 @@ transformOne
     -> Assets
     -> Registry
     -> Pipeline.DepMaps
+    -> Resolution
     -> Acquire.PackageSource
     -> Bool
     -> Bool
     -> Task Error Draft
-transformOne context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled portedCacheEnabled platformLabel assets registry depMaps source withTests isRoot =
+transformOne context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled portedCacheEnabled platformLabel assets registry depMaps resolution source withTests isRoot =
     let
         coordinate =
             { author = PackageName.author source.manifest.name
@@ -429,14 +431,14 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
     in
     when portedKey is
         Nothing ->
-            transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps source withTests isRoot Nothing
+            transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps resolution source withTests isRoot Nothing
 
         Just key ->
             PortedCache.digestFor permissions.fileSystem mappingsDirectory context.toolVersion platformLabel namespaceModules
                 |> Task.andThen
                     (\digestHex ->
                         if String.isEmpty digestHex then
-                            transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps source withTests isRoot Nothing
+                            transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps resolution source withTests isRoot Nothing
 
                         else
                             let
@@ -482,7 +484,7 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
                                                                 |> Task.onError
                                                                     (\_ ->
                                                                         -- Corrupt/incomplete entry: soft-miss and re-port.
-                                                                        transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps source withTests isRoot
+                                                                        transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps resolution source withTests isRoot
                                                                             (Just
                                                                                 { cacheRoot = key.cacheRoot
                                                                                 , coordinate = key.coordinate
@@ -494,7 +496,7 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
                                                         )
 
                                             Nothing ->
-                                                transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps source withTests isRoot
+                                                transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps resolution source withTests isRoot
                                                     (Just
                                                         { cacheRoot = key.cacheRoot
                                                         , coordinate = key.coordinate
@@ -508,6 +510,10 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
 
 {-| Cold transform path: extract, pipeline, adapters. `pendingStore` is `Just`
 after a ported-cache miss so the verified tree can be written later.
+
+D82: extract always runs on a disposable staging tree whose `elm.json` is
+pinned to the solver's selected dependency versions, so elm-review's docs
+lookup (which only reads each constraint's first token) matches the port.
 -}
 transformFresh
     : Context
@@ -521,12 +527,13 @@ transformFresh
     -> Assets
     -> Registry
     -> Pipeline.DepMaps
+    -> Resolution
     -> Acquire.PackageSource
     -> Bool
     -> Bool
     -> Maybe PortedCache.Pending
     -> Task Error Draft
-transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps source withTests isRoot pendingStore =
+transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps resolution source withTests isRoot pendingStore =
     let
         -- Determine which directories to review: src only, or src + tests
         includeTests =
@@ -538,6 +545,12 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
 
             else
                 [ "src" ]
+
+        pins =
+            DependencyPins.fromResolution resolution
+
+        pinsDigest =
+            DependencyPins.digest pins
 
         -- Registry packages (sourceUrl = Just) are immutable and cacheable;
         -- local-path inputs (Nothing) are mutable and always bypass.
@@ -562,54 +575,53 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
                 , offline = offline
                 , reviewAppCache = Just reviewAppCache
                 , extractCache = extractCache
+                , dependencyPinsDigest = pinsDigest
                 , logStream = context.logStream
                 , fileSystem = permissions.fileSystem
                 }
 
+        -- Always stage: pin elm.json to solver versions (D82) and keep
+        -- user-owned local trees / shared registry trees free of elm-stuff.
         runReview =
-            when source.sourceUrl is
-                Just _ ->
-                    runReviewAt source.root
+            FileSystem.makeTempDirectory permissions.fileSystem
+                "elm-to-gren-extract-"
+                |> Task.mapError
+                    (FileSystem.errorToString
+                        >> PortError.create "EXTRACT_STAGING_FAILED"
+                    )
+                |> Task.andThen
+                    (\temporary ->
+                        System.File.copyDirectoryContents
+                            permissions.fileSystem
+                            source.root
+                            temporary
+                            |> Task.andThen
+                                (\_ ->
+                                    pinStagedElmJson permissions.fileSystem pins temporary
+                                )
+                            |> Task.andThen (\_ -> runReviewAt temporary)
+                            |> Task.map Ok
+                            |> Task.onError (Err >> Task.succeed)
+                            |> Task.andThen
+                                (\reviewResult ->
+                                    FileSystem.remove permissions.fileSystem
+                                        { recursive = True }
+                                        temporary
+                                        |> Task.mapError
+                                            (FileSystem.errorToString
+                                                >> PortError.create "EXTRACT_STAGING_FAILED"
+                                            )
+                                        |> Task.andThen
+                                            (\_ ->
+                                                when reviewResult is
+                                                    Ok extraction ->
+                                                        Task.succeed extraction
 
-                Nothing ->
-                    -- Local inputs are user-owned and must remain read-only.
-                    -- elm-review creates and may heal `elm-stuff`, so run it
-                    -- against a disposable copy instead of the source tree.
-                    FileSystem.makeTempDirectory permissions.fileSystem
-                        "elm-to-gren-local-review-"
-                        |> Task.mapError
-                            (FileSystem.errorToString
-                                >> PortError.create "LOCAL_REVIEW_STAGING_FAILED"
-                            )
-                        |> Task.andThen
-                            (\temporary ->
-                                System.File.copyDirectoryContents
-                                    permissions.fileSystem
-                                    source.root
-                                    temporary
-                                    |> Task.andThen (\_ -> runReviewAt temporary)
-                                    |> Task.map Ok
-                                    |> Task.onError (Err >> Task.succeed)
-                                    |> Task.andThen
-                                        (\reviewResult ->
-                                            FileSystem.remove permissions.fileSystem
-                                                { recursive = True }
-                                                temporary
-                                                |> Task.mapError
-                                                    (FileSystem.errorToString
-                                                        >> PortError.create "LOCAL_REVIEW_STAGING_FAILED"
-                                                    )
-                                                |> Task.andThen
-                                                    (\_ ->
-                                                        when reviewResult is
-                                                            Ok extraction ->
-                                                                Task.succeed extraction
-
-                                                            Err error ->
-                                                                Task.fail error
-                                                    )
-                                        )
-                            )
+                                                    Err error ->
+                                                        Task.fail error
+                                            )
+                                )
+                    )
     in
     Task.map2
         (\extraction sourceFiles -> { extraction = extraction, sourceFiles = sourceFiles })
@@ -683,6 +695,36 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
                                         )
                             )
                         |> resultTask identity
+            )
+
+
+{-| D82: rewrite the staged package's elm.json so elm-review loads docs at the
+solver-selected versions (first constraint token). Staging keeps the original
+registry/local tree immutable.
+-}
+pinStagedElmJson : FileSystem.Permission -> DependencyPins.Pins -> Path -> Task Error {}
+pinStagedElmJson fileSystem pins packageRoot =
+    let
+        elmJsonPath =
+            Path.join [ packageRoot, Path.fromPosixString "elm.json" ]
+    in
+    System.File.readText fileSystem elmJsonPath
+        |> Task.andThen
+            (\original ->
+                when DependencyPins.pinElmJson pins original is
+                    Err message ->
+                        Task.fail
+                            (PortError.create "EXTRACT_PIN_FAILED"
+                                ("Could not pin elm.json dependency versions for extract: " ++ message)
+                            )
+
+                    Ok pinned ->
+                        if pinned == original then
+                            Task.succeed {}
+
+                        else
+                            System.File.writeText fileSystem elmJsonPath pinned
+                                |> Task.map (\_ -> {})
             )
 
 

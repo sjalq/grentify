@@ -45,7 +45,7 @@
     "dev:loop": "npm run build --silent && npm test --silent && node test/ecosystem/run-canary.cjs -j 4",
     "test:ast-probe": "npm run build --silent && node test/ecosystem/run-ast-probe.cjs",
     "test:apps": "npm run build --silent && node test/apps/run-apps.cjs",
-    "test:format": "npm run build --silent && node test/format/run-format.cjs && node test/format/collapse-record-patterns.test.cjs",
+    "test:format": "npm run build --silent && node test/format/run-format.cjs && node test/format/collapse-record-patterns.test.cjs && node test/format/idempotence.cjs",
     "test:ledger": "node test/ecosystem/lib/ledger.test.cjs && node test/ecosystem/lib/ingest-behavior.test.cjs && node test/ecosystem/lib/volume.test.cjs && node test/ecosystem/lib/failure-signature.test.cjs",
     "ecosystem:clusters": "node test/ecosystem/cluster-failures.cjs",
     "ecosystem:cache-health": "node test/ecosystem/cache-health.cjs",

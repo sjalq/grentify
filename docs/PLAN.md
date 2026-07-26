@@ -164,6 +164,53 @@ by being written through this law; nothing edits the ledger by hand.
 
 ## 6. Known defects register (2026-07-17 audit; independently verified)
 
+- **D82 unparseable output from two packages — TWO bugs, ONE stage, ONE
+  class** (found 2026-07-26 as ENDLESS STRING @ the-sett/elm-syntax-dsl
+  Elm.DSLParser / Elm.Pretty, and UNFINISHED DEFINITION @ hrldcpr/elm-cons
+  Cons on a generated `pm_*` binder; FIXED same day). Both are layout/text
+  damage inside `tools/gren-format/collapse-record-patterns.cjs` — Print
+  and gren-format leave valid Gren; the collapse post-pass rewrites it
+  into something Gren cannot parse. Two independent rewrites, same class
+  (post-pass text damage; siblings of D48 / D67a / D71):
+
+  1. **`separateDocComments` was not string-aware** (ENDLESS STRING).
+     Intended to unglue `type alias Foo = Int{-| docs` after format. The
+     regex `/(\S)([ \t]*)(\{-\|)/g` also matches *inside string literals*
+     that packages emit as doc-comment delimiters:
+     `Parser.multiComment "{-|"` → `Parser.multiComment "\n\n{-|` and
+     `Pretty.string "{-| "` → the same split. This is the D48
+     idempotency hole closed properly: a second collapse walk over
+     already-correct `"{-|"` content was never "harmless", and the first
+     walk was already fatal for any package whose *source* contains those
+     literals. Fix: walk with string / line-comment / block-comment state;
+     only insert the blank line when `{-|` is real source, not literal
+     content. The walker skip of `.elm-to-gren/` stays as defense-in-depth.
+
+  2. **`joinSplitDefinitionHeaders` absorbed deeper body lines**
+     (UNFINISHED DEFINITION). D67a repaired format wraps that land at the
+     binding's own column. The repair also absorbed *deeper* indent, so
+     an expression-level peel:
+     ```
+     (cons x) <|
+         let
+             pm_3400109_0 =
+                 l
+     ```
+     became `(cons x) <| let pm_3400109_0 =` — Gren sees a finished
+     header with no body. Fix: absorb only same-indent continuations
+     (format's actual wrap shape); refuse keyword-headed lines (`let`,
+     `in`, `when`, …); reject any "complete header" that contains `let`.
+
+  **Property (W6.5 partial):** `transform` is a fixed point — unit
+  specimens in `test/format/collapse-record-patterns.test.cjs`, and
+  real package output in `test/format/idempotence.cjs` (wired into
+  `npm run test:format`): after the pipeline, re-applying collapse must
+  change zero bytes, and `transform(transform(x)) === transform(x)`.
+  Residual of W6.5: collapse remains a post-hoc repair (G2); migrating
+  it into Print or deleting it is still open. RECEIPTS:
+  `the-sett/elm-syntax-dsl@6.0.5` and `hrldcpr/elm-cons@3.1.0` port +
+  gren-verify EXIT=0; D48 string hole closed for this rewrite.
+
 - **D81 non-sole constructor let-destructure emitted unguarded (bare-name
   sole-ctor collision)** (found by dillonkearns/elm-markdown UNSAFE PATTERN
   @ Markdown.Parser, and dtwrks/elm-book via the same dep; FIXED 2026-07-26).
@@ -2185,6 +2232,11 @@ no compiler in the loop.
       collapse-record-patterns becomes part of Print proper or is deleted (a post-hoc
       repair pass on our own output violates G2). Prove: tier 1 + tier 0 (idempotence
       test).
+      **PARTIAL (D82):** collapse `transform` idempotence is now enforced on unit
+      specimens and on real output of the D82 packages (and canary trees when
+      present) via `test/format/idempotence.cjs` + W6.5 checks in
+      `collapse-record-patterns.test.cjs`. Remaining: full canary-under-format
+      fixed-point as a standing gate, and migrating/deleting the post-pass.
 - [ ] W7.3 [M6] D17 quadratic peels: measure first (benchmark ported list-heavy
       recursion vs Elm on list-extra). If real-world impact confirmed, add peel-shape
       optimizations (index-walk instead of popFirst chains) under the W1 property.

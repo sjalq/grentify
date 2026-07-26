@@ -2047,6 +2047,7 @@ overlayPortedModules sources registry =
                                         , values = Dict.empty
                                         , types = Dict.empty
                                         , recordAliases = Dict.empty
+                                        , constructorFields = Dict.empty
                                         }
                                         inner
 

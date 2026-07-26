@@ -73,7 +73,7 @@ letBoundFunctionNameIsEscaped =
         printed =
             file
                 |> Reserved.apply Dict.empty
-                |> Print.print
+                |> Print.print Dict.empty
 
         passed =
             String.contains "when_ propOf =" printed
@@ -105,7 +105,7 @@ docsRewriteKeepsCommasWhenNameUnchanged =
         printed =
             file
                 |> Reserved.apply Dict.empty
-                |> Print.print
+                |> Print.print Dict.empty
 
         passed =
             String.contains "@docs Response, res, andThen" printed
@@ -160,7 +160,7 @@ reservedEscapesAroundExistingUnderscore =
         printed =
             file
                 |> Reserved.apply Dict.empty
-                |> Print.print
+                |> Print.print Dict.empty
 
         passed =
             -- value when → when__; param when_ kept; field when → when_ (fixed)
@@ -262,10 +262,10 @@ crossModuleReferenceFollowsDefiningModuleEscape =
                 |> Maybe.withDefault "<missing>"
 
         libPrinted =
-            Print.print (Reserved.apply packageExports lib)
+            Print.print Dict.empty (Reserved.apply packageExports lib)
 
         callerPrinted =
-            Print.print (Reserved.apply packageExports caller)
+            Print.print Dict.empty (Reserved.apply packageExports caller)
 
         passed =
             -- Lib escalates its own export to `when__`.

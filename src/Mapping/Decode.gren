@@ -245,12 +245,13 @@ decodeModuleObject object =
                                                         |> Result.andThen
                                                             (\_ ->
                                                                 Result.map3
-                                                                    (\values types recordAliases ->
+                                                                    (\values types shapes ->
                                                                         { source = source
                                                                         , target = target
                                                                         , values = values
                                                                         , types = types
-                                                                        , recordAliases = recordAliases
+                                                                        , recordAliases = shapes.recordAliases
+                                                                        , constructorFields = shapes.constructorFields
                                                                         }
                                                                     )
                                                                     (optionalStringMap "values" object
@@ -261,9 +262,20 @@ decodeModuleObject object =
                                                                         |> Result.andThen
                                                                             (validateStringMap ("Type mappings for '" ++ source ++ "'"))
                                                                     )
-                                                                    (optionalFieldNameMap "recordAliases" object
-                                                                        |> Result.andThen
-                                                                            (validateFieldNameMap ("Record alias shapes for '" ++ source ++ "'"))
+                                                                    (Result.map2
+                                                                        (\recordAliases constructorFields ->
+                                                                            { recordAliases = recordAliases
+                                                                            , constructorFields = constructorFields
+                                                                            }
+                                                                        )
+                                                                        (optionalFieldNameMap "recordAliases" object
+                                                                            |> Result.andThen
+                                                                                (validateFieldNameMap 1 ("Record alias shapes for '" ++ source ++ "'"))
+                                                                        )
+                                                                        (optionalFieldNameMap "constructorFields" object
+                                                                            |> Result.andThen
+                                                                                (validateFieldNameMap 2 ("Constructor payload fields for '" ++ source ++ "'"))
+                                                                        )
                                                                     )
                                                             )
                                                 )
@@ -365,8 +377,8 @@ optionalStringMap fieldName object =
                     )
 
 
-{-| `{ "DeadEnd": ["row", "col", "problem"] }` — a record alias in the target
-module and the field names it is built from, in declaration order.
+{-| `{ "DeadEnd": ["row", "col", "problem"] }` — a name in the target module and
+the field names it is built from, in declaration (Elm-argument) order.
 -}
 optionalFieldNameMap : String -> Dict String Value -> Result String (Dict String (Array String))
 optionalFieldNameMap fieldName object =
@@ -385,8 +397,14 @@ optionalFieldNameMap fieldName object =
                     )
 
 
-validateFieldNameMap : String -> Dict String (Array String) -> Result String (Dict String (Array String))
-validateFieldNameMap description aliases =
+{-| `minimumFields` is what makes the entry say something. An empty-record alias
+(`type alias Empty = {}`) is legal in Elm but has no positional form worth
+stating, and a constructor with one argument keeps that argument in Gren rather
+than boxing it in a record — under the minimum, an entry is far more likely to
+be truncated than deliberate, and a silent no-op hint is worse than a refusal.
+-}
+validateFieldNameMap : Int -> String -> Dict String (Array String) -> Result String (Dict String (Array String))
+validateFieldNameMap minimumFields description aliases =
     Dict.foldl
         (\aliasName fields validation ->
             validation
@@ -395,12 +413,8 @@ validateFieldNameMap description aliases =
                         if not (isValidTypeName aliasName) then
                             Err (description ++ " contains invalid alias name '" ++ aliasName ++ "'.")
 
-                        else if Array.isEmpty fields then
-                            -- An empty-record alias (`type alias Empty = {}`) is
-                            -- legal in Elm but has no positional form worth
-                            -- stating here; an empty array is far more likely to
-                            -- be a truncated entry than a deliberate one.
-                            Err (description ++ " lists no fields for alias '" ++ aliasName ++ "'.")
+                        else if Array.length fields < minimumFields then
+                            Err (description ++ " lists too few fields for '" ++ aliasName ++ "'.")
 
                         else if not (Array.all isValidFieldName fields) then
                             Err (description ++ " contains an invalid field name for alias '" ++ aliasName ++ "'.")

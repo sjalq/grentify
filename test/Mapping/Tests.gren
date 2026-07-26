@@ -44,6 +44,8 @@ checks =
     , check "mapping lexical validation matches the JSON contract" lexicalValidationWorks
     , check "record alias shapes decode and key by target module" recordAliasShapesDecode
     , check "malformed record alias shapes are rejected" malformedRecordAliasShapesRejected
+    , check "constructor payload shapes key by the name the port will print" constructorFieldShapesDecode
+    , check "constructor payload shapes with nothing to say are rejected" malformedConstructorFieldShapesRejected
     , check "absent modules decode and name the mapped package pair" absentModulesDecode
     , check "absent modules without a stated reason are rejected" unexplainedAbsentModuleRejected
     ]
@@ -118,6 +120,85 @@ malformedRecordAliasShapesRejected =
             (MappingDecode.decodeString "aliases-field.json"
                 (String.replace "\"row\"" "\"Row\"" recordAliasDocumentJson)
             )
+
+
+{-| D75: the key is the qualified Gren name the PORT WILL PRINT, so it follows
+the module's `values` rewrite (`BadPayload` lands on the Compat module) and only
+falls back to the module `target` (`Token` stays in `Parser.Advanced`). Keyed
+any other way, the labels would be attached to a name the printer never emits.
+-}
+constructorFieldShapesDecode : Bool
+constructorFieldShapesDecode =
+    when MappingDecode.decodeString "ctors.json" constructorFieldDocumentJson is
+        Ok document ->
+            Registry.constructorFieldShapes (Registry.fromDocument document)
+                == (Dict.empty
+                        |> Dict.set "Parser.Advanced.Token" [ "str", "expecting" ]
+                        |> Dict.set "ElmToGren.Compat.Http.BadPayload"
+                            [ "message", "response" ]
+                   )
+
+        Err _ ->
+            False
+
+
+{-| A one-field entry is not a Gren record payload — a single-argument
+constructor keeps its argument — so it is a truncated entry, not a hint.
+-}
+malformedConstructorFieldShapesRejected : Bool
+malformedConstructorFieldShapesRejected =
+    isErr
+        (MappingDecode.decodeString "ctors-single.json"
+            (String.replace "[\"str\", \"expecting\"]" "[\"str\"]"
+                constructorFieldDocumentJson
+            )
+        )
+        && isErr
+            (MappingDecode.decodeString "ctors-shape.json"
+                (String.replace "[\"str\", \"expecting\"]" "\"str expecting\""
+                    constructorFieldDocumentJson
+                )
+            )
+
+
+constructorFieldDocumentJson : String
+constructorFieldDocumentJson =
+    """
+{
+  "schemaVersion": 1,
+  "packages": [{
+    "kind": "gren-analogue",
+    "elmPackage": "elm/parser",
+    "grenPackage": "gren-lang/parser",
+    "grenVersion": "6.2.1",
+    "platform": "common",
+    "modules": [
+      {
+        "source": "Parser.Advanced",
+        "target": "Parser.Advanced",
+        "values": {},
+        "types": {},
+        "constructorFields": { "Token": ["str", "expecting"] }
+      }
+    ]
+  }, {
+    "kind": "absorbed",
+    "elmPackage": "elm/http",
+    "grenPackage": "gren-lang/browser",
+    "grenVersion": "6.0.2",
+    "platform": "browser",
+    "modules": [
+      {
+        "source": "Http",
+        "target": "Http",
+        "values": { "BadPayload": "ElmToGren.Compat.Http.BadPayload" },
+        "types": {},
+        "constructorFields": { "BadPayload": ["message", "response"] }
+      }
+    ]
+  }]
+}
+"""
 
 
 {-| D74: a mapped package's module set is a fact about the mapping. `Shrink`
@@ -434,6 +515,7 @@ adapterDiscoveryWorks =
                         |> Dict.set "fromList" "ElmToGren.Compat.Array.fromList"
               , types = Dict.empty
               , recordAliases = Dict.empty
+              , constructorFields = Dict.empty
               }
             ]
             == [ ArrayAdapter, ListAdapter ]
@@ -502,6 +584,7 @@ charAdapterCatalogWiring =
                     |> Dict.set "toLocaleUpper" "ElmToGren.Compat.Char.toLocaleUpper"
             , types = Dict.singleton "Char" "Char"
             , recordAliases = Dict.empty
+            , constructorFields = Dict.empty
             }
 
         bareCharMapping =
@@ -510,6 +593,7 @@ charAdapterCatalogWiring =
             , values = Dict.empty
             , types = Dict.singleton "Char" "Char"
             , recordAliases = Dict.empty
+            , constructorFields = Dict.empty
             }
 
         registered =
@@ -661,6 +745,7 @@ browserAdaptersCatalogWiring =
                     |> Dict.set "application" "ElmToGren.Compat.Browser.application"
             , types = Dict.empty
             , recordAliases = Dict.empty
+            , constructorFields = Dict.empty
             }
 
         htmlEventsMapping =
@@ -672,6 +757,7 @@ browserAdaptersCatalogWiring =
                     |> Dict.set "stopPropagationOn" "ElmToGren.Compat.Html.Events.stopPropagationOn"
             , types = Dict.empty
             , recordAliases = Dict.empty
+            , constructorFields = Dict.empty
             }
 
         svgEventsMapping =
@@ -682,6 +768,7 @@ browserAdaptersCatalogWiring =
                     |> Dict.set "preventDefaultOn" "ElmToGren.Compat.Html.Events.preventDefaultOn"
             , types = Dict.empty
             , recordAliases = Dict.empty
+            , constructorFields = Dict.empty
             }
 
         bytesMapping =
@@ -693,6 +780,7 @@ browserAdaptersCatalogWiring =
                     |> Dict.set "getStringWidth" "ElmToGren.Compat.Bytes.Encode.getStringWidth"
             , types = Dict.empty
             , recordAliases = Dict.empty
+            , constructorFields = Dict.empty
             }
 
         attributesMapping =
@@ -701,6 +789,7 @@ browserAdaptersCatalogWiring =
             , values = Dict.singleton "classList" "ElmToGren.Compat.Html.Attributes.classList"
             , types = Dict.empty
             , recordAliases = Dict.empty
+            , constructorFields = Dict.empty
             }
     in
     Adapter.moduleName BrowserAdapter

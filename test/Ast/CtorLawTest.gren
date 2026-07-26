@@ -82,7 +82,7 @@ localOneArgNotShadowedByImportedMultiArg =
                 ]
 
         printed =
-            Print.print (CtorLaw.apply packageArities file)
+            Print.print Dict.empty (CtorLaw.apply packageArities file)
 
         ok =
             not (String.contains "ctor_Continue_elmToGren" printed)
@@ -130,7 +130,7 @@ localMultiArgStillGetsHelper =
                 ]
 
         printed =
-            Print.print (CtorLaw.apply packageArities file)
+            Print.print Dict.empty (CtorLaw.apply packageArities file)
 
         ok =
             String.contains "ctor_Error_elmToGren" printed
@@ -168,7 +168,7 @@ importedMultiArgViaQualifiedName =
                 ]
 
         printed =
-            Print.print (CtorLaw.apply packageArities file)
+            Print.print Dict.empty (CtorLaw.apply packageArities file)
 
         ok =
             String.contains "ctor_Continue_elmToGren" printed
@@ -258,7 +258,7 @@ importedMultiArgViaImportAlias =
                 ]
 
         printed =
-            Print.print (CtorLaw.apply packageArities file)
+            Print.print Dict.empty (CtorLaw.apply packageArities file)
 
         ok =
             String.contains "ctor_StyleClass_elmToGren" printed
@@ -282,7 +282,7 @@ fifoLikeCtorValueUsesAllShareOneHelper : TestResult
 fifoLikeCtorValueUsesAllShareOneHelper =
     let
         printed =
-            Print.print (CtorLaw.apply Dict.empty fifoFixtureFile)
+            Print.print Dict.empty (CtorLaw.apply Dict.empty fifoFixtureFile)
 
         helperOccurrences =
             Array.length (String.split "ctor_Fifo_elmToGren" printed) - 1
@@ -330,7 +330,7 @@ fifoRealLoweringChainStillEmitsHelper =
                 |> CtorLaw.apply Dict.empty
 
         printed =
-            Print.print lowered
+            Print.print Dict.empty lowered
 
         helperOccurrences =
             Array.length (String.split "ctor_Fifo_elmToGren" printed) - 1

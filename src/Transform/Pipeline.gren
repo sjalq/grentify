@@ -399,9 +399,8 @@ transform registry depMaps extraction sources =
                                     (\modules ->
                                         findMatchingExtraction source.path extraction.modules
                                             |> Result.andThen
-                                                (transformModuleWithEvidence
-                                                    registry packageEvidence
-                                                    source)
+                                                (transformModule registry
+                                                    packageEvidence source)
                                             |> Result.map (\module_ -> Array.pushLast module_ modules)
                                     )
                         )
@@ -462,38 +461,13 @@ collectPackageSoleCtors =
     Evidence.collectSoleConstructors
 
 
-transformModuleWithEvidence :
+transformModule :
     Registry
     -> Evidence.PackageEvidence
     -> SourceFile
     -> Protocol.ModuleExtraction
     -> Result Error TransformedModule
-transformModuleWithEvidence registry evidence =
-    transformModule registry
-        evidence.tupleReturns
-        evidence.constructorHomes
-        evidence.keyEvidence
-        evidence.recordAliases
-        evidence.constructorArities
-        evidence.soleConstructors
-        evidence.reservedExports
-        evidence.prepared
-
-
-transformModule :
-    Registry
-    -> Dict String (Array AstTupleCompare.ElemShape)
-    -> AstCtorHome.Homes
-    -> AstKeyEncode.Evidence
-    -> Dict String (Array String)
-    -> Dict String Int
-    -> Dict String {}
-    -> Dict String String
-    -> Dict String AstPipeline.Prepared
-    -> SourceFile
-    -> Protocol.ModuleExtraction
-    -> Result Error TransformedModule
-transformModule registry packageTupleReturns packageCtorHomes packageKeyEvidence packageRecordAliases packageCtorArities packageSoleCtors packageReservedExports packagePrepared input extraction =
+transformModule registry evidence input extraction =
     toGrenSourcePath input.path
         |> Result.andThen
             (\outputPath ->
@@ -523,14 +497,7 @@ transformModule registry packageTupleReturns packageCtorHomes packageKeyEvidence
 
                     Just astValue ->
                         transformModuleViaAst registry
-                            packageTupleReturns
-                            packageCtorHomes
-                            packageKeyEvidence
-                            packageRecordAliases
-                            packageCtorArities
-                            packageSoleCtors
-                            packageReservedExports
-                            packagePrepared
+                            evidence
                             input
                             extraction
                             outputPath
@@ -540,20 +507,13 @@ transformModule registry packageTupleReturns packageCtorHomes packageKeyEvidence
 
 transformModuleViaAst :
     Registry
-    -> Dict String (Array AstTupleCompare.ElemShape)
-    -> AstCtorHome.Homes
-    -> AstKeyEncode.Evidence
-    -> Dict String (Array String)
-    -> Dict String Int
-    -> Dict String {}
-    -> Dict String String
-    -> Dict String AstPipeline.Prepared
+    -> Evidence.PackageEvidence
     -> SourceFile
     -> Protocol.ModuleExtraction
     -> String
     -> Decode.Value
     -> Result Error TransformedModule
-transformModuleViaAst registry packageTupleReturns packageCtorHomes packageKeyEvidence packageRecordAliases packageCtorArities packageSoleCtors packageReservedExports packagePrepared input extraction outputPath astValue =
+transformModuleViaAst registry evidence input extraction outputPath astValue =
     when AstDecode.decode astValue is
         Err decodeError ->
             Err <|
@@ -572,19 +532,20 @@ transformModuleViaAst registry packageTupleReturns packageCtorHomes packageKeyEv
                 -- The fallback covers a module the evidence pass could not
                 -- decode, which cannot reach here (this branch decoded it).
                 translated =
-                    when Dict.get extraction.moduleName packagePrepared is
+                    when Dict.get extraction.moduleName evidence.prepared is
                         Just prepared ->
-                            AstPipeline.finish packageReservedExports prepared
+                            AstPipeline.finish evidence.reservedExports prepared
 
                         Nothing ->
                             AstPipeline.run registry
-                                { tupleReturns = packageTupleReturns
-                                , constructorHomes = packageCtorHomes
-                                , keyEvidence = packageKeyEvidence
-                                , recordAliases = packageRecordAliases
-                                , constructorArities = packageCtorArities
-                                , soleConstructors = packageSoleCtors
-                                , reservedExports = packageReservedExports
+                                { tupleReturns = evidence.tupleReturns
+                                , constructorHomes = evidence.constructorHomes
+                                , keyEvidence = evidence.keyEvidence
+                                , recordAliases = evidence.recordAliases
+                                , constructorFields = evidence.constructorFields
+                                , constructorArities = evidence.constructorArities
+                                , soleConstructors = evidence.soleConstructors
+                                , reservedExports = evidence.reservedExports
                                 }
                                 file
             in

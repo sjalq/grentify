@@ -38,6 +38,7 @@ type alias Evidence =
     , constructorHomes : CtorHome.Homes
     , keyEvidence : KeyEncode.Evidence
     , recordAliases : Dict String (Array String)
+    , constructorFields : Dict String (Array String)
     , constructorArities : Dict String Int
     , soleConstructors : Dict String {}
     , reservedExports : Dict String String
@@ -84,7 +85,11 @@ computed ONCE: `prepare` produces it, `reservedExportsOf` reads the table off
 it, `finish` completes it.
 -}
 type Prepared
-    = Prepared { file : File, renames : Dict String String }
+    = Prepared
+        { file : File
+        , renames : Dict String String
+        , constructorFields : Dict String (Array String)
+        }
 
 
 prepare : Registry -> Evidence -> File -> Prepared
@@ -97,7 +102,11 @@ prepare registry evidence file =
                 |> lower registry evidence
                 |> compilePatterns evidence
     in
-    Prepared { file = compiled, renames = Reserved.renameMap compiled }
+    Prepared
+        { file = compiled
+        , renames = Reserved.renameMap compiled
+        , constructorFields = evidence.constructorFields
+        }
 
 
 moduleNameOf : Prepared -> String
@@ -115,7 +124,7 @@ finish reservedExports (Prepared prepared) =
     prepared.file
         |> Reserved.applyWith reservedExports prepared.renames
         |> FinalizedAst
-        |> render
+        |> render prepared.constructorFields
 
 
 run : Registry -> Evidence -> File -> Output
@@ -126,7 +135,7 @@ run registry evidence file =
         |> lower registry evidence
         |> compilePatterns evidence
         |> finalize evidence
-        |> render
+        |> render evidence.constructorFields
 
 
 resolve : Evidence -> File -> ResolvedAst
@@ -169,11 +178,11 @@ finalize evidence (CompiledAst file) =
         |> FinalizedAst
 
 
-render : FinalizedAst -> Output
-render (FinalizedAst file) =
+render : Dict String (Array String) -> FinalizedAst -> Output
+render constructorFields (FinalizedAst file) =
     let
         source =
-            Print.print file
+            Print.print constructorFields file
     in
     { file = file
     , source = source

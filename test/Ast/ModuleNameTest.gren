@@ -209,7 +209,7 @@ printerRenamesEveryModulePosition =
             }
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         leftovers =
             [ "Extended_Pictographic", "EN_US" ]

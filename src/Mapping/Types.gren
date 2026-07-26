@@ -119,6 +119,18 @@ declaration (`Ast.RecordAlias.collectFromFile`). Platform packages are *mapped*,
 never transpiled, so no port ever sees their declarations — the shape has to be
 stated here, read off the Gren package source. Keys are alias names in the
 `target` module; values are field names in declaration order.
+
+`constructorFields` is the CONSTRUCTOR sibling of the same fact. Gren gives a
+multi-argument constructor one record payload; for a constructor this port
+emits, the port also emits its type declaration and so names the payload
+positionally (`first`, `second`, …). A mapped package's constructors are
+declared by the Gren package instead, with its own field names
+(`Parser.Advanced.Token { str, expecting }` for Elm's `Token String x`), and no
+port ever reads that declaration. Keys are SOURCE constructor names; the field
+array is in Elm argument order, so its length is the Elm arity. The Gren
+qualified name a key resolves to is whatever `values` maps the constructor to,
+falling back to the module `target` — the same rewrite `Ast.NameSub` performs,
+because the payload labels have to land on the name the port actually printed.
 -}
 type alias ModuleMapping =
     { source : String
@@ -126,6 +138,7 @@ type alias ModuleMapping =
     , values : Dict String String
     , types : Dict String String
     , recordAliases : Dict String (Array String)
+    , constructorFields : Dict String (Array String)
     }
 
 

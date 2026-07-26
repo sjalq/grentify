@@ -109,12 +109,19 @@ cross-MODULE escape and reads the defining module's decision from a package-wide
 map, for exactly the desync reason stated in its header. The package boundary is
 the same boundary — elm-codegen's `Elm.Annotation.alias` escapes to `alias_`,
 and a dependent that could not see that decision emitted `Type.alias`.
+
+D83 added `ctorHomes` / `knownModules`: D46's CtorHome repair needs every
+surveyed module's constructor set, including dependencies. Without them a value
+ref wrongly homed to a dep type-alias module (`N.Down`) could not re-point to
+the sole importable declaring module (`Linear.Down`).
 -}
 type alias DepMaps =
     { ctorArities : Dict String Int
     , soleCtors : Dict String {}
     , recordAliases : Dict String (Array String)
     , reservedExports : Dict String String
+    , ctorHomes : Dict String (Array String)
+    , knownModules : Dict String {}
     }
 
 
@@ -124,6 +131,8 @@ emptyDepMaps =
     , soleCtors = Dict.empty
     , recordAliases = Dict.empty
     , reservedExports = Dict.empty
+    , ctorHomes = Dict.empty
+    , knownModules = Dict.empty
     }
 
 
@@ -410,6 +419,11 @@ transform registry depMaps extraction sources =
                             , soleConstructors = depMaps.soleCtors
                             , recordAliases = depMaps.recordAliases
                             , reservedExports = depMaps.reservedExports
+                            , constructorHomes =
+                                AstCtorHome.fromMaps depMaps.ctorHomes
+                                    depMaps.knownModules
+                                    |> AstCtorHome.protectRecordAliases
+                                        depMaps.recordAliases
                             }
                             extraction.modules
                 in
@@ -466,6 +480,12 @@ transform registry depMaps extraction sources =
                                     collected.evidence.exports.recordAliases
                                 , reservedExports =
                                     collected.evidence.exports.reservedExports
+                                , ctorHomes =
+                                    AstCtorHome.toByCtor
+                                        collected.evidence.exports.constructorHomes
+                                , knownModules =
+                                    AstCtorHome.toKnownModules
+                                        collected.evidence.exports.constructorHomes
                                 }
                             }
                         )

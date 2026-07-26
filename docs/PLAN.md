@@ -164,6 +164,49 @@ by being written through this law; nothing edits the ledger by hand.
 
 ## 6. Known defects register (2026-07-17 audit; independently verified)
 
+- **D83 value-level ctor ref wrongly homed to a dep type-alias module —
+  CtorHome stopped at the package boundary** (found as the residual after
+  D68+D82 on `lue-bird/elm-typesafe-array` NAMING ERROR `N.Down` @ ArraySized;
+  FIXED 2026-07-26, host-side, D46's law extended across packages).
+
+  **What `Down` is.** In `lue-bird/elm-bounded-nat` module `N`,
+  `type alias Down high toTag low = Up low toTag high` — a non-record type
+  alias, not a constructor. In `lue-bird/elm-linear-direction` module
+  `Linear`, `type Direction = Up | Down` — a real zero-arg constructor.
+  ArraySized imports both (`import Linear exposing (Direction(..))` and
+  `import N exposing (…, Down, …)`). Bare value `Down` in
+  `foldFromOne Stack.one Down Stack.onTopLay` is Linear's constructor;
+  type-position `Down` is N's alias. Extract recorded the value ref's home
+  as `N` (elm-review ModuleNameLookupTable lie under dual exposure — same
+  class as D46's `Rule.ReviewError`).
+
+  **Where resolution went wrong.** D46's `Ast.CtorHome` already re-points a
+  capitalized ref whose recorded module is KNOWN but does not declare the
+  ctor to the sole importable declaring module. It only surveyed the
+  *current* package's files, so dependency modules `N` and `Linear` were
+  "unknown" and the wrong home was left standing; NameSub printed `N.Down`
+  as a variant and gren died.
+
+  **Fix (one law, D45/D70 channel).** Bank `ctorHomes` (ctor → declaring
+  modules) and `knownModules` (modules fully surveyed for ctors) on every
+  ported entry alongside arities/sole/aliases/reserved. Merge into
+  CtorHome.Homes for dependents. Non-record type aliases do not declare
+  a value and do not block re-point; **record** type aliases do
+  (`Graph.Node id label` is a real value) — `protectRecordAliases` folds
+  the banked `Module.Name` keys into the "declares this name" check so
+  `Vendor.Graph.Node` is never re-pointed to `Elm.Syntax.Node.Node`. Also
+  fixed ported-cache `renameInto` to replace an existing entry: soft-miss
+  re-ports after a new banked fact were previously unable to overwrite the
+  incomplete manifest at the same digest path.
+
+  RECEIPTS: `lue-bird/elm-typesafe-array@34.0.1` ports and gren-verifies
+  (`foldFromOne … Linear.Down`; type-position `N.Down` preserved).
+  `lue-bird/elm-bounded-nat@35.0.0` ports alone EXIT=0. Non-regression:
+  `maca/elm-rose-tree` (D68) and `jfmengels/elm-review` (D46) EXIT=0.
+  Tier 0 **357** checks (+3 CtorHome cross-package / record-alias guard).
+  Canary 14/14. EXPECTED CACHE: pre-D83 ported entries soft-miss once and
+  re-bank `ctorHomes`/`knownModules`.
+
 - **D82 a name that is unambiguous in Elm becomes ambiguous in Gren —
   TWO roots, not one** (found 2026-07-26 on
   `PanagiotisGeorgiadis/elm-datetime` AMBIGUOUS NAME @ DateTime.Internal and
@@ -1471,9 +1514,9 @@ Coverage and pipeline:
   `Array.interweave` home as `Array.Extra` (was `ArrayExtra`); the
   `ArrayExtra.interweave` NAMING ERROR is gone. Package then stops on a
   NEW distinct class (`N.Down` variant under a multi-import qualifier —
-  not version skew). Non-regression: `maca/elm-rose-tree` (D68) EXIT=0,
-  `jfmengels/elm-review` (deepest local dep tree) EXIT=0. Tier 0: 346
-  checks (+7 DependencyPins). Canary 14/14.
+  not version skew) — **CLOSED as D83**. Non-regression: `maca/elm-rose-tree`
+  (D68) EXIT=0, `jfmengels/elm-review` (deepest local dep tree) EXIT=0.
+  Tier 0: 346 checks (+7 DependencyPins). Canary 14/14.
   EXPECTED CACHE EFFECT: extract-cache digest now includes `pins:…`, so
   every package re-extracts once on next cold hit.
 - **D65 tuple keys could be WRITTEN but never READ, and an unannotated
@@ -2475,6 +2518,14 @@ evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-26 D83 CLOSED — CtorHome package-boundary hole. Value-level `Down`
+  (Linear.Direction ctor) was extracted with home `N` (non-record type alias);
+  D46's repair only surveyed the current package, so `N.Down` printed as a
+  variant. Fix: bank `ctorHomes`/`knownModules` on DepMaps; merge into
+  CtorHome; protect record aliases from re-point (`Graph.Node`); replace
+  incomplete ported-cache entries on re-bank. Receipt: typesafe-array PASS
+  (`Linear.Down`); bounded-nat alone PASS; rose-tree + elm-review EXIT=0;
+  tier 0 357; canary 14/14.
 - 2026-07-26 D82 CLOSED — extract vs port dependency-version skew. elm-review
   loads package-dep docs at `constraint.split(' ')[0]` (the range floor);
   the port solver vendors newest-compatible. `Array.interweave` resolved to

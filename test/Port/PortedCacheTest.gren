@@ -45,14 +45,15 @@ tests =
     ]
 
 
-{-| D57/D70: a hit must be self-sufficient, so the decoder demands every banked
-fact. `recordAliases` and `reservedExports` joined the set in D70.
+{-| D57/D70/D83: a hit must be self-sufficient, so the decoder demands every
+banked fact. `recordAliases`/`reservedExports` joined in D70; `ctorHomes`/
+`knownModules` in D83.
 -}
 completeManifestDecodesEveryBankedFact : TestResult
 completeManifestDecodesEveryBankedFact =
     let
         manifest =
-            "{\"toolVersion\":\"0.1.0\",\"digest\":\"abc\",\"platform\":\"common\",\"ctorArities\":{\"M.C\":2},\"soleCtors\":[\"M.S\"],\"recordAliases\":{\"PortFunnel.GenericMessage\":[\"moduleName\",\"tag\",\"args\"]},\"reservedExports\":{\"Elm.Annotation.alias\":\"alias_\"}}"
+            "{\"toolVersion\":\"0.1.0\",\"digest\":\"abc\",\"platform\":\"common\",\"ctorArities\":{\"M.C\":2},\"soleCtors\":[\"M.S\"],\"recordAliases\":{\"PortFunnel.GenericMessage\":[\"moduleName\",\"tag\",\"args\"]},\"reservedExports\":{\"Elm.Annotation.alias\":\"alias_\"},\"ctorHomes\":{\"Down\":[\"Linear\"]},\"knownModules\":[\"Linear\",\"N\"]}"
     in
     when PortedCache.decodeExports manifest is
         Just exports ->
@@ -65,6 +66,10 @@ completeManifestDecodesEveryBankedFact =
                         == Just [ "moduleName", "tag", "args" ]
                     && Dict.get "Elm.Annotation.alias" exports.reservedExports
                         == Just "alias_"
+                    && Dict.get "Down" exports.ctorHomes
+                        == Just [ "Linear" ]
+                    && Dict.member "N" exports.knownModules
+                    && Dict.member "Linear" exports.knownModules
                 )
 
         Nothing ->
@@ -81,12 +86,12 @@ D70's `PortFunnel.GenericMessage`), so the whole entry soft-misses instead.
 manifestMissingANewFactIsNotSelfSufficient : TestResult
 manifestMissingANewFactIsNotSelfSufficient =
     let
-        preD70 =
-            "{\"toolVersion\":\"0.1.0\",\"digest\":\"abc\",\"platform\":\"common\",\"ctorArities\":{\"M.C\":2},\"soleCtors\":[\"M.S\"]}"
+        preD83 =
+            "{\"toolVersion\":\"0.1.0\",\"digest\":\"abc\",\"platform\":\"common\",\"ctorArities\":{\"M.C\":2},\"soleCtors\":[\"M.S\"],\"recordAliases\":{},\"reservedExports\":{}}"
     in
     outcome "a manifest predating a banked fact is not served as a hit"
-        "Expected Nothing for a manifest without recordAliases/reservedExports."
-        (isNothing (PortedCache.decodeExports preD70))
+        "Expected Nothing for a manifest without ctorHomes/knownModules."
+        (isNothing (PortedCache.decodeExports preD83))
 
 
 cacheRoot : Path

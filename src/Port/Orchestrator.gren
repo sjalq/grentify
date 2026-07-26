@@ -385,6 +385,12 @@ transformSources context permissions cache offline namespaceModules extractCache
                                                                     Dict.foldl Dict.set state.depMaps.recordAliases draft.depExports.recordAliases
                                                                 , reservedExports =
                                                                     Dict.foldl Dict.set state.depMaps.reservedExports draft.depExports.reservedExports
+                                                                , ctorHomes =
+                                                                    mergeCtorHomes state.depMaps.ctorHomes
+                                                                        draft.depExports.ctorHomes
+                                                                , knownModules =
+                                                                    Dict.foldl Dict.set state.depMaps.knownModules
+                                                                        draft.depExports.knownModules
                                                                 }
                                                             }
                                                         )
@@ -2897,3 +2903,43 @@ resultTask toError result =
 
         Err problem ->
             Task.fail (toError problem)
+
+
+{-| D83: union ctor→modules maps when folding dependencies. Duplicates for
+the same (ctor, module) pair are dropped so CtorHome's sole-home count stays
+accurate.
+-}
+mergeCtorHomes :
+    Dict String (Array String)
+    -> Dict String (Array String)
+    -> Dict String (Array String)
+mergeCtorHomes left right =
+    Dict.foldl
+        (\ctor modules acc ->
+            Dict.update ctor
+                (\existing ->
+                    when existing is
+                        Just prev ->
+                            Just (uniqueAppendModules prev modules)
+
+                        Nothing ->
+                            Just modules
+                )
+                acc
+        )
+        left
+        right
+
+
+uniqueAppendModules : Array String -> Array String -> Array String
+uniqueAppendModules base extra =
+    Array.foldl
+        (\moduleName acc ->
+            if Array.any (\m -> m == moduleName) acc then
+                acc
+
+            else
+                Array.pushLast moduleName acc
+        )
+        base
+        extra

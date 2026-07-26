@@ -33,6 +33,9 @@ tests =
     , leavesUnknownModuleAlone
     , repointsExprCtor
     , leavesAmbiguousAlone
+    , repointsAcrossPackageBoundary
+    , mergeKeepsUnknownAloneWithoutSurvey
+    , leavesRecordAliasAlone
     ]
 
 
@@ -216,3 +219,105 @@ leavesAmbiguousAlone =
 
         other ->
             fail "leavesAmbiguousAlone" ("got: " ++ Debug.toString other)
+
+
+{-| D83: banked dependency homes re-point N.Down (type-alias module, surveyed
+but declaring no Down ctor) to Linear (sole importable declaring module).
+-}
+repointsAcrossPackageBoundary : Check
+repointsAcrossPackageBoundary =
+    let
+        depHomes =
+            CtorHome.merge
+                (CtorHome.collectHomes
+                    [ moduleWith "N" [] []
+                    , ctorModule "Linear" "Down"
+                    ]
+                )
+                CtorHome.empty
+
+        file =
+            moduleWith "ArraySized"
+                [ "N", "Linear" ]
+                [ DeclFunction
+                    { name = "toStack"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprVar { moduleName = Just "N", name = "Down" }
+                    }
+                ]
+    in
+    when Array.first (CtorHome.apply depHomes file).declarations is
+        Just (DeclFunction { expression = ExprVar { moduleName = Just "Linear" } }) ->
+            ok "repointsAcrossPackageBoundary"
+
+        other ->
+            fail "repointsAcrossPackageBoundary" ("got: " ++ Debug.toString other)
+
+
+{-| Without surveying the wrong home module, absence is not evidence — leave
+the ref alone even if Linear is the sole known declarer.
+-}
+mergeKeepsUnknownAloneWithoutSurvey : Check
+mergeKeepsUnknownAloneWithoutSurvey =
+    let
+        onlyLinear =
+            CtorHome.collectHomes [ ctorModule "Linear" "Down" ]
+
+        file =
+            moduleWith "ArraySized"
+                [ "N", "Linear" ]
+                [ DeclFunction
+                    { name = "check"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprVar { moduleName = Just "N", name = "Down" }
+                    }
+                ]
+    in
+    when Array.first (CtorHome.apply onlyLinear file).declarations is
+        Just (DeclFunction { expression = ExprVar { moduleName = Just "N" } }) ->
+            ok "mergeKeepsUnknownAloneWithoutSurvey"
+
+        other ->
+            fail "mergeKeepsUnknownAloneWithoutSurvey" ("got: " ++ Debug.toString other)
+
+
+{-| D83: a record type alias (`Graph.Node`) is a real value-level name.
+Even when another import declares a custom-type ctor of the same short name
+(`Elm.Syntax.Node.Node`), do not re-point.
+-}
+leavesRecordAliasAlone : Check
+leavesRecordAliasAlone =
+    let
+        graphHomes =
+            CtorHome.collectHomes
+                [ moduleWith "Vendor.Graph" [] []
+                , ctorModule "Elm.Syntax.Node" "Node"
+                ]
+                |> CtorHome.protectRecordAliases
+                    (Dict.set "Vendor.Graph.Node" [ "id", "label" ] Dict.empty)
+
+        file =
+            moduleWith "Review.Project"
+                [ "Vendor.Graph", "Elm.Syntax.Node" ]
+                [ DeclFunction
+                    { name = "add"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprVar { moduleName = Just "Vendor.Graph", name = "Node" }
+                    }
+                ]
+    in
+    when Array.first (CtorHome.apply graphHomes file).declarations is
+        Just (DeclFunction { expression = ExprVar { moduleName = Just "Vendor.Graph" } }) ->
+            ok "leavesRecordAliasAlone"
+
+        other ->
+            fail "leavesRecordAliasAlone" ("got: " ++ Debug.toString other)

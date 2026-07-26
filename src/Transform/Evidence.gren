@@ -39,6 +39,8 @@ type alias DependencyEvidence =
     , soleConstructors : Dict String {}
     , recordAliases : Dict String (Array String)
     , reservedExports : Dict String String
+    , -- D83: ctor→modules and surveyed modules for CtorHome across packages
+      constructorHomes : CtorHome.Homes
     }
 
 
@@ -114,9 +116,23 @@ collect registry dependencies modules =
             Dict.foldl Dict.set dependencies.soleConstructors
                 ownSoleConstructors
 
+        ownConstructorHomes =
+            CtorHome.collectHomes resolvedFiles
+
+        -- D83: CtorHome's evidence law needs both the declaring modules of
+        -- every constructor AND the set of modules fully surveyed for ctors.
+        -- Dependencies bank both; merge so a value ref wrongly homed to a
+        -- dependency type-alias module (N.Down) can re-point to the sole
+        -- importable declaring module (Linear.Down). Record type aliases
+        -- (Graph.Node) also create value-level names and must block re-point
+        -- — protect them from the merged recordAliases table.
+        constructorHomes =
+            CtorHome.merge dependencies.constructorHomes ownConstructorHomes
+                |> CtorHome.protectRecordAliases recordAliases
+
         prepEvidence =
             { tupleReturns = collectTupleReturns resolvedFiles
-            , constructorHomes = CtorHome.collectHomes resolvedFiles
+            , constructorHomes = constructorHomes
             , keyEvidence = KeyEncode.collectEvidence resolvedFiles
             , recordAliases = recordAliases
             , constructorFields = constructorFields
@@ -171,6 +187,7 @@ collect registry dependencies modules =
         , soleConstructors = ownSoleConstructors
         , recordAliases = ownRecordAliases
         , reservedExports = ownReservedExports
+        , constructorHomes = ownConstructorHomes
         }
     }
 

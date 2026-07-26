@@ -562,6 +562,59 @@ Coverage and pipeline:
   suite went from 0 tests ran (compile-dead) to 215/219 passing.
   The 4 fails are list-extra's own "stack safety" 10k-recursion tests
   (RangeError) — a NEW distinct class, filed as D35.
+- **D68 several imports sharing one qualifier → AMBIGUOUS NAME**
+  (found 2026-07-25 on maca/elm-rose-tree, FIXED same day, Fable,
+  host-side per the D23 law "the extraction is the lie; repair with
+  knowledge held exactly" — except here the extraction was RIGHT and the
+  PRINT was lossy): Elm lets several imports share a qualifier and
+  resolves each qualified name by whichever module actually exposes it —
+  `import Array exposing (Array)` + `import Array.Extra as Array` in
+  RoseTree/Tree.elm, and lue-bird/elm-typesafe-array's four-way
+  `Array` / `Array.Extra as Array` / `Array.Linear` / `ArrayExtra as
+  Array` in ArraySized/Internal.elm. `Ast.NameSub.qualifyByImports`
+  copied the source qualifier onto every ref (`import M as A` forbids
+  `M.f`, so the alias had to win), and both imports were printed
+  verbatim, so gren died with `AMBIGUOUS NAME: This usage of
+  \`Array.update\` is ambiguous`.
+  WHICH WORLD: refs carry the TRUE home module, not the alias.
+  `ElmToGren.AstEncode.resolveModule` writes
+  `ModuleNameLookupTable.moduleNameAt`'s answer for every value/type ref,
+  so nothing was lost in extraction — the qualifier is ours to choose and
+  the repair is entirely host-side.
+  FIX (one law, no special case for `Array`): after substitution no two
+  imports of a file may share a qualifier. `importQualifiers` settles
+  claims in one source-order pass — an unaliased import always keeps its
+  module name (module names are unique per file, so those never conflict);
+  a colliding alias is DROPPED and the import falls back to its own module
+  name (free by construction: a module is imported at most once and an
+  alias never contains a dot); only an alias cycle naming each other's
+  modules reaches `Ast.Reserved.pickFree`, the host's single free-name
+  scheme, rather than a second one. `requalifyImport` restates the `as`
+  clause to match, so `import Array.Extra as Array` prints as
+  `import Array.Extra` and its refs as `Array.Extra.update`. Purely a
+  per-file print choice — no cross-module rename to desync (cf. D18).
+  Tier 0: 272 checks incl. 5 NameSub qualifier checks (both real shapes,
+  a non-colliding control, the pickFree escape, and a sibling module
+  proving the choice does not leak). Canary 14/14.
+  RECEIPT: maca/elm-rose-tree ports and gren-verifies clean (EXIT=0).
+  lue-bird/elm-typesafe-array clears every AMBIGUOUS NAME and then stops
+  on a DIFFERENT, newly-visible defect — filed as D69.
+- **D69 lookup-table alias fallback resolves to the wrong home under
+  dependency version skew** (found behind D68 2026-07-25, OPEN,
+  extractor-side): in ArraySized/Internal.elm `Array.interweave` is
+  extracted with home module `ArrayExtra` — lue-bird's own module, which
+  exposes only `allOk`. When a qualifier maps to several modules
+  elm-review picks the one that exposes the name and, finding none, falls
+  back to the head of the candidate list. It found none because the
+  review run resolves against elm-community/array-extra **2.4.0** (the
+  floor of the package's `2.4.0 <= v < 3.0.0`), and `interweave` only
+  exists from 2.6.0 — which is the version the port itself vendors.
+  Sibling refs (`reverse`, `zip`, `filterMap`, present in 2.4.0) resolve
+  correctly, so the skew is per-symbol and silent. Two independent things
+  to settle: the extractor's fallback should prefer a candidate that is
+  not a first-party module known to lack the name, and the review run and
+  the port must resolve the SAME dependency version (same class as D55's
+  "which elm-review runs depends on whether node_modules exists").
 - **D49 ctor-embedded list merge misfires when the list column is not
   argument 0** (found banking elm-css 2026-07-23: Css.Structure failed
   gren-verify with transform-introduced SHADOWING — `Selector sequence

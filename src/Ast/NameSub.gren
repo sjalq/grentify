@@ -6,9 +6,20 @@ Walks every named reference (value, type, constructor) and rewrites module
 targets and symbol names using the mapping registry. Also applies Gren's
 implicit module aliases (`Platform.Cmd` → `Cmd`, `Platform.Sub` → `Sub`),
 matching the edit-path seed in `Transform.Pipeline.collectMappingEdits`.
+
+**Law (unique qualifiers):** after substitution, no two imports of a file may
+share a qualifier. Elm tolerates `import Array` alongside
+`import Array.Extra as Array` and disambiguates each use by which module
+exposes the name; Gren calls that AMBIGUOUS NAME. Because every ref here
+carries its *resolved* home module rather than the written qualifier, the
+qualifier is ours to choose: `importQualifiers` hands each import a qualifier
+nobody else holds, `requalifyImport` restates the `as` clause to match, and
+`qualifyRef` prints each ref under the qualifier of its own home module. See
+`importQualifiers` for how claims are settled.
 -}
 
 import Array exposing ( Array )
+import Ast.Reserved as Reserved
 import Ast.Scope as Scope
 import Ast.Types as Types exposing
     ( Declaration(..)
@@ -250,22 +261,99 @@ rewriteBareRef remaps ref =
                     ref
 
 
-{-| Map each imported module name to the qualifier used in source (`alias` or bare module).
+{-| Map each imported module name to the qualifier it owns *alone* in this file.
+
+**Law (unique qualifiers):** Elm lets several imports share one qualifier
+(`import Array` + `import Array.Extra as Array` + `import ArrayExtra as Array`)
+and resolves each qualified name by whichever module actually exposes it; Gren
+rejects that as AMBIGUOUS NAME. Every ref in this AST already carries its
+*resolved* home module (the extractor writes `ModuleNameLookupTable`'s answer,
+not the written qualifier), so the repair is purely local: hand each import a
+qualifier no other import holds and print every ref under the qualifier of its
+own home module.
+
+Claims are settled in one pass over the imports, in source order:
+
+1. an unaliased import always keeps its module name — module names are unique
+   within a file, so those claims can never conflict;
+2. an aliased import keeps its alias if still free, else drops the alias and
+   falls back to its own module name (free by (1), since a module is imported
+   at most once and an alias never contains a dot);
+3. only if that is taken too — reachable only through a cycle of aliases naming
+   each other's modules — it takes `Ast.Reserved.pickFree`'s escape, the host's
+   single free-name scheme.
+
+Duplicate module names (two Elm modules the catalog remapped onto one Gren
+target) share the first claim rather than competing for a second qualifier.
 -}
 importQualifiers : Array Import -> Dict String String
 importQualifiers imports =
-    Array.foldl
-        (\import_ acc ->
-            let
-                qualifier =
+    let
+        anchored =
+            Array.foldl
+                (\import_ acc ->
                     when import_.alias is
-                        Just aliasName ->
-                            aliasName
-
                         Nothing ->
-                            import_.moduleName
-            in
-            Dict.set import_.moduleName qualifier acc) Dict.empty imports
+                            Dict.set import_.moduleName import_.moduleName acc
+
+                        Just _ ->
+                            acc) Dict.empty imports
+    in
+    Array.foldl claimQualifier
+        { quals = anchored
+        , taken =
+            Dict.foldl (\_ qualifier acc -> Dict.set qualifier {} acc)
+                Dict.empty anchored
+        } imports
+        |> .quals
+
+
+type alias Claims =
+    { quals : Dict String String
+    , taken : Dict String {}
+    }
+
+
+claimQualifier : Import -> Claims -> Claims
+claimQualifier import_ state =
+    if Dict.member import_.moduleName state.quals then
+        -- Anchored unaliased import, or a duplicate of one already settled.
+        state
+
+    else
+        let
+            preferred =
+                Maybe.withDefault import_.moduleName import_.alias
+
+            qualifier =
+                if not (Dict.member preferred state.taken) then
+                    preferred
+
+                else if not (Dict.member import_.moduleName state.taken) then
+                    import_.moduleName
+
+                else
+                    Reserved.pickFree preferred state.taken
+        in
+        { quals = Dict.set import_.moduleName qualifier state.quals
+        , taken = Dict.set qualifier {} state.taken
+        }
+
+
+{-| Re-state the import so its `as` clause matches the qualifier it won.
+-}
+requalifyImport : Dict String String -> Import -> Import
+requalifyImport quals import_ =
+    when Dict.get import_.moduleName quals is
+        Just qualifier ->
+            if qualifier == import_.moduleName then
+                { import_ | alias = Nothing }
+
+            else
+                { import_ | alias = Just qualifier }
+
+        Nothing ->
+            import_
 
 
 qualifyByImports : File -> File
@@ -278,8 +366,10 @@ qualifyByImports file =
         file
 
     else
-        { file | declarations =
-            Array.map (qualifyDeclaration quals) file.declarations
+        { file
+            | imports = Array.map (requalifyImport quals) file.imports
+            , declarations =
+                  Array.map (qualifyDeclaration quals) file.declarations
         }
 
 

@@ -12,7 +12,10 @@
  *    kernel JS, attributed to the package that ships it — §1 splits
  *    EXEMPT(kernel) into "contains kernel modules" (`kernel:source`) and
  *    "requires an unmapped kernel package" (`kernel:dep`) and requires the
- *    offending module/dep chain as evidence. See D66.
+ *    offending module/dep chain as evidence. See D66. A mapped package whose
+ *    Gren analogue does not provide an imported module is EXEMPT(mapping-absent)
+ *    on the exact `MAPPING_MODULE_ABSENT:` refusal (D74/D81); the message is the
+ *    evidence.
  *  - Every decision is one structured line in test/ecosystem/walk-log.jsonl
  *    (rotated to .jsonl.<n>.gz beyond 50MB). The log is append-only ground
  *    truth for ledger ingestion; nothing edits it in place.
@@ -226,6 +229,47 @@ function classifyToolRefusal(text) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Mapping-absent (D81). A mapped package's Gren analogue does not provide a
+// module the source imports. D74 makes the gap legible as MAPPING_MODULE_ABSENT
+// at transform time; this classifier makes it terminal. No transform work can
+// grow a module that gren-lang/test (etc.) does not ship — the package becomes
+// portable only when the Gren package grows a counterpart, or never.
+//
+// Exact refusal wording only (D66/D79). The word "mapping" or "absent" in any
+// other diagnostic proves nothing. The tool's message already names the
+// importing module, the absent module, mapped-from, mapped-to, and the reason
+// printed verbatim from mappings/builtin.json `absentModules`.
+// ---------------------------------------------------------------------------
+
+/** Full D74 refusal line; capture groups are unused — the line IS the evidence. */
+const MAPPING_MODULE_ABSENT_LINE =
+  /MAPPING_MODULE_ABSENT: \S+ imports \S+, which \S+ provides and its Gren mapping target \S+ does not: [^\n]+/g;
+
+/**
+ * @param {string} text combined tool output
+ * @returns {{reason: string, evidence: string}|null}
+ */
+function classifyMappingAbsent(text) {
+  const lines = [...String(text || "").matchAll(MAPPING_MODULE_ABSENT_LINE)].map(
+    (m) => m[0].trim(),
+  );
+  if (lines.length === 0) return null;
+  // Dedup: a package can trip the same absent module from many importers; keep
+  // order of first appearance so the evidence stays stable across re-runs.
+  const seen = new Set();
+  const unique = [];
+  for (const line of lines) {
+    if (seen.has(line)) continue;
+    seen.add(line);
+    unique.push(line);
+  }
+  return {
+    reason: "mapping-absent",
+    evidence: unique.join(" | "),
+  };
+}
+
 /**
  * @param {string} text combined tool output
  * @param {string} coordinate walked "author/name@version"
@@ -234,6 +278,8 @@ function classifyToolRefusal(text) {
 function classifyExempt(text, coordinate) {
   const kernel = classifyKernelRefusal(text, coordinate);
   if (kernel) return kernel;
+  const mappingAbsent = classifyMappingAbsent(text);
+  if (mappingAbsent) return mappingAbsent;
   for (const sig of EXEMPT_SIGNATURES) {
     if (sig.pattern.test(text)) return { reason: sig.reason, evidence: null };
   }
@@ -399,6 +445,42 @@ function selfTest() {
     ["some/pkg@1.0.0", kernelRefusal(`${ownJs}, ${linAlgJs}`), "kernel:source"],
     // Unattributable path: never soften into "it was a dependency".
     ["some/pkg@1.0.0", kernelRefusal("/elsewhere/src/Elm/Kernel/X.js"), "kernel:source"],
+    // D81 positives: the tool's exact MAPPING_MODULE_ABSENT refusal (D74 shape).
+    [
+      "avh4/elm-program-test@4.0.1",
+      "MAPPING_MODULE_ABSENT: ProgramTest imports Test.Html.Event, which elm-explorations/test provides and its Gren mapping target gren-lang/test does not: gren-lang/test 5.0.0 exposes no Test.Html.* modules; Gren has no HTML-testing analogue.",
+      "mapping-absent",
+    ],
+    [
+      "drathier/elm-graph@4.0.0",
+      "MAPPING_MODULE_ABSENT: Graph.Random imports Shrink, which elm-explorations/test provides and its Gren mapping target gren-lang/test does not: gren-lang/test 5.0.0 exposes no Shrink; shrinking is internal (Simplify) and there is no user-facing shrinker API to map onto.",
+      "mapping-absent",
+    ],
+    // D81 negatives: near-misses must stay working failures. The word "mapping",
+    // "absent", or a MODULE NOT FOUND for the same module is not the refusal.
+    [
+      "avh4/elm-program-test@4.0.1",
+      "MODULE NOT FOUND @ ProgramTest: You are trying to import a `Test.Html.Event` module:",
+      null,
+    ],
+    [
+      "drathier/elm-graph@4.0.0",
+      "MODULE NOT FOUND @ Graph.Random: You are trying to import a `Shrink` module:",
+      null,
+    ],
+    [
+      "some/pkg@1.0.0",
+      "NAMING ERROR: I cannot find a `MAPPING_MODULE_ABSENT` variable.",
+      null,
+    ],
+    [
+      "some/pkg@1.0.0",
+      "GREN_VERIFY_FAILED: mapping module absent from the Gren analogue of something",
+      null,
+    ],
+    // Incomplete code-only / truncated shape: do not widen to a bare code match.
+    ["some/pkg@1.0.0", "MAPPING_MODULE_ABSENT: something went wrong", null],
+    ["some/pkg@1.0.0", "MAPPING_MODULE_ABSENT", null],
   ];
   for (const [coordinate, text, want] of exemptCases) {
     const got = classifyExempt(text, coordinate);
@@ -420,6 +502,18 @@ function selfTest() {
       "some/pkg@1.0.0",
       kernelRefusal(ownJs),
       "kernel dep chain: some/pkg@1.0.0 ships src/Elm/Kernel/Local.js",
+    ],
+    // D81: evidence is the refusal itself — importing module, absent module,
+    // mapped-from, mapped-to, and the mapping file's reason.
+    [
+      "avh4/elm-program-test@4.0.1",
+      "MAPPING_MODULE_ABSENT: ProgramTest imports Test.Html.Event, which elm-explorations/test provides and its Gren mapping target gren-lang/test does not: gren-lang/test 5.0.0 exposes no Test.Html.* modules; Gren has no HTML-testing analogue.",
+      "MAPPING_MODULE_ABSENT: ProgramTest imports Test.Html.Event, which elm-explorations/test provides and its Gren mapping target gren-lang/test does not: gren-lang/test 5.0.0 exposes no Test.Html.* modules; Gren has no HTML-testing analogue.",
+    ],
+    [
+      "drathier/elm-graph@4.0.0",
+      "MAPPING_MODULE_ABSENT: Graph.Random imports Shrink, which elm-explorations/test provides and its Gren mapping target gren-lang/test does not: gren-lang/test 5.0.0 exposes no Shrink; shrinking is internal (Simplify) and there is no user-facing shrinker API to map onto.",
+      "MAPPING_MODULE_ABSENT: Graph.Random imports Shrink, which elm-explorations/test provides and its Gren mapping target gren-lang/test does not: gren-lang/test 5.0.0 exposes no Shrink; shrinking is internal (Simplify) and there is no user-facing shrinker API to map onto.",
     ],
   ];
   for (const [coordinate, text, want] of chainCases) {

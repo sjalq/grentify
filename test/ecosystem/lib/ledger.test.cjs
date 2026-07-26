@@ -83,13 +83,14 @@ function fakeGit() {
 
 // --- state-key validation ----------------------------------------------------
 
-check("STATES has the six canonical states with matching STATE_KEY", () => {
+check("STATES has the seven canonical states with matching STATE_KEY", () => {
   assert.deepEqual(STATES, [
     "PASS",
     "PASS-compile-only",
     "EXEMPT-kernel",
     "EXEMPT-glsl",
     "EXEMPT-broken-upstream",
+    "EXEMPT-mapping-absent",
     "working-failure",
   ]);
   for (const s of STATES) {

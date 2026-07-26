@@ -1352,18 +1352,7 @@ prepareOnePackage context permissions assets rootIdentity planned staging packag
                     )
                 |> Task.andThen
                     (\_ ->
-                        Verify.Package.verify context.platform
-                            permissions.childProcess
-                            { packageDirectory = dir
-                            , grenExecutable = assets.grenExecutable
-                            , isApplication =
-                                when package.manifest.kind is
-                                    Manifest.ApplicationKind ->
-                                        True
-
-                                    Manifest.PackageKind ->
-                                        False
-                            }
+                        verifyStagedPackage context permissions assets rootIdentity planned staging package
                     )
                 |> Task.andThen
                     (\_ ->
@@ -1422,6 +1411,134 @@ maybeFormatPackage platform fileSystem permission formatExecutable packageDir =
                         , formatExecutable = formatExecutable
                         }
             )
+
+
+{-| D69: verify one staged package, and never report a pointer to a diagnostic
+we can produce ourselves.
+
+`gren` compiles a package's dependencies before the package itself. When one of
+those dependencies fails, gren reports `PROBLEM BUILDING DEPENDENCIES`, names
+the dependency, and then elides the compiler error it just saw. Reported as-is
+that says only "something under this tree does not compile" — the D64 failure
+mode, a diagnostic that names neither the module nor the fault.
+
+Every dependency is vendored in the same staging tree, so on that exact failure
+we compile the blamed package directly and fail with ITS diagnostic. Verifying
+the blame chain is bounded by the package count, and only ever runs on the
+failure path, so a passing port pays nothing.
+
+-}
+verifyStagedPackage
+    : Context
+    -> Permissions
+    -> Assets
+    -> Plan.Identity
+    -> Planned
+    -> Path
+    -> Workspace.Package
+    -> Task Error {}
+verifyStagedPackage context permissions assets rootIdentity planned staging package =
+    verifyOne context permissions assets rootIdentity planned staging package
+        |> Task.onError
+            (\error ->
+                escalateDependencyBlame context
+                    permissions
+                    assets
+                    rootIdentity
+                    planned
+                    staging
+                    (Array.length planned.packages)
+                    [ package.manifest.name ]
+                    error
+            )
+
+
+verifyOne
+    : Context
+    -> Permissions
+    -> Assets
+    -> Plan.Identity
+    -> Planned
+    -> Path
+    -> Workspace.Package
+    -> Task Error {}
+verifyOne context permissions assets rootIdentity planned staging package =
+    Verify.Package.verify context.platform
+        permissions.childProcess
+        { packageDirectory = packageDirectory rootIdentity planned staging package
+        , grenExecutable = assets.grenExecutable
+        , label = package.manifest.name ++ " " ++ package.manifest.version
+        , isApplication =
+            when package.manifest.kind is
+                Manifest.ApplicationKind ->
+                    True
+
+                Manifest.PackageKind ->
+                    False
+        }
+
+
+escalateDependencyBlame
+    : Context
+    -> Permissions
+    -> Assets
+    -> Plan.Identity
+    -> Planned
+    -> Path
+    -> Int
+    -> Array String
+    -> Error
+    -> Task Error {}
+escalateDependencyBlame context permissions assets rootIdentity planned staging fuel visited error =
+    let
+        blamed =
+            if fuel <= 0 then
+                Nothing
+
+            else
+                Verify.Package.buildingDependency (PortError.message error)
+
+        target =
+            blamed
+                |> Maybe.andThen
+                    (\blamedName ->
+                        planned.packages
+                            |> Array.findFirst
+                                (\candidate ->
+                                    candidate.manifest.name
+                                        == blamedName
+                                        && not (Array.member candidate.manifest.name visited)
+                                )
+                            |> Maybe.map .value
+                    )
+    in
+    when target is
+        Nothing ->
+            Task.fail error
+
+        Just candidate ->
+            logPhase context "verify (blamed dependency)" candidate.manifest.name
+                |> Task.andThen
+                    (\_ ->
+                        verifyOne context permissions assets rootIdentity planned staging candidate
+                    )
+                |> Task.andThen
+                    -- The blamed package compiles in isolation: gren saw
+                    -- something we cannot reproduce, so the original report
+                    -- stays the truth rather than being replaced by silence.
+                    (\_ -> Task.fail error)
+                |> Task.onError
+                    (\deeper ->
+                        escalateDependencyBlame context
+                            permissions
+                            assets
+                            rootIdentity
+                            planned
+                            staging
+                            (fuel - 1)
+                            (Array.pushLast candidate.manifest.name visited)
+                            deeper
+                    )
 
 
 packageDirectory : Plan.Identity -> Planned -> Path -> Workspace.Package -> Path
@@ -2124,6 +2241,7 @@ finalizeAdd context permissions cliOptions output assets resolution planned =
                                                                             , Path.fromPosixString libDirectory
                                                                             ]
                                                                     , grenExecutable = assets.grenExecutable
+                                                                    , label = rootIdentity.grenName ++ " " ++ rootIdentity.version
                                                                     , isApplication = False
                                                                     }
                                                                     |> Task.andThen
@@ -2219,6 +2337,7 @@ writeVendored context permissions assets packagesRoot planned packages =
                                                                                 permissions.childProcess
                                                                                 { packageDirectory = directory
                                                                                 , grenExecutable = assets.grenExecutable
+                                                                                , label = prepared.manifest.name ++ " " ++ prepared.manifest.version
                                                                                 , isApplication =
                                                                                     when package.manifest.kind is
                                                                                         Manifest.ApplicationKind ->

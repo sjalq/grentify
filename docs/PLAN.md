@@ -216,6 +216,72 @@ Throughput and accounting (2026-07-25 external review; all four reproduced):
   package" (5) and "generated module Main does not match its path" (5) are
   ours and small; `shasum exited with code N` (11) is ours; the 40 symlink
   refusals are one policy decision.
+- **D69 every gren-verify failure reported the exit code and threw the
+  compiler's diagnostic away** (FIXED 2026-07-26): the whole
+  `GREN_VERIFY_FAILED` class banked exactly one line —
+  `GREN_VERIFY_FAILED @ root: gren exited with code N.` — naming neither the
+  package, its role in the port, nor the fault. D64's lesson, at the scale of
+  a whole class. THREE independent losses, all fixed at the source:
+  1. `Verify.Package.verify` ran `gren` from inside the package directory, so
+     the report never said whose compile failed, and the wrapper added
+     nothing. Every caller now states the package it is verifying; the message
+     is `<name> <version> failed \`gren docs\` in <dir>`, and the directory is
+     what tells the extractor dep from root.
+  2. `failure-signature.cjs` read only `{"type":"compile-errors"}`. gren emits
+     `{"type":"error"}` for everything above the module — PROBLEM BUILDING
+     DEPENDENCIES, INCOMPATIBLE PACKAGE, AMBIGUOUS MODULE NAME — which is what
+     this entire class is made of, so a fully-formed diagnostic sitting in the
+     output fell through to the refusal-code branch and was discarded. Both
+     shapes are read now, compact or pretty-printed, and `message` is
+     flattened whether it is a string, an array, or style chunks (those
+     rendered as `[object Object]`: the compiler's words for the fault,
+     replaced by nothing).
+  3. gren's `PROBLEM BUILDING DEPENDENCIES` names the package that failed to
+     compile and then elides the error it just saw ("along with the following
+     information:" followed by nothing). Every dependency is vendored on disk,
+     so `Orchestrator.verifyStagedPackage` now compiles the blamed package
+     directly and fails with ITS diagnostic. Failure path only, bounded by the
+     package count; a passing port pays nothing. gren prints `1.0.0` for every
+     `local:` dependency regardless of the vendored manifest, so the blame is
+     matched on package name — matching the version finds nothing.
+  RECEIPT: all five GREN_VERIFY_FAILED packages in the core set now carry a
+  named fault, and they are ONE class, not five bugs (see D70). Tier 0 267;
+  `test:ledger` green with 7 new signature checks; canary 14/14.
+- **D70 the local-dependency hoist declares every sibling in every vendored
+  manifest** (DIAGNOSED 2026-07-26 by D69's evidence; NOT FIXED — one fix
+  unblocks all five): `Plan.hoistTransitiveLocals` (added by D47) walks
+  `state.identities` — every package planned SO FAR — and declares each one as
+  a `local:` dependency of the package being planned. D47 needed the
+  transitive closure (elm-review → elm-syntax → structured-writer); what it
+  got is every sibling in the port, related or not. A hoisted sibling is a
+  real, importable dependency, so it collides two ways:
+  - **module-name collision**: `folkertdev/svg-path-lowlevel` never depended on
+    anything but elm/core, yet gets `elmcraft/core-extra` and friends. Where
+    the sibling exposes a module the package already has, gren refuses.
+  - **platform collision**: a `common` package handed a `browser` sibling is
+    rejected outright, and `--platform browser` does not help — per-package
+    inference is unchanged for non-roots, so the dependency stays `common`.
+
+        elm-cli-options-parser  AMBIGUOUS MODULE NAME @ dep  elmcraft/core-extra
+                                  exposes Dict.Extra; hoisted elm-community/dict-extra too
+        elm-visualization       AMBIGUOUS MODULE NAME @ dep  elm-community/list-extra
+                                  exposes List.Extra; hoisted elmcraft/core-extra too
+        elm-syntax-dsl          AMBIGUOUS IMPORT      @ dep  stil4m/elm-syntax has its own
+                                  src/Char/Extra.gren + src/List/Extra.gren vs hoisted core-extra
+        elm-dagre               INCOMPATIBLE PACKAGE  @ dep  folkertdev/svg-path-lowlevel
+                                  (common) hoisted elm-community/typed-svg (browser)
+        noredink-ui             INCOMPATIBLE PACKAGE  @ dep  Gizra/elm-keyboard-event
+                                  (common) hoisted BrianHicks/elm-particle (browser)
+
+  FIX SHAPE: hoist the transitive local closure of the package's OWN Elm
+  dependencies, not `state.identities`. The closure still satisfies D47 (a
+  vendored package verifying standalone is its own root, and its nested
+  locals are exactly its closure) and still gives the workspace root every
+  package, because everything vendored is reachable from the root. The Elm
+  dependency graph needed for the closure is already in `drafts` at the
+  `Plan.buildManifest` call site. NOT taken here: it changes the manifest of
+  every package in every port, so its proof is a full core-set run, not the
+  five packages this defect was opened on.
 - **D56 the ported-cache hub bank has been stranded since 2026-07-24 14:59**
   (DIAGNOSED + instrumented 2026-07-25; re-bank partly done): the cache key is
   a digest over tool version + **every** `mappings/*.json` + platform +
@@ -1272,6 +1338,19 @@ evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-26 D69 CLOSED — the 5 GREN_VERIFY_FAILED packages are ONE cause.
+  Their evidence said only "gren exited with code N"; three separate losses
+  were throwing the compiler's diagnostic away (verify never named the
+  package, the signature extractor read only one of gren's two report shapes,
+  and gren's own PROBLEM BUILDING DEPENDENCIES elides the error it just saw).
+  All three fixed at the source. With honest evidence the five collapse to
+  **D70**, the D47 local-dependency hoist: two AMBIGUOUS MODULE NAME, one
+  AMBIGUOUS IMPORT, two INCOMPATIBLE PACKAGE, every one of them a vendored
+  DEPENDENCY handed a sibling it never depended on. D70's fix shape is
+  written down and unblocks all five; it is not taken here because it changes
+  every manifest in every port and its proof is a full core-set run.
+  Tier 0 267 checks; `test:ledger` green (7 new signature checks);
+  canary 14/14.
 - 2026-07-26 (end of session) CORE SET **189/232 = 81.5%**, up from 179
   (77.2%), zero regressions, 12.7 min wall at -j8, median 4.3s/package.
   Ten packages newly passing, six of them former timeouts and one

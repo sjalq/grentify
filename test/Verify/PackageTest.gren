@@ -1,0 +1,105 @@
+module Verify.PackageTest exposing (tests)
+
+{-| D69: `Verify.Package.buildingDependency` reads gren's `PROBLEM BUILDING
+DEPENDENCIES` report and answers "which vendored package failed to compile".
+
+Law: report text -> `Just "owner/name"` when gren blamed a package, `Nothing`
+otherwise. It is the hinge of the escalation that turns gren's elided error
+("along with the following information:" followed by nothing) into the blamed
+package's real diagnostic, so it is pinned here rather than only in the walk.
+
+-}
+
+import Array exposing (Array)
+import Verify.Package
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ namesTheBlamedPackage
+    , ignoresTheVersionGrenInvents
+    , ignoresUnrelatedFailures
+    , ignoresATruncatedReport
+    , survivesAReportWithNoPackageToken
+    ]
+
+
+{-| A verbatim gren report, as it reaches the wrapper: one JSON line, so the
+message's newlines are the two characters `\n`.
+-}
+buildingDependenciesReport : String
+buildingDependenciesReport =
+    "wolfadex/elm-ansi 3.0.1 failed `gren docs` in /tmp/x/.elm-to-gren/packages/wolfadex_elm-ansi__3_0_1\ngren exited with code 1.\n"
+        ++ "{\"type\":\"error\",\"path\":null,\"title\":\"PROBLEM BUILDING DEPENDENCIES\",\"message\":[\"I ran into a compilation error when trying to build the following package:\\n\\n    elmcraft/core-extra 1.0.0\\n\\nThis probably means it has package constraints that are too wide.\"]}"
+
+
+check : String -> Maybe String -> Maybe String -> TestResult
+check name expected actual =
+    { name = name
+    , passed = actual == expected
+    , details = "expected " ++ render expected ++ ", got " ++ render actual
+    }
+
+
+render : Maybe String -> String
+render value =
+    when value is
+        Just found ->
+            "Just " ++ found
+
+        Nothing ->
+            "Nothing"
+
+
+namesTheBlamedPackage : TestResult
+namesTheBlamedPackage =
+    check "buildingDependency names the package gren blamed"
+        (Just "elmcraft/core-extra")
+        (Verify.Package.buildingDependency buildingDependenciesReport)
+
+
+{-| gren prints `1.0.0` for every `local:` dependency whatever the vendored
+manifest says (here the package is really 2.3.0), so the version must never
+reach the lookup.
+-}
+ignoresTheVersionGrenInvents : TestResult
+ignoresTheVersionGrenInvents =
+    check "buildingDependency returns a bare name, never a coordinate"
+        (Just "elmcraft/core-extra")
+        (Verify.Package.buildingDependency
+            (String.replace "1.0.0" "9.9.9" buildingDependenciesReport)
+        )
+
+
+ignoresUnrelatedFailures : TestResult
+ignoresUnrelatedFailures =
+    check "buildingDependency declines a module-level compile error"
+        Nothing
+        (Verify.Package.buildingDependency
+            "{\"type\":\"compile-errors\",\"errors\":[{\"path\":\"src/A.gren\",\"name\":\"A\"}]}"
+        )
+
+
+ignoresATruncatedReport : TestResult
+ignoresATruncatedReport =
+    check "buildingDependency declines a report cut off before the package"
+        Nothing
+        (Verify.Package.buildingDependency
+            "{\"type\":\"error\",\"title\":\"PROBLEM BUILDING DEPENDENCIES\",\"message\":[\"I ran into a compilation error when"
+        )
+
+
+survivesAReportWithNoPackageToken : TestResult
+survivesAReportWithNoPackageToken =
+    check "buildingDependency declines when nothing after the blame looks like a package"
+        Nothing
+        (Verify.Package.buildingDependency
+            "PROBLEM BUILDING DEPENDENCIES trying to build the following package: "
+        )

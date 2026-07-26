@@ -1,4 +1,4 @@
-module Verify.Package exposing (ConsumerVerdict(..), verify, verifyConsumer)
+module Verify.Package exposing (ConsumerVerdict(..), buildingDependency, verify, verifyConsumer)
 
 import ChildProcess
 import Dict
@@ -10,6 +10,21 @@ import System.Process
 import Task exposing (Task)
 
 
+{-| D69: a verify failure must say WHOSE compile failed.
+
+`gren` is run from inside the package directory, so its `--report=json` blob
+carries module paths but never the package the run was about. The wrapper used
+to drop even the process detail's first line into `GREN_VERIFY_FAILED: gren
+exited with code N.`, which names neither the package, its role in the port,
+nor the compiler's own diagnostic. Every caller therefore states the package it
+is verifying, and the message keeps the compiler's output verbatim underneath.
+
+The `label` is the ported package's `name version`; the directory tells the
+walk's signature extractor whether the failure sits in the root package or
+under `.elm-to-gren/packages` (a dependency), which decides whether a fix is a
+hub fix.
+
+-}
 verify
     : Node.Platform
     -> ChildProcess.Permission
@@ -17,6 +32,7 @@ verify
         { packageDirectory : Path
         , grenExecutable : String
         , isApplication : Bool
+        , label : String
         }
     -> Task Error {}
 verify platform permission options =
@@ -46,12 +62,53 @@ verify platform permission options =
     if options.isApplication then
         runGren makeArgs [ 0 ]
             |> Task.map (\_ -> {})
-            |> Task.mapError verifyFailed
+            |> Task.mapError (verifyFailed options.label "make" workingDir)
 
     else
         runGren docsArgs [ 0 ]
             |> Task.map (\_ -> {})
-            |> Task.mapError verifyFailed
+            |> Task.mapError (verifyFailed options.label "docs" workingDir)
+
+
+{-| The `owner/name` of the package `gren` blamed in a `PROBLEM BUILDING
+DEPENDENCIES` report, or `Nothing` when the failure is not of that shape.
+
+The version gren prints alongside it is discarded on purpose: a `local:`
+dependency has no registry version, so gren prints `1.0.0` for every one of
+them regardless of what the vendored manifest says. Matching on it finds
+nothing. Package names are unique within a port, so the name is the key.
+
+gren reports this when a DEPENDENCY of the package under verification fails to
+compile, and — this is the whole reason the function exists — it elides the
+compiler error it just saw ("please report this ... along with the following
+information:" followed by nothing). Every dependency we vendor is on disk next
+to the package that failed, so the caller can compile the named one directly
+and report a real diagnostic instead of a pointer to a missing one.
+
+-}
+buildingDependency : String -> Maybe String
+buildingDependency errorText =
+    if not (String.contains "PROBLEM BUILDING DEPENDENCIES" errorText) then
+        Nothing
+
+    else
+        errorText
+            |> String.split "trying to build the following package:"
+            |> Array.dropFirst 1
+            |> Array.mapAndKeepJust blamedName
+            |> Array.first
+
+
+{-| First `owner/name` token in a gren message tail. The tail is a JSON-escaped
+block, so newlines arrive as the two characters `\n`.
+-}
+blamedName : String -> Maybe String
+blamedName tail =
+    tail
+        |> String.replace "\\n" " "
+        |> String.words
+        |> Array.findFirst (\word -> String.contains "/" word)
+        |> Maybe.map .value
 
 
 {-| D51: what `add` is allowed to fail on.
@@ -122,7 +179,11 @@ verifyConsumer platform permission options =
 
                     else if isModuleLevel then
                         Task.fail
-                            (verifyFailed (PortError.create "GREN_VERIFY_FAILED" text))
+                            (verifyFailed "the consumer application"
+                                "make"
+                                (System.File.pathToString platform options.applicationDirectory)
+                                (PortError.create "GREN_VERIFY_FAILED" text)
+                            )
 
                     else
                         -- Not a module-level report: the manifest itself does
@@ -136,7 +197,15 @@ verifyConsumer platform permission options =
             )
 
 
-verifyFailed : Error -> Error
-verifyFailed error =
-    PortError.create "GREN_VERIFY_FAILED" (PortError.message error)
+verifyFailed : String -> String -> String -> Error -> Error
+verifyFailed label command workingDir error =
+    PortError.create "GREN_VERIFY_FAILED"
+        (label
+            ++ " failed `gren "
+            ++ command
+            ++ "` in "
+            ++ workingDir
+            ++ "\n"
+            ++ PortError.message error
+        )
         |> PortError.withHint "Inspect elm-to-gren.report.json for the transformed package diagnostics."

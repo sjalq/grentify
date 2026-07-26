@@ -35,6 +35,7 @@ import Task exposing (Task)
 import Transform.LexicalTest
 import Transform.PipelineTest
 import Transform.SourceEditTest
+import Verify.PackageTest
 
 
 type alias Check =
@@ -96,6 +97,7 @@ allChecks =
     , Transform.SourceEditTest.tests
     , Resolve.SolverTest.tests
     , Review.RunnerTest.tests
+    , Verify.PackageTest.tests
     , Port.PortedCacheTest.tests
     , Ast.BareResolveTest.tests
     , Ast.CtorLawTest.tests

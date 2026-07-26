@@ -122,6 +122,111 @@ check("signature: pre-existing banked evidence lines re-signature", () => {
   assert.match(failureSignature(banked).signature, /^TYPE MISMATCH @ root:/);
 });
 
+// --- D69: gren's {"type":"error"} reports ------------------------------------
+
+/** The wrapper `Verify.Package` puts in front of gren's own output. */
+function wrapped(dir, body) {
+  return [
+    "[phase] verify some/package",
+    "GREN_VERIFY_FAILED: some/package 1.0.0 failed `gren docs` in " + dir,
+    "gren exited with code 1.",
+    body,
+    CHATTER,
+  ].join("\n");
+}
+
+const DEP_DIR =
+  "/tmp/.out.elm-to-gren-abc/.elm-to-gren/packages/elmcraft_core-extra__2_3_0";
+
+const AMBIGUOUS = JSON.stringify({
+  type: "error",
+  path: "gren.json",
+  title: "AMBIGUOUS MODULE NAME",
+  message: [
+    'The "exposed-modules" of your gren.json lists the following module:\n\n    Dict.Extra\n\nBut a module from elm-community/dict-extra already uses that name.',
+  ],
+});
+
+// gren emits this one pretty-printed, with `message` as a bare string.
+const INCOMPATIBLE = JSON.stringify(
+  {
+    type: "error",
+    title: "INCOMPATIBLE PACKAGE",
+    path: "",
+    message:
+      "elm-community/typed-svg targets the browser platform.\n\nHowever, the current project targets the common, which is not compatible.",
+  },
+  null,
+  4,
+);
+
+check("evidence: {\"type\":\"error\"} report beats the wrapper line", () => {
+  const evidence = extractEvidence(wrapped(DEP_DIR, AMBIGUOUS));
+  assert.match(evidence, /AMBIGUOUS MODULE NAME/);
+  assert.match(evidence, /Dict\.Extra/);
+  assert.doesNotMatch(evidence, /exited with code/);
+});
+
+check("evidence: pretty-printed report with a string message is read", () => {
+  const evidence = extractEvidence(wrapped("/tmp/out.staging", INCOMPATIBLE));
+  assert.match(evidence, /INCOMPATIBLE PACKAGE/);
+  assert.match(evidence, /targets the browser platform/);
+});
+
+check("signature: a gren error report names the real problem", () => {
+  const { title, detail } = failureSignature(wrapped(DEP_DIR, AMBIGUOUS));
+  assert.equal(title, "AMBIGUOUS MODULE NAME");
+  assert.match(detail, /lists the following module/);
+});
+
+check("signature: the verify wrapper sites a dependency's failure as 'dep'", () => {
+  assert.equal(failureSignature(wrapped(DEP_DIR, AMBIGUOUS)).site, "dep");
+  assert.equal(
+    failureSignature(wrapped("/tmp/out.staging", AMBIGUOUS)).site,
+    "root",
+  );
+});
+
+check("signature: banked evidence re-signatures to the same dep siting", () => {
+  const raw = wrapped(DEP_DIR, AMBIGUOUS);
+  const banked = extractEvidence(raw);
+  assert.equal(failureSignature(banked).site, failureSignature(raw).site);
+  assert.equal(failureSignature(banked).title, failureSignature(raw).title);
+});
+
+check("signature: styled message chunks are never `[object Object]`", () => {
+  const styled = JSON.stringify({
+    type: "compile-errors",
+    errors: [
+      {
+        path: "src/Main.gren",
+        name: "Main",
+        problems: [
+          {
+            title: "TYPE MISMATCH",
+            message: [
+              "The 1st argument to ",
+              { bold: false, underline: false, color: "yellow", string: "sortBy" },
+              " is not what I expect:",
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const { detail } = failureSignature(styled);
+  assert.doesNotMatch(detail, /object Object/);
+  assert.match(detail, /is not what I expect/);
+});
+
+check("signature: two packages hitting one gren error report collapse", () => {
+  const a = failureSignature(
+    wrapped(DEP_DIR, AMBIGUOUS.replace(/Dict\.Extra/g, "List.Extra")),
+  );
+  const b = failureSignature(wrapped(DEP_DIR, AMBIGUOUS));
+  assert.equal(a.signature, b.signature);
+});
+
 // --- normalize ---------------------------------------------------------------
 
 check("normalize: redacts identifiers, strings, modules, and numbers", () => {

@@ -254,6 +254,7 @@ emit options mappingFingerprint manifest targetName builtManifest transformed ex
                                     options.childProcess
                                     { packageDirectory = staging
                                     , grenExecutable = options.grenExecutable
+                                    , label = builtManifest.spec.name ++ " " ++ builtManifest.spec.version
                                     , isApplication =
                                         when builtManifest.spec.kind is
                                             GrenManifest.ApplicationKind ->

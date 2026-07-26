@@ -19,6 +19,12 @@
  *   failureSignature(text) -> {signature, title, site, detail}
  *     Normalized fingerprint. Identifiers, numbers, and paths are redacted so
  *     the same bug in 40 packages produces one string.
+ *
+ * gren `--report=json` speaks two shapes and both are read here (D69):
+ * `{"type":"compile-errors"}` for module-level faults, and `{"type":"error"}`
+ * for everything above the module — PROBLEM BUILDING DEPENDENCIES,
+ * INCOMPATIBLE PACKAGE, AMBIGUOUS MODULE NAME. Reading only the first turned
+ * the entire second class into `GREN_VERIFY_FAILED: gren exited with code N`.
  */
 
 /** Gren/Elm human-readable error banner: `-- TYPE MISMATCH ---- src/Foo.gren` */
@@ -65,7 +71,7 @@ function extractEvidence(raw, limit = 2000) {
     const lines = [];
     for (const err of json.errors || []) {
       for (const problem of err.problems || []) {
-        const head = String((problem.message || []).join(" ")).split("\n")[0];
+        const head = headline(problem.message);
         lines.push(
           `${problem.title} @ ${err.name || shortPath(err.path)}: ${head}`.trim(),
         );
@@ -74,6 +80,16 @@ function extractEvidence(raw, limit = 2000) {
       if (lines.length >= 12) break;
     }
     if (lines.length > 0) return lines.join("\n").slice(0, limit);
+  }
+
+  // 1b. A gren `{"type":"error"}` report: the manifest/dependency/platform
+  //     class of failure, which has a title and a message but no module.
+  const report = firstErrorReportJson(text);
+  if (report && report.title) {
+    const where = evidencePath(verifyContextPath(text)) || report.path || "-";
+    return `${report.title} @ ${where}: ${messageText(report.message).trim()}`
+      .trim()
+      .slice(0, limit);
   }
 
   // 2. Human-readable banners: keep each banner plus its first message line.
@@ -112,7 +128,45 @@ function extractEvidence(raw, limit = 2000) {
  * @param {string} text
  */
 function firstCompileErrorsJson(text) {
-  const start = text.indexOf('{"type":"compile-errors"');
+  return parseJsonObjectAt(text, findReportStart(text, "compile-errors"));
+}
+
+/**
+ * First `{"type":"error"...}` object in the text, parsed.
+ *
+ * D69: gren emits this shape — not `compile-errors` — for everything that is
+ * not a module-level type error: PROBLEM BUILDING DEPENDENCIES, INCOMPATIBLE
+ * PACKAGE, AMBIGUOUS MODULE NAME, MISSING INDIRECT DEPENDENCIES. Those are the
+ * reports the whole GREN_VERIFY_FAILED class is made of, and every one of them
+ * used to fall through to the refusal-code branch, banking the wrapper line
+ * ("gren exited with code N") and discarding the diagnostic sitting next to it.
+ *
+ * @param {string} text
+ */
+function firstErrorReportJson(text) {
+  return parseJsonObjectAt(text, findReportStart(text, "error"));
+}
+
+/**
+ * Offset of the first `{"type":"<kind>"` object header. gren emits this
+ * compact, but the same report reaches the walk pretty-printed when it passes
+ * through a formatter, so whitespace around `:` and after `{` is tolerated.
+ * @param {string} text
+ * @param {string} kind
+ */
+function findReportStart(text, kind) {
+  const header = new RegExp(`\\{\\s*"type"\\s*:\\s*"${kind}"`);
+  const hit = header.exec(text);
+  return hit ? hit.index : -1;
+}
+
+/**
+ * Parse the balanced JSON object starting at `start`; null when the object is
+ * absent or truncated (walk records banked before this module existed).
+ * @param {string} text
+ * @param {number} start
+ */
+function parseJsonObjectAt(text, start) {
   if (start < 0) return null;
   let depth = 0;
   let inString = false;
@@ -139,6 +193,67 @@ function firstCompileErrorsJson(text) {
     }
   }
   return null;
+}
+
+/**
+ * Flatten a gren report `message` to plain text.
+ *
+ * The field is a string for `{"type":"error"}` reports and an array for
+ * `compile-errors` problems, and array entries are either plain strings or
+ * style chunks `{bold, underline, color, string}`. Joining the array blindly
+ * rendered every styled chunk as `[object Object]` — the compiler's own words
+ * for the fault, replaced by nothing.
+ *
+ * @param {unknown} message
+ * @returns {string}
+ */
+function messageText(message) {
+  if (typeof message === "string") return message;
+  if (!Array.isArray(message)) return "";
+  return message
+    .map((chunk) =>
+      typeof chunk === "string" ? chunk : String((chunk && chunk.string) || ""),
+    )
+    .join("");
+}
+
+/** First non-empty line of a message, for one-line summaries. */
+function headline(message) {
+  return (
+    messageText(message)
+      .split("\n")
+      .map((line) => line.trim())
+      .find(Boolean) || ""
+  );
+}
+
+/**
+ * The package directory a `GREN_VERIFY_FAILED` wrapper was verifying.
+ *
+ * D69: gren runs inside the package directory, so its report never names the
+ * package. `Verify.Package` states it on the wrapper line; without that, a
+ * dependency's compile failure is indistinguishable from the root's, which is
+ * exactly the distinction that decides whether a fix is a hub fix.
+ *
+ * @param {string} text
+ * @returns {string} the directory, or "" when the text carries no wrapper
+ */
+function verifyContextPath(text) {
+  const hit = /GREN_VERIFY_FAILED:.*? failed `gren \w+` in (\S+)/.exec(text);
+  return hit ? hit[1] : "";
+}
+
+/**
+ * Path shortened for a banked evidence line, keeping the `.elm-to-gren/packages`
+ * marker when it is there. Evidence is re-signatured later (`ecosystem:clusters`
+ * reads records, not raw output), and that marker is the only thing that still
+ * says "this was a dependency" once the absolute staging path is gone.
+ * @param {string} value
+ */
+function evidencePath(value) {
+  const s = String(value || "").trim();
+  const vendored = /\.elm-to-gren[/\\]packages[/\\][^/\\]+/.exec(s);
+  return vendored ? vendored[0] : shortPath(s);
 }
 
 /** Basename of a path-ish token; leaves non-paths alone. */
@@ -186,8 +301,23 @@ function failureSignature(raw) {
   if (json) {
     const err = (json.errors || [])[0] || {};
     const problem = (err.problems || [])[0] || {};
-    const head = String((problem.message || []).join(" ")).split("\n")[0];
-    return build(problem.title || "COMPILE ERROR", err.path || err.name, head);
+    return build(
+      problem.title || "COMPILE ERROR",
+      err.path || err.name || verifyContextPath(text),
+      headline(problem.message),
+    );
+  }
+
+  const report = firstErrorReportJson(text);
+  if (report && report.title) {
+    // The wrapper's directory outranks `report.path`: gren reports these
+    // against the manifest it was handed (`gren.json`, or nothing at all),
+    // which cannot say whose manifest it was.
+    return build(
+      report.title,
+      verifyContextPath(text) || report.path,
+      headline(report.message),
+    );
   }
 
   for (const row of text.split("\n")) {
@@ -258,6 +388,8 @@ module.exports = {
   extractEvidence,
   failureSignature,
   firstCompileErrorsJson,
+  firstErrorReportJson,
+  messageText,
   normalize,
   stripAnsi,
 };

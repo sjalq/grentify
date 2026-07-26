@@ -753,6 +753,7 @@ verifyStaging platform permission grenExecutable rootIdentity planned staging =
                                 permission
                                 { packageDirectory = packageDirectory rootIdentity staging package
                                 , grenExecutable = grenExecutable
+                                , label = package.manifest.name ++ " " ++ package.manifest.version
                                 , isApplication =
                                     when package.manifest.kind is
                                         GrenManifest.ApplicationKind ->

@@ -742,6 +742,15 @@ rewriteExpr ctx expr =
                             }) fields
                 }
 
+        -- D67: the generic walk maps a let binding's patterns and body but
+        -- never its `LetFunction` *name*, so `let when propOf … = …` kept the
+        -- keyword while every call site was escaped to `when_`.
+        ExprLet { declarations = declarations, expression = body } ->
+            ExprLet
+                { declarations = Array.map (rewriteLetDecl ctx) declarations
+                , expression = rewriteExpr ctx body
+                }
+
         _ ->
             Walk.mapExprChildrenWithPatterns (rewriteExpr ctx)
                 (rewritePattern ctx) expr

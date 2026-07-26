@@ -11,6 +11,7 @@ const {
   separateGluedExprAndRecordBind,
   collapse,
   joinCtorPayloads,
+  joinSplitDefinitionHeaders,
 } = require("../../tools/gren-format/collapse-record-patterns.cjs");
 
 let failed = 0;
@@ -313,6 +314,121 @@ check("collapse keeps nested simple records one line", () => {
       out.includes("{ first = a, second = { first = b, second = c }}"),
     out,
   );
+});
+
+// --- D67: a definition header must occupy one physical line ------------------
+// gren-format wraps an over-wide let-destructure header at the binding's own
+// column; Gren reads that column as a new declaration. Three faces, one wrap.
+
+check("D67 rejoins a header split before its = (UNFINISHED DEFINITION)", () => {
+  // dillonkearns/elm-form, ianmackenzie/elm-units-interval
+  const src = [
+    "    let",
+    "        (Interval { first = Quantity.Quantity a, second = Quantity.Quantity b })",
+    "        =",
+    "            getInterval first",
+    "    in",
+    "    aggregateOfHelp a b",
+    "",
+  ].join("\n");
+  const out = transform(src);
+  assert.ok(
+    out.includes(
+      "        (Interval { first = Quantity.Quantity a, second = Quantity.Quantity b }) =",
+    ),
+    "header must be one line:\n" + out,
+  );
+  assert.ok(!/^\s*=\s*$/m.test(out), "orphan = line survived:\n" + out);
+});
+
+check("D67 rejoins a header split inside its parens (UNFINISHED PARENTHESES)", () => {
+  // folkertdev/elm-sha2
+  const src = [
+    "    let",
+    "        (DeltaState",
+    "        (Tuple8 { first = a, second = b, third = c, fourth = d })) =",
+    "            reduceWordsHelp 0 initialDeltaState",
+    "    in",
+    "    State a",
+    "",
+  ].join("\n");
+  const out = transform(src);
+  assert.ok(
+    out.includes(
+      "        (DeltaState (Tuple8 { first = a, second = b, third = c, fourth = d })) =",
+    ),
+    "parenthesized header must be one line:\n" + out,
+  );
+});
+
+check("D67 leaves a well-formed single-line header alone (idempotent)", () => {
+  const src = [
+    "    let",
+    "        (Interval { first = a, second = b }) =",
+    "            getInterval first",
+    "    in",
+    "    a + b",
+    "",
+  ].join("\n");
+  assert.equal(transform(src), transform(transform(src)));
+  assert.ok(transform(src).includes("(Interval { first = a, second = b }) ="));
+});
+
+check("D67 never absorbs a top-level annotation into the definition below", () => {
+  const src = [
+    "aggregateOf :",
+    "    (a -> Interval number units)",
+    "    -> a",
+    "    -> Interval number units",
+    "aggregateOf getInterval first =",
+    "    first",
+    "",
+  ].join("\n");
+  const out = joinSplitDefinitionHeaders(src);
+  assert.equal(out, src, "annotation must stay untouched:\n" + out);
+});
+
+check("D67 never absorbs a let-local annotation into its definition", () => {
+  const src = [
+    "    let",
+    "        localHelper :",
+    "            (Int -> Int)",
+    "            -> Int",
+    "        localHelper f =",
+    "            f 1",
+    "    in",
+    "    localHelper identity",
+    "",
+  ].join("\n");
+  const out = joinSplitDefinitionHeaders(src);
+  assert.equal(out, src, "let-local annotation must stay untouched:\n" + out);
+});
+
+check("D67 leaves multi-line record type alias bodies alone", () => {
+  const src = [
+    "type alias Options =",
+    "    { parseValue : String",
+    "    , possibleValues : Array String",
+    "    }",
+    "",
+    "",
+    "defaults =",
+    "    empty",
+    "",
+  ].join("\n");
+  const out = joinSplitDefinitionHeaders(src);
+  assert.equal(out, src, "record alias body must stay untouched:\n" + out);
+});
+
+check("D67 leaves a multi-line parenthesized expression alone", () => {
+  const src = [
+    "    State",
+    "        (ctor_Tuple8_elmToGren (h0 + a) (h1 + b)",
+    "            (h2 + c) (h3 + d))",
+    "",
+  ].join("\n");
+  const out = joinSplitDefinitionHeaders(src);
+  assert.equal(out, src, "expression must stay untouched:\n" + out);
 });
 
 if (failed > 0) {

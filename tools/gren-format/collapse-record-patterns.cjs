@@ -11,6 +11,10 @@
  * at column 0 (UNFINISHED TYPE ALIAS / CUSTOM TYPE):
  *   type alias Foo a b c\nd e =\n  →  type alias Foo a b c d e =\n
  *
+ * And (D67) definition headers that format wraps at the binding's own column,
+ * which Gren reads as a new declaration:
+ *   (Interval { first = a, second = b })\n=\n  →  (Interval { … }) =\n
+ *
  * Usage: node collapse-record-patterns.cjs <package-root>
  */
 const fs = require("node:fs");
@@ -515,15 +519,125 @@ function parenRecordFnArgs(source) {
   return out.join("\n");
 }
 
+/**
+ * D67: a definition header (`<pattern> =`) must occupy ONE physical line.
+ *
+ * gren-format wraps at ~80 columns and, when a let-destructure header is wider
+ * than that, it lays the continuation out at the binding's OWN column. Gren's
+ * layout rules read a line at the binding column as the start of a new
+ * declaration, so the header is cut in half. One wrap, three faces:
+ *
+ *   break before the `=`      → UNFINISHED DEFINITION (elm-form, units-interval)
+ *     (Interval { first = Quantity.Quantity a, second = Quantity.Quantity b })
+ *     =
+ *   break inside the parens   → UNFINISHED PARENTHESES (elm-sha2)
+ *     (DeltaState
+ *     (Tuple8 { first = a, …, eighth = h })) =
+ *   break in a wider `let`    → LET PROBLEM
+ *
+ * The repair is the same shape as `joinTypeHeaders`: put the header back on one
+ * line. A candidate is an INDENTED line opening with `(` or `{` — exactly what
+ * `Ast.Print` emits for a `LetDestructure` pattern — that is not already a
+ * complete header. Continuations are absorbed only while they stay at or below
+ * the candidate's own indent depth (a shallower line is a sibling binding or a
+ * new top-level declaration, never a continuation), and the join is committed
+ * only if the result is bracket-balanced, ends in `=`, and holds no `->` (which
+ * would mean we had walked into a type annotation, not a pattern).
+ */
+const MAX_HEADER_JOIN_LINES = 12;
+
+/** Bracket depth of `text`, skipping string and char literals. -1 if unbalanced. */
+function bracketDepth(text) {
+  let depth = 0;
+  let inString = false;
+  let stringCh = "";
+  for (let k = 0; k < text.length; k++) {
+    const ch = text[k];
+    if (inString) {
+      if (ch === "\\") {
+        k += 1;
+        continue;
+      }
+      if (ch === stringCh) inString = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      stringCh = ch;
+      continue;
+    }
+    if (ch === "(" || ch === "{" || ch === "[") depth += 1;
+    else if (ch === ")" || ch === "}" || ch === "]") depth -= 1;
+    if (depth < 0) return -1;
+  }
+  return inString ? -1 : depth;
+}
+
+/** True when `text` is a complete, parseable single-line definition header. */
+function isCompleteHeader(text) {
+  if (!/=$/.test(text) || /[=/<>|!+*&^%-]=$/.test(text)) return false;
+  if (text.includes("->")) return false;
+  return bracketDepth(text) === 0;
+}
+
+function joinSplitDefinitionHeaders(source) {
+  const lines = source.split("\n");
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = line.match(/^([ \t]+)[({]/);
+    // Comments must never be folded into a header; a `--` would swallow the `=`.
+    if (!m || line.includes("--") || line.includes("{-") || isCompleteHeader(line.trimEnd())) {
+      out.push(line);
+      continue;
+    }
+    const indent = m[1].length;
+    let joined = line.trimEnd();
+    let j = i + 1;
+    let end = -1;
+    while (j < lines.length && j - i <= MAX_HEADER_JOIN_LINES) {
+      const next = lines[j];
+      const nextIndent = (next.match(/^[ \t]*/) || [""])[0].length;
+      // Blank line, comment, or a shallower line: not a wrapped continuation.
+      if (
+        next.trim() === "" ||
+        next.includes("--") ||
+        next.includes("{-") ||
+        nextIndent < indent
+      ) {
+        break;
+      }
+      joined = joined + " " + next.trim();
+      j += 1;
+      if (isCompleteHeader(joined)) {
+        end = j;
+        break;
+      }
+    }
+    if (end !== -1) {
+      out.push(joined);
+      i = end - 1;
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 function transform(source) {
   // separateGlued* after parenRecordFnArgs so a false join is still split when
   // context proves mid-expression glue (iso8601 fromTime / daysToYears).
-  return separateGluedExprAndRecordBind(
-    separateGluedLetPatterns(
-      parenRecordFnArgs(
-        separateDocComments(
-          joinBrokenRecordFieldValues(
-            joinCtorPayloads(joinTypeHeaders(collapse(source))),
+  // joinSplitDefinitionHeaders runs last: it repairs whatever header wraps the
+  // earlier passes leave behind, and its blank-line stop keeps it off the
+  // patterns those passes deliberately split onto their own lines.
+  return joinSplitDefinitionHeaders(
+    separateGluedExprAndRecordBind(
+      separateGluedLetPatterns(
+        parenRecordFnArgs(
+          separateDocComments(
+            joinBrokenRecordFieldValues(
+              joinCtorPayloads(joinTypeHeaders(collapse(source))),
+            ),
           ),
         ),
       ),
@@ -541,6 +655,7 @@ module.exports = {
   separateGluedExprAndRecordBind,
   joinBrokenRecordFieldValues,
   parenRecordFnArgs,
+  joinSplitDefinitionHeaders,
   transform,
 };
 

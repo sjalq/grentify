@@ -1,0 +1,109 @@
+module FormatGrenTest exposing (tests)
+
+{-| D70: the format phase's guard law — formatting is layout only.
+
+`Format.Gren.significantTokens` is the licence the vendored pretty-printer is
+held to: whitespace, blank lines and redundant parentheses may move, nothing
+else. These checks pin both directions, because a guard that is too strict
+throws away every formatted file and a guard that is too loose ships a
+corrupted one.
+-}
+
+import Array exposing (Array)
+import Format.Gren as Format
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ layoutChangesAreInvisible
+    , redundantParenthesesAreInvisible
+    , wordSplitIsVisible
+    , droppedDeclarationIsVisible
+    ]
+
+
+{-| Blank lines, indentation and the formatter's `exposing ( a, b )` spacing.
+-}
+layoutChangesAreInvisible : TestResult
+layoutChangesAreInvisible =
+    let
+        before =
+            "module A exposing (f, g)\n\nf x =\n    g x\n"
+
+        after =
+            "module A exposing ( f, g )\n\n\nf x =\n    g\n        x\n"
+    in
+    outcome "formatter layout changes leave significant tokens equal"
+        (Format.significantTokens before == Format.significantTokens after)
+        (Format.significantTokens before ++ "  /=  " ++ Format.significantTokens after)
+
+
+{-| The formatter really does drop redundant grouping: `Composite ({ … })` is
+printed `Composite { … }`. Measured across dillonkearns/elm-graphql: 7 of 23
+modules, every one of them only this.
+-}
+redundantParenthesesAreInvisible : TestResult
+redundantParenthesesAreInvisible =
+    let
+        before =
+            "name field =\n    when field is\n        (Composite ({ first = a })) ->\n            a\n"
+
+        after =
+            "name field =\n    when field is\n        Composite { first = a } ->\n            a\n"
+    in
+    outcome "formatter parenthesis removal leaves significant tokens equal"
+        (Format.significantTokens before == Format.significantTokens after)
+        (Format.significantTokens before ++ "  /=  " ++ Format.significantTokens after)
+
+
+{-| The defect: the vendored formatter matches the `as` keyword without a word
+boundary, so `infixOperator fn opParser assoc` came back as
+`infixOperator fn (opParser as soc)` — a deleted binder and a module that
+cannot compile (Punie/elm-parser-extras).
+-}
+wordSplitIsVisible : TestResult
+wordSplitIsVisible =
+    let
+        before =
+            "infixOperator fn opParser assoc =\n    ctor (binaryOp fn opParser) assoc\n"
+
+        after =
+            "infixOperator fn (opParser as soc) =\n    ctor (binaryOp fn opParser) assoc\n"
+    in
+    outcome "formatter splitting a name at a keyword prefix is caught"
+        (Format.significantTokens before /= Format.significantTokens after)
+        ("both sides tokenized to " ++ Format.significantTokens before)
+
+
+droppedDeclarationIsVisible : TestResult
+droppedDeclarationIsVisible =
+    let
+        before =
+            "module A exposing (f, g)\n\nf x =\n    x\n\ng y =\n    y\n"
+
+        after =
+            "module A exposing (f, g)\n\nf x =\n    x\n"
+    in
+    outcome "formatter dropping a declaration is caught"
+        (Format.significantTokens before /= Format.significantTokens after)
+        ("both sides tokenized to " ++ Format.significantTokens before)
+
+
+outcome : String -> Bool -> String -> TestResult
+outcome name passed details =
+    { name = name
+    , passed = passed
+    , details =
+        if passed then
+            ""
+
+        else
+            details
+    }

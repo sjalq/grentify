@@ -3,6 +3,7 @@ module Transform.Evidence exposing
     , PackageEvidence
     , collect
     , collectConstructorArities
+    , collectRecordAliases
     , collectSoleConstructors
     )
 
@@ -33,6 +34,8 @@ import Transform.AstPipeline as AstPipeline
 type alias DependencyEvidence =
     { constructorArities : Dict String Int
     , soleConstructors : Dict String {}
+    , recordAliases : Dict String (Array String)
+    , reservedExports : Dict String String
     }
 
 
@@ -65,8 +68,16 @@ collect registry dependencies modules =
         namedFiles =
             Array.map (NameSub.apply registry) resolvedFiles
 
-        recordAliases =
+        ownRecordAliases =
             mergeFileMaps RecordAlias.collectFromFile namedFiles
+
+        -- D70: a record alias applied like a constructor is lowered from the
+        -- DEFINING module's field names, so dependency aliases have to be in
+        -- scope here or the application is left standing for `CtorLaw` to
+        -- mis-recordify. Own modules win on a key clash, exactly as the
+        -- constructor maps do.
+        recordAliases =
+            Dict.foldl Dict.set dependencies.recordAliases ownRecordAliases
 
         ownConstructorArities =
             mergeFileMaps CtorLaw.collectFromFile namedFiles
@@ -108,13 +119,21 @@ collect registry dependencies modules =
                 Dict.empty
                 preparedFiles
 
-        reservedExports =
+        ownReservedExports =
             Array.foldl
                 (\one found ->
                     Dict.foldl Dict.set found (AstPipeline.reservedExportsOf one)
                 )
                 Dict.empty
                 preparedFiles
+
+        -- D70: `Ast.Reserved` reads a reference's escape from the DEFINING
+        -- module's decision, never the caller's occupancy. A dependency's
+        -- modules are just as defining as our own, so their decisions belong in
+        -- the same map or every cross-package reference to an escaped name
+        -- (`Elm.Annotation.alias` → `alias_`) is emitted unescaped.
+        reservedExports =
+            Dict.foldl Dict.set dependencies.reservedExports ownReservedExports
     in
     { tupleReturns = prepEvidence.tupleReturns
     , constructorHomes = prepEvidence.constructorHomes
@@ -127,6 +146,8 @@ collect registry dependencies modules =
     , exports =
         { constructorArities = ownConstructorArities
         , soleConstructors = ownSoleConstructors
+        , recordAliases = ownRecordAliases
+        , reservedExports = ownReservedExports
         }
     }
 
@@ -140,6 +161,17 @@ collectConstructorArities registry modules =
         |> decodeFiles
         |> Array.map (BareResolve.apply >> NameSub.apply registry)
         |> mergeFileMaps CtorLaw.collectFromFile
+
+
+collectRecordAliases :
+    Registry
+    -> Array Protocol.ModuleExtraction
+    -> Dict String (Array String)
+collectRecordAliases registry modules =
+    modules
+        |> decodeFiles
+        |> Array.map (BareResolve.apply >> NameSub.apply registry)
+        |> mergeFileMaps RecordAlias.collectFromFile
 
 
 collectSoleConstructors :

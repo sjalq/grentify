@@ -12,6 +12,7 @@ import Ast.Types exposing
     , Exposing(..)
     , Expr(..)
     , File
+    , LetDecl(..)
     , ModuleKind(..)
     , Pattern(..)
     )
@@ -31,7 +32,111 @@ tests =
     [ reservedEscapesAroundExistingUnderscore
     , docsRewriteKeepsCommasWhenNameUnchanged
     , crossModuleReferenceFollowsDefiningModuleEscape
+    , letBoundReservedBinderMovesWithItsReferences
+    , aliasQualifiedReferenceFollowsDefiningModuleEscape
     ]
+
+
+{-| D70: a let binding named `alias` is counted by the occupancy walk, so every
+REFERENCE to it is escaped to `alias_` — and the generic child walk carried the
+binder's own name through untouched, leaving `let alias = … in Just alias_`.
+`Ast.MatchCompile` lowers Elm tuple patterns into exactly this shape, so
+mdgriffith/elm-codegen's `( aliasModName, alias ) :: remain` produced it.
+-}
+letBoundReservedBinderMovesWithItsReferences : TestResult
+letBoundReservedBinderMovesWithItsReferences =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "findAlias"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "pair" ]
+                    , expression =
+                        ExprLet
+                            { declarations =
+                                [ LetFunction
+                                    { name = "alias"
+                                    , arguments = []
+                                    , expression =
+                                        ExprVar { moduleName = Nothing, name = "pair" }
+                                    }
+                                ]
+                            , expression =
+                                ExprVar { moduleName = Nothing, name = "alias" }
+                            }
+                    }
+                ]
+
+        printed =
+            file
+                |> Reserved.apply Dict.empty
+                |> Print.print
+
+        passed =
+            String.contains "alias_ =" printed
+                && not (String.contains "alias =" printed)
+    in
+    outcome
+        "let-bound reserved binder is escaped with its references"
+        passed
+        ("printed:\n" ++ printed)
+
+
+{-| D70: `Ast.NameSub.qualifyRef` runs first and replaces a reference's home
+module with the qualifier the file prints it under, so by the time this pass
+runs `Elm.Annotation.alias` reads as `Type.alias`. Looking the package export
+map up under the qualifier alone missed every aliased import and emitted
+`Type.alias` against a module that exposes `alias_`.
+-}
+aliasQualifiedReferenceFollowsDefiningModuleEscape : TestResult
+aliasQualifiedReferenceFollowsDefiningModuleEscape =
+    let
+        caller =
+            { schemaVersion = 1
+            , moduleDefinition =
+                { kind = NormalModule
+                , moduleName = "Gen.Json.Decode"
+                , exposing_ = ExposeExplicit [ ExposeFunction "value" ]
+                }
+            , comments = []
+            , imports =
+                [ { moduleName = "Elm.Annotation"
+                  , alias = Just "Type"
+                  , exposing_ = Nothing
+                  }
+                ]
+            , declarations =
+                [ DeclFunction
+                    { name = "value"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprApplication
+                            [ ExprVar { moduleName = Just "Type", name = "alias" }
+                            , ExprVar { moduleName = Nothing, name = "moduleName_" }
+                            ]
+                    }
+                ]
+            }
+
+        -- What the dependency banked: its own module's decision.
+        packageExports =
+            Dict.set "Elm.Annotation.alias" "alias_" Dict.empty
+
+        printed =
+            Print.print (Reserved.apply packageExports caller)
+
+        passed =
+            String.contains "Type.alias_" printed
+                && not (String.contains "Type.alias " printed)
+    in
+    outcome
+        "alias-qualified reference follows the defining module's escape"
+        passed
+        ("printed:\n" ++ printed)
 
 
 {-| `@docs a, b, c` must keep commas even when no reserved rename applies.

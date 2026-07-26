@@ -22,6 +22,7 @@ import Elm.SemverTest
 import Emit.PackageTest
 import Emit.WorkspaceTest
 import FileSystem
+import FormatGrenTest
 import Init
 import Mapping.Tests
 import MappingSemanticsTest
@@ -91,6 +92,7 @@ allChecks =
     , Elm.RegistryTest.tests
     , Elm.SemverTest.tests
     , Emit.PackageTest.tests
+    , FormatGrenTest.tests
     , Transform.LexicalTest.tests
     , Transform.PipelineTest.tests
     , Transform.SourceEditTest.tests

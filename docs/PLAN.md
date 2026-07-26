@@ -615,6 +615,114 @@ Coverage and pipeline:
   not a first-party module known to lack the name, and the review run and
   the port must resolve the SAME dependency version (same class as D55's
   "which elm-review runs depends on whether node_modules exists").
+- **D70 a reference resolved in Elm does not resolve after the port —
+  FOUR independent leaks of the same law** (found 2026-07-26 across six
+  packages, FIXED same day, Fable). Reported as four symptoms; bisected to
+  four distinct root causes, three host-side and one extractor-side, each
+  repaired where the knowledge is held exactly (the D23 law).
+  - **D70a let-bound reserved binders were never escaped.** `Ast.Reserved`
+    counts a let binding as an occupied name (`collectLetDeclBinders`), so
+    every REFERENCE to a let-bound `alias` was escaped to `alias_` — but
+    `rewriteExpr` had no `ExprLet` branch, so it fell through to
+    `Walk.mapLetDecl`, which carries `LetFunction.name` through untouched.
+    `Ast.Reserved.rewriteLetDecl` — the one walker that also renames the
+    binder — existed with NO call site at all. Result:
+    `let alias = … in Just alias_`. `Ast.MatchCompile` lowers Elm tuple
+    patterns into exactly this shape, which is why elm-codegen's
+    `( aliasModName, alias ) :: remain` produced it and why the class stayed
+    rare. FIX: `rewriteExpr` handles `ExprLet` through `rewriteLetDecl`.
+    Law restated in the module header: every name the occupancy walk counts
+    as taken must be rewritten at its binding site too.
+  - **D70b the package-wide reserved-export map was consulted under the
+    print qualifier, and stopped at the package boundary.** Two halves of
+    one leak. (i) `Ast.NameSub.qualifyRef` runs BEFORE `Ast.Reserved` and
+    replaces each ref's home module with the qualifier the file will print
+    it under, so `Elm.Annotation.alias` reads as `Type.alias` under
+    `import Elm.Annotation as Type` and the package key missed every
+    aliased import — D18's fix had this hole from the day aliases were
+    qualified. FIX: register the alias keys with the host's one scheme,
+    `Ast.Ref.addImportAliasKeys`, rather than a second lookup path.
+    (ii) The map itself only ever held the CURRENT package's decisions,
+    so a dependent of elm-codegen emitted `Type.alias` against a module
+    that exposes `alias_`. FIX: `reservedExports` joins `ctorArities` /
+    `soleCtors` in `Pipeline.DepMaps` and in the ported-cache manifest.
+    A dependency's modules are just as defining as our own.
+  - **D70c parameterized type references were resolved at the wrong
+    range** (extractor-side). elm-review keys a type's home on the range of
+    the type NAME node (`collectModuleNamesFromTypeAnnotation` calls
+    `Builder.add` with exactly that inner range); `AstEncode.encodeType`
+    asked at the enclosing `Typed` node's range. The two coincide only when
+    the type has no arguments, so `RawField` resolved and
+    `Dict.OrderedDict comparable v` did not — it fell back to the WRITTEN
+    qualifier and recorded home `Dict` for a type that lives in
+    `OrderedDict` (`import Dict as UnorderedDict` + `import OrderedDict as
+    Dict` in elm-graphql). Silent for years because the fallback looks like
+    an answer, and invisible until D68 made the printed qualifier a
+    function of the recorded home. FIX: ask at the name node's range. Types
+    now behave exactly like values, which always carried true homes.
+    Side effect, benign and checked: parameterized types print under their
+    home (`Array.Array`, `Decode.Decoder`) as nullary ones already did.
+  - **D70d record-alias constructors stopped at the package boundary.**
+    Elm lets a record type alias be applied like a constructor and Gren does
+    not, so `Ast.RecordAlias` lowers those to record literals from the
+    DEFINING module's field names — knowledge only the defining package
+    holds. `DependencyEvidence` did not carry it, so a dependent left
+    `PortFunnel.GenericMessage moduleName tag args` standing and
+    `Ast.CtorLaw` recordified it as a data constructor:
+    `PortFunnel.GenericMessage { first = …, second = …, third = … }`
+    against an alias that is not a variant at all. FIX: `recordAliases`
+    joins the banked set too.
+    CONSEQUENCE, deliberate: an entry that cannot supply the full banked
+    set is no longer a hit. D57 let such an entry fall back to the extract
+    cache, which is keyed on different ingredients and drifts — and its
+    miss degraded silently to EMPTY maps, which is the exact failure D57
+    was written to kill. The fallback is deleted (`cachedDepExports`);
+    `loadExports` returning `Nothing` now soft-misses the entry and
+    re-ports, self-healing every pre-D70 entry once.
+  RECEIPTS (each ports and gren-verifies clean, EXIT=0):
+  mdgriffith/elm-codegen (D70a+b), joeybright/json-decode-map-gen (D70a+b,
+  same shared dependency), dillonkearns/elm-graphql (D70c),
+  billstclair/elm-websocket-client (D70d). Punie/elm-parser-extras is
+  fixed for its reported symptom and stops on a newly-visible defect —
+  filed as D72.
+  Tier 0: 280 checks (+8: 2 Reserved, 4 format-guard, 2 ported-cache
+  manifest). Canary 14/14.
+- **D71 the vendored formatter splits a name at a keyword prefix**
+  (found 2026-07-26 on Punie/elm-parser-extras, GUARDED same day,
+  host-side): `tools/gren-format/app` (gilramir/gren-format, a built
+  binary) matches the `as` pattern keyword without a word boundary and
+  rewrote `infixOperator fn opParser assoc` into
+  `infixOperator fn (opParser as soc)` — a deleted binder and a module
+  that cannot compile. Reproduced on a three-line fixture; `isolate` and
+  `ofFoo` survive, so it is specific to the infix `as`.
+  The tool is not ours to fix from here, and `Format.Gren` already prefers
+  unformatted-but-correct Gren to a hard FORMAT_FAILED. GUARD (same law,
+  extended from "the tool failed" to "the tool lied"): formatting is
+  layout only. `Format.Gren.significantTokens` writes the pretty-printer's
+  whole licence down — whitespace, blank lines and redundant parentheses —
+  and any file whose token string the tool chain changed is restored from
+  the text the host holds exactly. Parentheses are dropped from the
+  fingerprint on measured evidence: across dillonkearns/elm-graphql the
+  formatter changed 7 of 23 modules and every change was
+  `Composite ({ … })` → `Composite { … }`; with parens ignored, 23 of 23
+  are token-identical. Tier 0 pins both directions (layout and paren
+  changes invisible, a keyword split and a dropped declaration visible).
+  STILL OPEN upstream: the formatter itself. Any module hitting this ships
+  unformatted.
+- **D72 let-level type annotations are dropped by the AST path**
+  (found behind D70 2026-07-26, OPEN, host-side): `Ast.Types.LetFunction`
+  has no `signature` field, so `let rassocOp : Parser (a -> a -> a)` is
+  extracted-or-decoded away and the port emits a bare `rassocOp =`. In
+  Punie/elm-parser-extras this loses the annotations that tie
+  `makeParser`'s type variables to the enclosing function's, and
+  `Array.foldl makeParser simpleExpr operators` fails with the rigid-
+  variable shape `Parser a` vs `Parser a`. Confirmed independent of D70c:
+  the same error reproduces with every qualifier reverted, and `makeParser`
+  alone type-checks (replacing only the caller's body compiles clean).
+  Carrying the signature is not a small change — every pass that rewrites
+  types (`NameSub`, `Reserved`, `KeyEncode`, …) must rewrite it too, and a
+  signature printed but NOT name-substituted would emit Elm type names into
+  Gren source, which is worse than dropping it. Needs its own task.
 - **D49 ctor-embedded list merge misfires when the list column is not
   argument 0** (found banking elm-css 2026-07-23: Css.Structure failed
   gren-verify with transform-introduced SHADOWING — `Selector sequence
@@ -1607,3 +1715,19 @@ evidence base for the next fix campaign.
   the end-to-end green run. Canary false-alarm resolved: two FAILs were a stray
   backgrounded -j1 canary racing the gren cache (D13 family), A/B confirmed
   W4.3c innocent — 14/14 on a clean environment. Tier 0: 180 + checker.
+- 2026-07-26 D70/D71: a reference that resolved in Elm must resolve after the
+  port. Four independent leaks of that law behind six packages, plus a vendored-
+  formatter corruption filed as D71 and guarded. D70a let-bound reserved binders
+  were escaped at their references and not at the binder (Ast.Reserved.rewriteLetDecl
+  had no call site). D70b the reserved-export map was keyed on the print qualifier,
+  not the home module, and stopped at the package boundary. D70c the extractor asked
+  the lookup table for a type home at the wrong range, so every PARAMETERIZED type
+  fell back to the written qualifier. D70d record-alias field names stopped at the
+  package boundary, so CtorLaw recordified an alias as if it were a variant; the
+  now-unnecessary extract-cache fallback for dependency facts is deleted and an
+  entry that cannot supply the full banked set soft-misses instead. D71 guards the
+  format phase with a layout-only law (Format.Gren.significantTokens).
+  PASS: mdgriffith/elm-codegen, joeybright/json-decode-map-gen,
+  dillonkearns/elm-graphql, billstclair/elm-websocket-client.
+  Punie/elm-parser-extras fixed for its symptom, blocked on new D72 (let-level type
+  annotations are dropped). Tier 0: 280 checks; canary 14/14 (54.0s at -j4).

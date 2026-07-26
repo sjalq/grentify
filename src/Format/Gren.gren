@@ -1,4 +1,4 @@
-module Format.Gren exposing (formatPackage)
+module Format.Gren exposing (formatPackage, significantTokens)
 
 {-| Run gilramir/gren-format on a generated package directory.
 
@@ -9,10 +9,23 @@ cwd so it discovers `gren.json` and walks every source directory.
 After formatting, a small Node post-pass collapses multi-line pure-field record
 patterns back to single-line form. Gren accepts multi-line record *expressions*
 but rejects multi-line pure-field record *patterns* (`{ a\\n, b\\n }`).
+
+**Law (formatting is layout only).** A pretty-printer's whole licence over a
+file is whitespace, blank lines and redundant parentheses; `significantTokens`
+is exactly that licence written down. The host holds the pre-format text of
+every module exactly, so a file whose significant tokens the tool chain changed
+is restored from ours rather than shipped. D70: the vendored formatter matches
+the `as` keyword without a word boundary and rewrote `infixOperator fn opParser
+assoc` into `infixOperator fn (opParser as soc)`, deleting a binder and leaving
+a module that cannot compile. Unformatted-but-correct is already the standing
+preference here (see the `Task.onError` below); this extends it from "the tool
+failed" to "the tool lied".
 -}
 
+import Array exposing (Array)
 import ChildProcess
 import Dict
+import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Node
 import Port.Error as PortError exposing (Error)
@@ -23,13 +36,31 @@ import Task exposing (Task)
 
 formatPackage
     : Node.Platform
+    -> FileSystem.Permission
     -> ChildProcess.Permission
     ->
         { packageDirectory : Path
         , formatExecutable : String
         }
     -> Task Error {}
-formatPackage platform permission options =
+formatPackage platform fileSystem permission options =
+    readSources fileSystem options.packageDirectory
+        |> Task.andThen
+            (\before ->
+                runFormatter platform permission options
+                    |> Task.andThen (\_ -> restoreRewritten fileSystem before)
+            )
+
+
+runFormatter
+    : Node.Platform
+    -> ChildProcess.Permission
+    ->
+        { packageDirectory : Path
+        , formatExecutable : String
+        }
+    -> Task Error {}
+runFormatter platform permission options =
     let
         cwd =
             System.File.pathToString platform options.packageDirectory
@@ -73,6 +104,140 @@ formatPackage platform permission options =
                     |> Task.map (\_ -> {})
                     |> Task.onError (\_ -> Task.succeed {})
             )
+
+
+{-| Every `.gren` file under the package with the text we wrote. I/O failures
+yield an empty snapshot: the guard is a safety net over an optional tool, never
+a reason to fail a port.
+-}
+readSources :
+    FileSystem.Permission
+    -> Path
+    -> Task Error (Array { path : Path, text : String })
+readSources permission packageDirectory =
+    System.File.listFilesRecursively permission packageDirectory
+        |> Task.map (Array.keepIf isGrenSource)
+        |> Task.andThen
+            (\paths ->
+                Array.foldl
+                    (\path pending ->
+                        pending
+                            |> Task.andThen
+                                (\found ->
+                                    System.File.readText permission path
+                                        |> Task.map
+                                            (\text ->
+                                                Array.pushLast
+                                                    { path = path, text = text }
+                                                    found
+                                            )
+                                        |> Task.onError (\_ -> Task.succeed found)
+                                )
+                    )
+                    (Task.succeed [])
+                    paths
+            )
+        |> Task.onError (\_ -> Task.succeed [])
+
+
+{-| Put back every file whose significant tokens the tool chain changed.
+-}
+restoreRewritten :
+    FileSystem.Permission
+    -> Array { path : Path, text : String }
+    -> Task Error {}
+restoreRewritten permission before =
+    Array.foldl
+        (\entry pending ->
+            pending
+                |> Task.andThen
+                    (\_ ->
+                        System.File.readText permission entry.path
+                            |> Task.andThen
+                                (\after ->
+                                    if
+                                        significantTokens after
+                                            == significantTokens entry.text
+                                    then
+                                        Task.succeed {}
+
+                                    else
+                                        System.File.writeText permission
+                                            entry.path
+                                            entry.text
+                                            |> Task.map (\_ -> {})
+                                )
+                            |> Task.onError (\_ -> Task.succeed {})
+                    )
+        )
+        (Task.succeed {})
+        before
+
+
+isGrenSource : Path -> Bool
+isGrenSource path =
+    String.endsWith ".gren" (Path.toPosixString path)
+
+
+{-| The formatter's licence, written down: whitespace, blank lines and
+parentheses. Everything else — identifiers, keywords, literals, commas,
+operators, braces, brackets — must survive formatting unchanged, so the token
+string is a total order-preserving fingerprint of a file's meaning under that
+licence. Parentheses are dropped because a pretty-printer legitimately removes
+redundant grouping (`Composite ({ … })` → `Composite { … }`); nothing else it
+does to a `.gren` file is legitimate.
+-}
+significantTokens : String -> String
+significantTokens source =
+    String.foldl collectToken { tokens = [], current = "" } source
+        |> flushToken
+        |> .tokens
+        |> String.join " "
+
+
+type alias TokenState =
+    { tokens : Array String
+    , current : String
+    }
+
+
+collectToken : Char -> TokenState -> TokenState
+collectToken char state =
+    if isWordChar char then
+        { state | current = state.current ++ String.fromChar char }
+
+    else if char == '(' || char == ')' || isLayout char then
+        flushToken state
+
+    else
+        let
+            flushed =
+                flushToken state
+        in
+        { flushed
+            | tokens = Array.pushLast (String.fromChar char) flushed.tokens
+        }
+
+
+flushToken : TokenState -> TokenState
+flushToken state =
+    if String.isEmpty state.current then
+        state
+
+    else
+        { tokens = Array.pushLast state.current state.tokens
+        , current = ""
+        }
+
+
+isWordChar : Char -> Bool
+isWordChar char =
+    Char.isAlphaNum char || char == '_' || char == '\''
+
+
+isLayout : Char -> Bool
+isLayout char =
+    char == ' ' || char == '\t' || char == '\n' || char == '\r'
 
 
 {-| Resolve the collapse helper next to the vendored format app.

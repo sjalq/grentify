@@ -243,6 +243,7 @@ emit options mappingFingerprint manifest targetName builtManifest transformed ex
 
                                 else
                                     Format.formatPackage options.platform
+                                        options.fileSystem
                                         options.childProcess
                                         { packageDirectory = staging
                                         , formatExecutable = options.formatExecutable

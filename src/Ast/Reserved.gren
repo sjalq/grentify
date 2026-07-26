@@ -19,9 +19,16 @@ So references with a resolved module name (both `A.when` and unqualified
 `when` imported from `A`, which the extractor resolves to `A`) and import
 `exposing` lists are rewritten from the package-wide export map — the
 *defining* module's decision — not the local occupancy map.
+
+**Binders and their references move together.** Every name the occupancy walk
+counts as taken (top-level decls, arguments, case/lambda patterns, **and let
+bindings**) must be rewritten at its binding site too, or the escape lands on
+the uses alone and the module stops compiling (`I cannot find a `alias_`
+variable` — D70).
 -}
 
 import Array exposing ( Array )
+import Ast.Ref as Ref
 import Ast.Types exposing
     ( Declaration(..)
     , Exposing(..)
@@ -76,9 +83,18 @@ apply packageExports file =
 applyWith : Dict String String -> Dict String String -> File -> File
 applyWith packageExports renames file =
     let
-
+        -- `Ast.NameSub.qualifyRef` already replaced each ref's home module with
+        -- the qualifier the file will print it under, so by the time this pass
+        -- runs `Elm.Annotation.alias` reads as `Type.alias` under
+        -- `import Elm.Annotation as Type` and the package key misses. Register
+        -- the alias keys with the host's one scheme for exactly this
+        -- (`Ast.Ref.addImportAliasKeys`) instead of a second lookup path. D70.
         ctx =
-            { package = packageExports, local = renames }
+            { package =
+                  Ref.addImportAliasKeys file.imports packageExports
+                      packageExports
+            , local = renames
+            }
     in
     { file
         | moduleDefinition = rewriteModuleDef renames file.moduleDefinition
@@ -740,6 +756,18 @@ rewriteExpr ctx expr =
                             { name = rewriteField field.name
                             , value = rewriteExpr ctx field.value
                             }) fields
+                }
+
+        -- `Walk.mapLetDecl` carries `LetFunction.name` through untouched, so the
+        -- generic child walk would escape every REFERENCE to a let-bound
+        -- `alias`/`when` while leaving the BINDER spelled the Elm way. Let
+        -- bindings are collected as occupied names (`collectLetDeclBinders`), so
+        -- the rename is decided for them; `rewriteLetDecl` is the only walker
+        -- that also applies it to the binder.
+        ExprLet { declarations = declarations, expression = body } ->
+            ExprLet
+                { declarations = Array.map (rewriteLetDecl ctx) declarations
+                , expression = rewriteExpr ctx body
                 }
 
         _ ->

@@ -1,9 +1,11 @@
 module Port.PortedCache exposing
     ( Coordinate
+    , Exports
     , Key
     , Pending
     , canonicalInput
     , coordinateLabel
+    , decodeExports
     , digest12
     , digestFor
     , loadExports
@@ -73,7 +75,19 @@ type alias Pending =
     , digest : String
     , -- D57: the constructor facts to bank alongside the tree, so a future hit
       -- is self-sufficient and never has to consult the extract cache.
-      exports : { ctorArities : Dict String Int, soleCtors : Dict String {} }
+      -- D70 added `recordAliases` to the same banked set.
+      exports : Exports
+    }
+
+
+{-| The cross-package facts an entry banks for its dependents. Keys are
+`"Module.Name"` after name substitution.
+-}
+type alias Exports =
+    { ctorArities : Dict String Int
+    , soleCtors : Dict String {}
+    , recordAliases : Dict String (Array String)
+    , reservedExports : Dict String String
     }
 
 
@@ -342,39 +356,51 @@ loadPlatform permission entry expectedDigest =
 
 
 {-| D57: read the constructor facts an entry stored for itself. `Nothing` when
-the entry predates this field, in which case the caller falls back to the
-extract cache exactly as before.
+the entry predates ANY field of this set, in which case the caller falls back to
+the extract cache exactly as before. The decoder requires every field on
+purpose: an entry written before D70 knows nothing about record aliases, and
+answering `Just` with an empty map would look self-sufficient while hiding the
+defect it was written under.
 -}
 loadExports :
     FileSystem.Permission
     -> Path
-    -> Task x (Maybe { ctorArities : Dict String Int, soleCtors : Dict String {} })
+    -> Task x (Maybe Exports)
 loadExports permission entry =
     System.File.readText permission
         (Path.join [ entry, Path.fromPosixString "manifest.json" ])
-        |> Task.map
-            (\text ->
-                when Decode.decodeString exportsDecoder text is
-                    Ok exports ->
-                        Just exports
-
-                    Err _ ->
-                        Nothing
-            )
+        |> Task.map decodeExports
         |> Task.onError (\_ -> Task.succeed Nothing)
 
 
-exportsDecoder : Decode.Decoder { ctorArities : Dict String Int, soleCtors : Dict String {} }
+{-| The pure half of `loadExports`: manifest text → banked facts, or `Nothing`
+when the entry cannot supply the full set.
+-}
+decodeExports : String -> Maybe Exports
+decodeExports text =
+    when Decode.decodeString exportsDecoder text is
+        Ok exports ->
+            Just exports
+
+        Err _ ->
+            Nothing
+
+
+exportsDecoder : Decode.Decoder Exports
 exportsDecoder =
-    Decode.map2
-        (\arities soles ->
+    Decode.map4
+        (\arities soles aliases reserved ->
             { ctorArities = arities
             , soleCtors =
                 Array.foldl (\name acc -> Dict.set name {} acc) Dict.empty soles
+            , recordAliases = aliases
+            , reservedExports = reserved
             }
         )
         (Decode.field "ctorArities" (Decode.dict Decode.int))
         (Decode.field "soleCtors" (Decode.array Decode.string))
+        (Decode.field "recordAliases" (Decode.dict (Decode.array Decode.string)))
+        (Decode.field "reservedExports" (Decode.dict Decode.string))
 
 
 {-| Persist a verified package tree under the content-addressed entry path.
@@ -393,7 +419,7 @@ store :
     -> String
     -> String
     -> String
-    -> { ctorArities : Dict String Int, soleCtors : Dict String {} }
+    -> Exports
     -> Task x {}
 store platform childProcess permission entry sourcePackageDir toolVersion digest platformName exports =
     freshUuid
@@ -441,6 +467,36 @@ store platform childProcess permission entry sourcePackageDir toolVersion digest
                                     , { key = "soleCtors"
                                       , value =
                                             Encode.array Encode.string (Dict.keys exports.soleCtors)
+                                      }
+                                    , { key = "recordAliases"
+                                      , value =
+                                            Encode.object
+                                                (Dict.foldl
+                                                    (\name fields acc ->
+                                                        Array.pushLast
+                                                            { key = name
+                                                            , value = Encode.array Encode.string fields
+                                                            }
+                                                            acc
+                                                    )
+                                                    []
+                                                    exports.recordAliases
+                                                )
+                                      }
+                                    , { key = "reservedExports"
+                                      , value =
+                                            Encode.object
+                                                (Dict.foldl
+                                                    (\name escaped acc ->
+                                                        Array.pushLast
+                                                            { key = name
+                                                            , value = Encode.string escaped
+                                                            }
+                                                            acc
+                                                    )
+                                                    []
+                                                    exports.reservedExports
+                                                )
                                       }
                                     ]
                                     |> Encode.encode 0

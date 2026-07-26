@@ -588,6 +588,11 @@ encodeLetDeclaration lookup (Node _ declaration) =
             Encode.object
                 [ ( "kind", Encode.string "function" )
                 , ( "name", Encode.string (Node.value impl.name) )
+                , ( "signature"
+                  , function.signature
+                        |> Maybe.map (Node.value >> encodeSignature lookup)
+                        |> Maybe.withDefault Encode.null
+                  )
                 , ( "arguments", Encode.list (encodePattern lookup) impl.arguments )
                 , ( "expression", encodeExpression lookup impl.expression )
                 ]

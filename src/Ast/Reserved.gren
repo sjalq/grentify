@@ -25,6 +25,11 @@ counts as taken (top-level decls, arguments, case/lambda patterns, **and let
 bindings**) must be rewritten at its binding site too, or the escape lands on
 the uses alone and the module stops compiling (`I cannot find a `alias_`
 variable` — D70).
+
+**Law (let signatures, D72):** `rewriteLetDecl` rewrites a let binding's
+`signature` with the same `rewriteSignature` used on top-level functions
+(binder name + type refs). Occupancy also collects type names from let
+annotations so reserved escapes stay consistent with the printed source.
 -}
 
 import Array exposing ( Array )
@@ -493,8 +498,19 @@ collectLetDecl : LetDecl -> Dict String {} -> Dict String {}
 collectLetDecl declaration acc =
     when declaration is
         LetFunction fn ->
-            occupy fn.name acc
-                |> (\a -> Array.foldl collectPattern a fn.arguments)
+            let
+                withName =
+                    occupy fn.name acc
+
+                withSig =
+                    when fn.signature is
+                        Just signature ->
+                            collectType signature.typeAnnotation withName
+
+                        Nothing ->
+                            withName
+            in
+            Array.foldl collectPattern withSig fn.arguments
                 |> collectExpr fn.expression
 
         LetDestructure { pattern = pattern, expression = expression } ->
@@ -832,6 +848,9 @@ rewriteLetDecl ctx declaration =
             LetFunction
                 { fn
                     | name = rewriteWith ctx.local fn.name
+                    -- D72: rename the annotation's name + type refs the same
+                    -- way as top-level DeclFunction.signature.
+                    , signature = Maybe.map (rewriteSignature ctx) fn.signature
                     , arguments =
                           Array.map (rewritePattern ctx) fn.arguments
                     , expression = rewriteExpr ctx fn.expression

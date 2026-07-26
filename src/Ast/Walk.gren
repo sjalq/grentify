@@ -4,6 +4,7 @@ module Ast.Walk exposing
     , mapExprChildren
     , mapExprChildrenWithPatterns
     , mapLetDecl
+    , mapLetSignatures
     , mapPatternChildren
     )
 
@@ -16,6 +17,10 @@ Law modules supply *node* rewrites; this module owns the recursive skeleton so
 - `mapExprChildrenWithPatterns` — also rewrite patterns in lambda / case / let
 - `mapPatternChildren` — structural pattern walk
 - `foldExprChildren` — accumulate over child expressions (collectors / scans)
+- `mapLetSignatures` — rewrite every let-level type signature (D72). Type
+  passes that rewrite `DeclFunction.signature` must compose this with the
+  same `Signature` rewrite; a signature printed without name-substitution
+  would emit Elm type names into Gren source.
 -}
 
 import Array exposing ( Array )
@@ -25,7 +30,9 @@ import Ast.Types exposing
     , Expr(..)
     , LetDecl(..)
     , Pattern(..)
+    , Signature
     )
+import Maybe
 
 -- MAP EXPR -------------------------------------------------------------------
 
@@ -172,6 +179,40 @@ mapLetDecl f mapPat declaration =
             LetDestructure
                 { pattern = mapPat pattern
                 , expression = f expression
+                }
+
+
+{-| Apply `f` to every `LetFunction.signature` nested in an expression tree.
+Does not touch expression/pattern structure. Compose after (or before) any
+pass that rewrites top-level `DeclFunction.signature`, with the same `f`.
+-}
+mapLetSignatures : (Signature -> Signature) -> Expr -> Expr
+mapLetSignatures f expr =
+    when expr is
+        ExprLet { declarations = declarations, expression = body } ->
+            ExprLet
+                { declarations = Array.map (mapLetDeclSignature f) declarations
+                , expression = mapLetSignatures f body
+                }
+
+        _ ->
+            mapExprChildren (mapLetSignatures f) expr
+
+
+mapLetDeclSignature : (Signature -> Signature) -> LetDecl -> LetDecl
+mapLetDeclSignature f declaration =
+    when declaration is
+        LetFunction fn ->
+            LetFunction
+                { fn
+                    | signature = Maybe.map f fn.signature
+                    , expression = mapLetSignatures f fn.expression
+                }
+
+        LetDestructure { pattern = pattern, expression = expression } ->
+            LetDestructure
+                { pattern = pattern
+                , expression = mapLetSignatures f expression
                 }
 
 

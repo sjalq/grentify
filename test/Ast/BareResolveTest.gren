@@ -87,7 +87,7 @@ d23Shape =
                 { arguments = [ PatVar "list" ]
                 , expression =
                     ExprLet
-                        { declarations = [ LetFunction { name = "kept", arguments = [], expression = bare "list" } ]
+                        { declarations = [ LetFunction { name = "kept", signature = Nothing, arguments = [], expression = bare "list" } ]
                         , expression = bare "kept"
                         }
                 }
@@ -160,7 +160,7 @@ keepsLambdaBodyLocal =
                             when lambda.expression is
                                 ExprLet letBlock ->
                                     Array.first letBlock.declarations
-                                        == Just (LetFunction { name = "kept", arguments = [], expression = bare "list" })
+                                        == Just (LetFunction { name = "kept", signature = Nothing, arguments = [], expression = bare "list" })
 
                                 _ ->
                                     False

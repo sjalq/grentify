@@ -21,10 +21,16 @@ guesses (a wrong rewrite is worse than a missing one):
   - a `::` cons whose head is a proven tuple (D81: flate's heap rebuild)
   - a variable whose type is known from the enclosing declaration's
     signature (arguments unified positionally with the type spine)
+  - a let-bound function's signature, unified the same way for its body
+    (D72: same evidence law as top-level, nested)
   - a `sortBy`/`minimum`/`maximum` projection lambda whose body is a
     tuple literal
   - a package-indexed function whose signature returns a list of tuples
     (frequencies-class, including through pipes)
+
+This pass does not rewrite type annotations (no Elm/Gren type-name risk);
+it only *reads* signatures for evidence. Let signatures are therefore
+carried for env seeding, not transformed.
 
 Rewrites:
 
@@ -54,11 +60,13 @@ import Ast.Types exposing
     ( Declaration(..)
     , Expr(..)
     , File
+    , LetDecl(..)
     , Pattern(..)
     , TypeAnn(..)
     )
 import Ast.Walk as Walk
 import Dict exposing ( Dict )
+import Maybe exposing ( Maybe(..) )
 
 
 {-| Shape of a tuple element: opaque comparable, or a nested tuple. -}
@@ -338,11 +346,53 @@ projectionShape env expr =
 
 rewrite : Env -> Expr -> Expr
 rewrite env expr =
-    let
-        rewritten =
-            rewriteNode env expr
-    in
-    Walk.mapExprChildren (rewrite env) rewritten
+    when expr is
+        -- D72: a let function's signature seeds the same env as a top-level
+        -- DeclFunction for that binding's body; sibling binds share the
+        -- outer env (Elm let is mutually recursive for values).
+        ExprLet { declarations = declarations, expression = body } ->
+            ExprLet
+                { declarations = Array.map (rewriteLetDecl env) declarations
+                , expression = rewrite env body
+                }
+
+        _ ->
+            let
+                rewritten =
+                    rewriteNode env expr
+            in
+            Walk.mapExprChildren (rewrite env) rewritten
+
+
+rewriteLetDecl : Env -> LetDecl -> LetDecl
+rewriteLetDecl env declaration =
+    when declaration is
+        LetFunction fn ->
+            let
+                bodyEnv =
+                    mergeEnv env
+                        (envFromSignature env.returns fn.signature fn.arguments)
+            in
+            LetFunction
+                { fn
+                    | arguments = fn.arguments
+                    , expression = rewrite bodyEnv fn.expression
+                }
+
+        LetDestructure { pattern = pattern, expression = expression } ->
+            LetDestructure
+                { pattern = pattern
+                , expression = rewrite env expression
+                }
+
+
+{-| Overlay inner env bindings on outer; returns map is shared. -}
+mergeEnv : Env -> Env -> Env
+mergeEnv outer inner =
+    { tupleVars = Dict.foldl Dict.set outer.tupleVars inner.tupleVars
+    , listVars = Dict.foldl Dict.set outer.listVars inner.listVars
+    , returns = outer.returns
+    }
 
 
 rewriteNode : Env -> Expr -> Expr

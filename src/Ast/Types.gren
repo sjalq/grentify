@@ -187,6 +187,13 @@ type alias Field =
 type LetDecl
     = LetFunction
         { name : String
+        , -- D72: Elm let-bindings may carry type annotations
+          -- (`let rassocOp : Parser (a -> a -> a)`). Dropping them loses
+          -- rigidity Gren needs; carrying them without rewriting through
+          -- every type pass would emit Elm type names into Gren source.
+          -- Signatures flow through NameSub / Reserved / KeyEncode (and
+          -- Walk.mapLetSignatures) or not at all — never half.
+          signature : Maybe Signature
         , arguments : Array Pattern
         , expression : Expr
         }

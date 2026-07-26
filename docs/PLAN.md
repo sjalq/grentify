@@ -164,6 +164,29 @@ by being written through this law; nothing edits the ledger by hand.
 
 ## 6. Known defects register (2026-07-17 audit; independently verified)
 
+- **D82 let-level type annotations carried end-to-end** (fixes D72,
+  2026-07-26, host-side): `Ast.Types.LetFunction` gains
+  `signature : Maybe Signature`. Extraction did **not** already emit it
+  (only top-level `FunctionDeclaration` did); `review/.../AstEncode.elm`
+  now mirrors that encode, Decode accepts null/missing for old cache,
+  Print emits `name : Type` at the let-column (join only indents the
+  first line of a multi-line decl). Type-rewriting coverage:
+  `Walk.mapLetSignatures` is the recursive skeleton; NameSub
+  (catalog / bare remap / import qualify), Reserved
+  (`rewriteLetDecl` + occupancy collect), and KeyEncode (`rewriteAnn`)
+  all apply the same rewrite they use on `DeclFunction.signature`.
+  TupleCompare does not rewrite TypeAnn (reads only) and seeds env
+  from let signatures the same way as top-level. RecordAlias never
+  rewrote TypeAnn. Completeness criterion: every pass that rewrites a
+  top-level function signature rewrites let-level ones with the same
+  function; half coverage would emit Elm type names into Gren source.
+  Properties: Print (present / absent), NameSub List→Array on let sig,
+  KeyEncode Dict-tuple key on let sig, Reserved binder+sig name escape.
+  RECEIPTS: `Punie/elm-parser-extras@1.0.0` port+gren-verify; canary
+  14/14; `jfmengels/elm-review`, `rtfeldman/elm-css`,
+  `elm-community/list-extra` non-regression. Tier 0: 344 checks (+5).
+  Note: editing `review/` invalidates the extract cache; packages
+  re-extract once on next port.
 - **D81 non-sole constructor let-destructure emitted unguarded (bare-name
   sole-ctor collision)** (found by dillonkearns/elm-markdown UNSAFE PATTERN
   @ Markdown.Parser, and dtwrks/elm-book via the same dep; FIXED 2026-07-26).
@@ -1504,19 +1527,26 @@ Coverage and pipeline:
   STILL OPEN upstream: the formatter itself. Any module hitting this ships
   unformatted.
 - **D72 let-level type annotations are dropped by the AST path**
-  (found behind D70 2026-07-26, OPEN, host-side): `Ast.Types.LetFunction`
-  has no `signature` field, so `let rassocOp : Parser (a -> a -> a)` is
-  extracted-or-decoded away and the port emits a bare `rassocOp =`. In
-  Punie/elm-parser-extras this loses the annotations that tie
-  `makeParser`'s type variables to the enclosing function's, and
-  `Array.foldl makeParser simpleExpr operators` fails with the rigid-
-  variable shape `Parser a` vs `Parser a`. Confirmed independent of D70c:
-  the same error reproduces with every qualifier reverted, and `makeParser`
-  alone type-checks (replacing only the caller's body compiles clean).
-  Carrying the signature is not a small change — every pass that rewrites
-  types (`NameSub`, `Reserved`, `KeyEncode`, …) must rewrite it too, and a
-  signature printed but NOT name-substituted would emit Elm type names into
-  Gren source, which is worse than dropping it. Needs its own task.
+  (found behind D70 2026-07-26, FIXED 2026-07-26 as D82, host-side):
+  `Ast.Types.LetFunction` had no `signature` field, so
+  `let rassocOp : Parser (a -> a -> a)` was extracted-or-decoded away and
+  the port emitted a bare `rassocOp =`. In Punie/elm-parser-extras this
+  lost the annotations that tie `makeParser`'s type variables to the
+  enclosing function's, and `Array.foldl makeParser simpleExpr operators`
+  failed with the rigid-variable shape `Parser a` vs `Parser a`. Confirmed
+  independent of D70c: the same error reproduced with every qualifier
+  reverted, and `makeParser` alone type-checked. Fix: carry
+  `Maybe Signature` end-to-end (extractor already had top-level but not
+  let-level; AstEncode + Decode + Types + Print), and rewrite every
+  let-level signature through the same type passes as `DeclFunction`
+  (`NameSub` catalog/bare/qualify via `Walk.mapLetSignatures`,
+  `Reserved.rewriteLetDecl`, `KeyEncode.rewriteAnn`, TupleCompare env
+  seed). Coverage law: a signature that some passes rewrite and others
+  do not would emit mixed Elm/Gren type names — worse than dropping.
+  Tier 0 +5 (print, NameSub List→Array, KeyEncode Dict key, Reserved
+  binder+sig escape, absent-sig guard). Punie/elm-parser-extras PASS;
+  canary 14/14; non-regression elm-review, elm-css, list-extra PASS.
+  Editing `review/` invalidates extract cache (re-extract once).
 - **D49 ctor-embedded list merge misfires when the list column is not
   argument 0** (found banking elm-css 2026-07-23: Css.Structure failed
   gren-verify with transform-introduced SHADOWING — `Selector sequence

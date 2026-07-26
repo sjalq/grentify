@@ -251,6 +251,7 @@ structureChecks =
             { declarations =
                 [ LetFunction
                     { name = "r"
+                    , signature = Nothing
                     , arguments = []
                     , expression =
                         ExprRecord
@@ -398,6 +399,7 @@ controlFlowChecks =
             { declarations =
                 [ LetFunction
                     { name = "pair"
+                    , signature = Nothing
                     , arguments = []
                     , expression = ExprTuple [ int 1, int 2 ]
                     }

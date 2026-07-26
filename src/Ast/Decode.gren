@@ -591,13 +591,19 @@ letDeclDecoder =
             (\kind ->
                 when kind is
                     "function" ->
-                        Decode.map3
-                            (\name arguments expression ->
+                        Decode.map4
+                            (\name signature arguments expression ->
                                 LetFunction
                                     { name = name
+                                    , signature = signature
                                     , arguments = arguments
                                     , expression = expression
                                     }) (Decode.field "name" Decode.string)
+                            -- D72: older extract cache entries omit the field;
+                            -- null / missing both mean "no annotation".
+                            (optional "signature"
+                                (Decode.nullable signatureDecoder)
+                                Nothing)
                             (Decode.field "arguments"
                                 (Decode.array patternDecoder))
                             (Decode.field "expression"

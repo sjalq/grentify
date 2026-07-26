@@ -1272,9 +1272,9 @@ evidence base for the next fix campaign.
 
 ## STATUS
 
-- 2026-07-26 (end of session) CORE SET **187/232 = 80.6%**, up from 179
+- 2026-07-26 (end of session) CORE SET **189/232 = 81.5%**, up from 179
   (77.2%), zero regressions, 12.7 min wall at -j8, median 4.3s/package.
-  Eight packages newly passing, six of them former timeouts and one
+  Ten packages newly passing, six of them former timeouts and one
   (`ktonon/elm-word`) that had never completed a port in the project's
   history. Latest run banked at `test/ecosystem/core-run.jsonl`.
   Landed today: D50 (double process), D51 (add validation scope + 67 refusals
@@ -1283,11 +1283,12 @@ evidence base for the next fix campaign.
   **D57 (ported-cache entries now carry their own constructor facts — the
   cross-cache silent-empty bug, caught regressing elm-review twice)**,
   D58/D58b/D58c (String.toArray quadratic, token accumulator, char classes),
-  D59 (double lowering), D60 (fallthrough inline budget),
+  D59 (double lowering), D60 (fallthrough inline budget), D64 (duplicate
+  exposed-module entry),
   **D61 (Reserved.collectExpr double-walk: 2^depth on nested cases — the one
   that unblocked elm-word)**, D62 (symlink archives), D63 (host-side dependency
   constructor resolution + elm/parser Token).
-  NEXT, in fan-in order — all now named, none mysterious:
+  NEXT, in fan-in order — 43 failures in 20 causes, all named, none mysterious:
   12 packages across two clusters are ONE class (tuple-keyed Set/Dict through
   an unannotated helper; needs a KeyEncode R3 law with value-flow one level
   into local helpers, plus decode on the read side — the D24b residual);

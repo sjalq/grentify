@@ -1,5 +1,6 @@
 module Ast.KeyEncode.Evidence exposing
-    ( Evidence
+    ( AliasInfo
+    , Evidence
     , Kind(..)
     , Slot
     , collect
@@ -7,18 +8,24 @@ module Ast.KeyEncode.Evidence exposing
     , inlineSlot
     , isEmpty
     , kindOfRef
+    , resolvedKeySlot
     , returnedAliasName
     )
 
-{-| D24b/D65 evidence: what the PACKAGE proves about tuple keys, decided
-once per package and before a single node is rewritten.
+{-| D24b/D65/D81 evidence: what the PACKAGE proves about tuple keys,
+decided once per package and before a single node is rewritten.
 
-Three indexes, all keyed by BARE name and all poisoned on ambiguity — a
+Four indexes, all keyed by BARE name and all poisoned on ambiguity — a
 name that means two different things package-wide proves nothing and is
 dropped rather than guessed at (`poison` / `unpoisoned`):
 
   * `aliases` — R1: tuple aliases whose every package occurrence is a
-    Dict/Set key or a literal-tail return.
+    Dict/Set key or a literal-tail return (body rewrite + constructions).
+  * `tupleAliases` — D81: ALL package type aliases whose body is an
+    encodable tuple (including those with non-key uses). Used to resolve
+    `Dict Edge v` / `Set Edge` where Edge is NOT R1-eligible: the alias
+    body is left alone (List Edge still needs the tuple form) but the
+    Dict/Set KEY SLOT rewrites like an inline tuple.
   * `keyFields` — R2: record-alias fields typed as a tuple-keyed
     container.
   * `tupleReturns` / `containerReturns` — R3: functions whose signature
@@ -64,6 +71,8 @@ type alias AliasInfo =
 type alias Evidence =
     { -- R1: eligible tuple aliases by bare name
       aliases : Dict String AliasInfo
+    , -- D81: every package tuple-of-encodable alias (R1 superset)
+      tupleAliases : Dict String AliasInfo
     , -- R2: record-alias field name -> proven container slot
       keyFields : Dict String Slot
     , -- R3: package function -> the encodable tuple its signature returns
@@ -76,6 +85,7 @@ type alias Evidence =
 empty : Evidence
 empty =
     { aliases = Dict.empty
+    , tupleAliases = Dict.empty
     , keyFields = Dict.empty
     , tupleReturns = Dict.empty
     , containerReturns = Dict.empty
@@ -88,6 +98,7 @@ A declaration can still carry its own inline container evidence.
 isEmpty : Evidence -> Bool
 isEmpty evidence =
     Dict.isEmpty evidence.aliases
+        && Dict.isEmpty evidence.tupleAliases
         && Dict.isEmpty evidence.keyFields
         && Dict.isEmpty evidence.tupleReturns
         && Dict.isEmpty evidence.containerReturns
@@ -127,6 +138,42 @@ inlineSlot annotation =
 
         _ ->
             Nothing
+
+
+{-| D81: key slot that is either an inline encodable tuple OR a package
+type alias of one that is NOT R1-eligible (`Dict Edge v` where
+`type alias Edge = ( NodeId, NodeId )` and Edge has non-key uses).
+R1-eligible aliases are left alone at the Dict/Set site: the alias body
+itself becomes the key type, so `Dict RangeLike v` stays and follows
+through. Bare-name lookup (already poisoned on ambiguity).
+-}
+resolvedKeySlot :
+    Dict String AliasInfo
+    -> Dict String AliasInfo
+    -> TypeAnn
+    -> Maybe Slot
+resolvedKeySlot tupleAliases r1Eligible annotation =
+    when inlineSlot annotation is
+        Just slot ->
+            Just slot
+
+        Nothing ->
+            when keySlot annotation is
+                Just { kind = kind, annotation = TypeTyped { ref = ref, arguments = [] } } ->
+                    if Dict.member ref.name r1Eligible then
+                        Nothing
+
+                    else
+                        Dict.get ref.name tupleAliases
+                            |> Maybe.map
+                                (\info ->
+                                    { kind = kind
+                                    , shapes = info.shapes
+                                    }
+                                )
+
+                _ ->
+                    Nothing
 
 
 isDictRef : NamedRef -> Bool
@@ -210,9 +257,11 @@ collect files =
                 candidates
     in
     { aliases = eligible
-    , keyFields = collectKeyFields files
+    , tupleAliases = candidates
+    , keyFields = collectKeyFields candidates eligible files
     , tupleReturns = collectSignatureReturns tupleReturnShapes files
-    , containerReturns = collectSignatureReturns containerReturnSlot files
+    , containerReturns =
+        collectSignatureReturns (containerReturnSlot candidates eligible) files
     }
 
 
@@ -680,11 +729,15 @@ scanDestructures returners expr acc =
 
 
 {-| R2 field evidence: record-alias fields typed `Dict ( enc, … ) v` /
-`Set ( enc, … )`. Field-name collisions with differing slots drop the
-field name.
+`Set ( enc, … )` or `Dict Alias v` / `Set Alias` (D81). Field-name
+collisions with differing slots drop the field name.
 -}
-collectKeyFields : Array File -> Dict String Slot
-collectKeyFields files =
+collectKeyFields :
+    Dict String AliasInfo
+    -> Dict String AliasInfo
+    -> Array File
+    -> Dict String Slot
+collectKeyFields tupleAliases r1Eligible files =
     Array.foldl
         (\file acc ->
             Array.foldl
@@ -693,7 +746,11 @@ collectKeyFields files =
                         DeclAlias { typeAnnotation = TypeRecord fields } ->
                             Array.foldl
                                 (\field deeper ->
-                                    when inlineSlot field.typeAnnotation is
+                                    when
+                                        resolvedKeySlot tupleAliases
+                                            r1Eligible
+                                            field.typeAnnotation
+                                    is
                                         Just slot ->
                                             poison field.name slot deeper
 
@@ -787,6 +844,10 @@ tupleReturnShapes annotation =
             Nothing
 
 
-containerReturnSlot : TypeAnn -> Maybe Slot
-containerReturnSlot annotation =
-    inlineSlot annotation
+containerReturnSlot :
+    Dict String AliasInfo
+    -> Dict String AliasInfo
+    -> TypeAnn
+    -> Maybe Slot
+containerReturnSlot tupleAliases r1Eligible annotation =
+    resolvedKeySlot tupleAliases r1Eligible annotation

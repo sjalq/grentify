@@ -2,25 +2,41 @@ module Ast.TupleCompare exposing
     ( apply
     , ElemShape(..)
     , comparatorFor
+    , flippedComparator
     , listElementShape
     , returnListShape
     , shapeOfTypeAnn
     )
 
-{-| D24: Elm tuples are `comparable`; the port lowers them to records and Gren
-records are not. Any comparison-requiring call on tuple values therefore
-type-errors after the port. This pass rewrites those calls to explicit
-lexicographic comparators BEFORE NameSub, while Elm names, tuples, and
-signatures are still intact.
+{-| D24 / D81: Elm tuples are `comparable`; the port lowers them to records
+and Gren records are not. Any comparison-requiring call on tuple values
+therefore type-errors after the port. This pass rewrites those calls to
+explicit lexicographic comparators BEFORE NameSub, while Elm names,
+tuples, and signatures are still intact.
 
 Evidence law — rewrite ONLY on positive evidence of tuple-ness, never on
 guesses (a wrong rewrite is worse than a missing one):
 
   - a literal `ExprTuple` argument, or a list literal containing one
+  - a `::` cons whose head is a proven tuple (D81: flate's heap rebuild)
   - a variable whose type is known from the enclosing declaration's
     signature (arguments unified positionally with the type spine)
   - a `sortBy`/`minimum`/`maximum` projection lambda whose body is a
     tuple literal
+  - a package-indexed function whose signature returns a list of tuples
+    (frequencies-class, including through pipes)
+
+Rewrites:
+
+  - `List.sort` → `sortWith` + generated lexicographic comparator
+  - `sortBy` → `sortWith` composed with the projection
+  - `minimum`/`maximum` → head of (flipped) sortWith
+  - bare `compare` / order binops → comparator
+  - `List.sortWith` whose comparator is compare-shaped
+    (`compare`, `\a b -> compare a b`, `\a b -> compare b a`)
+    AND whose list argument is proven list-of-tuples (D81 residual:
+    source already used sortWith, so the earlier sort→sortWith law never
+    fired; flate's `List.sortWith (\a b -> compare b a) (tuple :: rest)`)
 
 Soundness of element comparison: the Elm source only compiled if every
 tuple element was itself `comparable`, so elementwise `compare` is correct
@@ -270,6 +286,10 @@ listShapeOfExpr env expr =
                 _ ->
                     Nothing
 
+        -- D81: `tuple :: rest` carries the head's shape as the list element.
+        ExprBinop { operator = "::", left = left, right = _ } ->
+            shapeOfExpr env left
+
         ExprBinop { operator = "|>", left = left, right = right } ->
             listShapeOfExpr env (pipeAsApplication right left)
 
@@ -444,7 +464,9 @@ rewriteUnaryListCall env ref parts original =
                         original
 
 
-{-| `List.sortBy f xs` / `compare a b` — two arguments. -}
+{-| `List.sortBy f xs` / `compare a b` / `List.sortWith cmp xs` — two
+list-related arguments (plus the head).
+-}
 rewriteBinaryCall : Env -> Ast.Types.NamedRef -> Array Expr -> Expr -> Expr
 rewriteBinaryCall env ref parts original =
     when { a = Array.get 1 parts, b = Array.get 2 parts } is
@@ -469,6 +491,30 @@ rewriteBinaryCall env ref parts original =
                             , second
                             ]
 
+            else if isListFn ref "sortWith" then
+                -- D81: source already used sortWith with a compare-shaped
+                -- comparator. Only fire when the LIST is proven tuple-y;
+                -- an unproven list keeps the source comparator untouched.
+                when listShapeOfExpr env second is
+                    Nothing ->
+                        original
+
+                    Just shape ->
+                        when compareShaped first is
+                            Nothing ->
+                                original
+
+                            Just flip_ ->
+                                ExprApplication
+                                    [ listVar "sortWith"
+                                    , if flip_ then
+                                        flippedComparator shape
+
+                                      else
+                                        comparatorFor shape 0
+                                    , second
+                                    ]
+
             else if isBasicsFn ref "compare" then
                 when firstShape [ shapeOfExpr env first, shapeOfExpr env second ] is
                     Nothing ->
@@ -482,6 +528,91 @@ rewriteBinaryCall env ref parts original =
 
         _ ->
             original
+
+
+{-| Positive evidence that a comparator is Elm's default `compare`, possibly
+flipped. Returns `Just True` when flipped (`compare b a`), `Just False`
+when unflipped, `Nothing` when the body does anything else (then we leave
+the site alone — a custom comparator is not ours to rewrite).
+-}
+compareShaped : Expr -> Maybe Bool
+compareShaped expr =
+    when expr is
+        ExprVar ref ->
+            if isBasicsFn ref "compare" then
+                Just False
+
+            else
+                Nothing
+
+        ExprLambda { arguments = arguments, expression = body } ->
+            when binderPair arguments is
+                Just { left = leftName, right = rightName } ->
+                    when compareArgs body is
+                        Just { ref = ref, first = xName, second = yName } ->
+                            if isBasicsFn ref "compare" then
+                                if xName == leftName && yName == rightName then
+                                    Just False
+
+                                else if xName == rightName && yName == leftName then
+                                    Just True
+
+                                else
+                                    Nothing
+
+                            else
+                                Nothing
+
+                        Nothing ->
+                            Nothing
+
+                Nothing ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+binderPair : Array Pattern -> Maybe { left : String, right : String }
+binderPair arguments =
+    when Array.get 0 arguments is
+        Just (PatVar leftName) ->
+            when Array.get 1 arguments is
+                Just (PatVar rightName) ->
+                    Just { left = leftName, right = rightName }
+
+                _ ->
+                    Nothing
+
+        _ ->
+            Nothing
+
+
+compareArgs :
+    Expr
+    -> Maybe { ref : Ast.Types.NamedRef, first : String, second : String }
+compareArgs body =
+    when body is
+        ExprApplication parts ->
+            when Array.get 0 parts is
+                Just (ExprVar ref) ->
+                    when Array.get 1 parts is
+                        Just (ExprVar { moduleName = Nothing, name = xName }) ->
+                            when Array.get 2 parts is
+                                Just (ExprVar { moduleName = Nothing, name = yName }) ->
+                                    Just { ref = ref, first = xName, second = yName }
+
+                                _ ->
+                                    Nothing
+
+                        _ ->
+                            Nothing
+
+                _ ->
+                    Nothing
+
+        _ ->
+            Nothing
 
 -- COMPARATOR GENERATION -------------------------------------------------------
 

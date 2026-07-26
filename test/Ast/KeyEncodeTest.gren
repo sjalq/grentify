@@ -50,6 +50,9 @@ tests =
     , r3FoldCallbackDecoded
     , r3UncarriableOperationRefusesTheKind
     , r3NoSeedLeavesDeclarationAlone
+    , r2bAliasKeyDictAnnotationRewritten
+    , r2bAliasKeyEncodedAtCallSite
+    , r2bIneligibleAliasBodyUntouched
     , roundTripIntPair
     , roundTripMixedPair
     , roundTripNestedTriple
@@ -471,6 +474,161 @@ r2UnprovenDictUntouched =
 
         other ->
             fail "r2UnprovenDictUntouched" ("got: " ++ Debug.toString other)
+
+
+
+-- R2b / D81 ALIAS-KEY CHECKS --------------------------------------------------
+
+
+{-| goyalarchit/elm-dagre residual, reduced:
+
+    type alias NodeId = Int          -- opaque-named leaf (dep alias)
+    type alias Edge = ( NodeId, NodeId )
+    -- Edge also appears as List Edge / function args → R1 refuses
+    undoHelper : Edge -> Dict Edge (List NodeId) -> Dict Edge (List NodeId)
+    undoHelper e controlPoints =
+        Dict.get e controlPoints
+            |> (\_ -> Dict.insert ( to, from ) [] controlPoints)
+
+Dict Edge rewrites to the key type; Edge itself stays a tuple.
+-}
+nodeIdType : TypeAnn
+nodeIdType =
+    TypeTyped { ref = { moduleName = Just "Graph", name = "NodeId" }, arguments = [] }
+
+
+edgeRef : TypeAnn
+edgeRef =
+    TypeTyped { ref = { moduleName = Nothing, name = "Edge" }, arguments = [] }
+
+
+edgePair : TypeAnn
+edgePair =
+    TypeTuple [ nodeIdType, nodeIdType ]
+
+
+r2bDeclarations : Array Declaration
+r2bDeclarations =
+    [ DeclAlias
+        { name = "Edge"
+        , documentation = Nothing
+        , generics = []
+        , typeAnnotation = edgePair
+        }
+    , -- Non-key use: poisons R1 eligibility (List Edge argument).
+      DeclFunction
+        { name = "edgesOf"
+        , documentation = Nothing
+        , signature =
+            Just
+                { name = "edgesOf"
+                , typeAnnotation =
+                    TypeFunction { left = listOf edgeRef, right = intType }
+                }
+        , arguments = [ PatVar "es" ]
+        , expression = ExprInt 0
+        }
+    , DeclFunction
+        { name = "undoHelper"
+        , documentation = Nothing
+        , signature =
+            Just
+                { name = "undoHelper"
+                , typeAnnotation =
+                    TypeFunction
+                        { left = edgeRef
+                        , right =
+                            TypeFunction
+                                { left = dictOf edgeRef (listOf nodeIdType)
+                                , right = dictOf edgeRef (listOf nodeIdType)
+                                }
+                        }
+                }
+        , arguments = [ PatVar "e", PatVar "controlPoints" ]
+        , expression =
+            ExprApplication
+                [ qualified "Dict" "insert"
+                , ExprTuple [ bare "to", bare "from" ]
+                , ExprList []
+                , bare "controlPoints"
+                ]
+        }
+    ]
+
+
+r2bApplied : File
+r2bApplied =
+    applied r2bDeclarations
+
+
+{-| Dict Edge v becomes Dict (List NodeId) v — the alias key is resolved
+without rewriting Edge itself.
+-}
+r2bAliasKeyDictAnnotationRewritten : Check
+r2bAliasKeyDictAnnotationRewritten =
+    let
+        sig =
+            when declNamed "undoHelper" r2bApplied is
+                Just (DeclFunction { signature = Just s }) ->
+                    Just s.typeAnnotation
+
+                _ ->
+                    Nothing
+
+        -- Walk to the Dict in the first argument-after-Edge position.
+        dictKey =
+            when sig is
+                Just
+                    (TypeFunction
+                        { right =
+                            TypeFunction
+                                { left =
+                                    TypeTyped
+                                        { ref = { name = "Dict" }
+                                        , arguments = [ key, _ ]
+                                        }
+                                }
+                        }
+                    ) ->
+                    Just key
+
+                _ ->
+                    Nothing
+    in
+    when dictKey is
+        Just (TypeTyped { ref = { name = "List" }, arguments = [ TypeTyped { ref = { name = "NodeId" } } ] }) ->
+            ok "r2bAliasKeyDictAnnotationRewritten"
+
+        other ->
+            fail "r2bAliasKeyDictAnnotationRewritten" ("got: " ++ Debug.toString other)
+
+
+{-| Dict.insert ( to, from ) encodes the tuple key under R3 seeded by
+Dict Edge in the signature.
+-}
+r2bAliasKeyEncodedAtCallSite : Check
+r2bAliasKeyEncodedAtCallSite =
+    when bodyOf "undoHelper" r2bApplied is
+        Just (ExprApplication [ _, ExprTuple _, _, _ ]) ->
+            fail "r2bAliasKeyEncodedAtCallSite" "insert key left as a tuple literal"
+
+        Just (ExprApplication [ _, ExprList _, _, _ ]) ->
+            ok "r2bAliasKeyEncodedAtCallSite"
+
+        other ->
+            fail "r2bAliasKeyEncodedAtCallSite" ("got: " ++ Debug.toString other)
+
+
+{-| Edge's body stays a tuple (R1 refused); only Dict/Set key slots move.
+-}
+r2bIneligibleAliasBodyUntouched : Check
+r2bIneligibleAliasBodyUntouched =
+    when declNamed "Edge" r2bApplied is
+        Just (DeclAlias { typeAnnotation = TypeTuple _ }) ->
+            ok "r2bIneligibleAliasBodyUntouched"
+
+        other ->
+            fail "r2bIneligibleAliasBodyUntouched" ("got: " ++ Debug.toString other)
 
 
 

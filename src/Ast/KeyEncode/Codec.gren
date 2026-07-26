@@ -46,6 +46,7 @@ the pass runs pre-NameSub, which maps `List` -> `Array`, `List.head` ->
 import Array exposing ( Array )
 import Ast.Types exposing
     ( Expr(..)
+    , NamedRef
     , Pattern(..)
     , TypeAnn(..)
     )
@@ -57,6 +58,7 @@ type KeyShape
     | KFloat
     | KChar
     | KString
+    | KOpaque NamedRef
     | KNested (Array KeyShape)
 
 
@@ -66,6 +68,7 @@ type KeyRep
     | RepFloat
     | RepChar
     | RepString
+    | RepNamed NamedRef
 
 
 
@@ -99,7 +102,9 @@ encodableShape annotation =
                 Just KString
 
             else
-                Nothing
+                -- D81: opaque named leaf (type alias of a comparable prim,
+                -- or any 0-arg name Elm already accepted under `comparable`).
+                Just (KOpaque ref)
 
         TypeTuple elements ->
             tupleShapes elements
@@ -120,18 +125,59 @@ tupleShapes elements =
         Nothing
 
     else
-        Array.foldl
-            (\element acc ->
-                when acc is
-                    Nothing ->
-                        Nothing
+        let
+            collected =
+                Array.foldl
+                    (\element acc ->
+                        when acc is
+                            Nothing ->
+                                Nothing
 
-                    Just shapes ->
-                        encodableShape element
-                            |> Maybe.map (\shape -> Array.pushLast shape shapes)
-            )
-            (Just [])
-            elements
+                            Just shapes ->
+                                encodableShape element
+                                    |> Maybe.map (\shape -> Array.pushLast shape shapes)
+                    )
+                    (Just [])
+                    elements
+        in
+        -- Refuse shapes that would force String conversion of an opaque
+        -- leaf (no total render exists). Homogeneous opaque is fine —
+        -- repOf yields RepNamed and encode/decode are identity.
+        when collected is
+            Just shapes ->
+                if opaqueStringFallback shapes then
+                    Nothing
+
+                else
+                    Just shapes
+
+            Nothing ->
+                Nothing
+
+
+{-| True when the leaves disagree enough that repOf would pick String AND
+at least one leaf is opaque — that path cannot render the opaque leaf.
+-}
+opaqueStringFallback : Array KeyShape -> Bool
+opaqueStringFallback shapes =
+    let
+        leaves =
+            leafShapes shapes
+
+        hasOpaque =
+            Array.foldl
+                (\leaf acc ->
+                    when leaf is
+                        KOpaque _ ->
+                            True
+
+                        _ ->
+                            acc
+                )
+                False
+                leaves
+    in
+    hasOpaque && not (homogeneousOpaque leaves)
 
 
 {-| The tuple's leaves, left to right. Nesting is flattened away: the
@@ -153,33 +199,86 @@ leafShapes shapes =
         shapes
 
 
-{-| The leaves' common element type, or `String` when they disagree. -}
+{-| The leaves' common element type, or `String` when they disagree.
+Homogeneous `KOpaque` leaves keep their named type (D81 NodeId pairs).
+-}
 repOf : Array KeyShape -> KeyRep
 repOf shapes =
     let
         leaves =
             leafShapes shapes
-
-        seed =
-            Array.first leaves
-                |> Maybe.andThen leafRep
     in
-    Array.foldl
-        (\leaf acc ->
-            when { acc = acc, rep = leafRep leaf } is
-                { acc = Just found, rep = Just rep } ->
-                    if found == rep then
-                        acc
+    when sameOpaqueRef leaves is
+        Just ref ->
+            RepNamed ref
 
-                    else
-                        Nothing
+        Nothing ->
+            let
+                seed =
+                    Array.first leaves
+                        |> Maybe.andThen leafRep
+            in
+            Array.foldl
+                (\leaf acc ->
+                    when { acc = acc, rep = leafRep leaf } is
+                        { acc = Just found, rep = Just rep } ->
+                            if found == rep then
+                                acc
 
-                _ ->
-                    Nothing
-        )
-        seed
-        leaves
-        |> Maybe.withDefault RepString
+                            else
+                                Nothing
+
+                        _ ->
+                            Nothing
+                )
+                seed
+                leaves
+                |> Maybe.withDefault RepString
+
+
+{-| All leaves are the same `KOpaque` ref. -}
+homogeneousOpaque : Array KeyShape -> Bool
+homogeneousOpaque leaves =
+    when sameOpaqueRef leaves is
+        Just _ ->
+            True
+
+        Nothing ->
+            False
+
+
+sameOpaqueRef : Array KeyShape -> Maybe NamedRef
+sameOpaqueRef leaves =
+    when Array.first leaves is
+        Just (KOpaque seed) ->
+            Array.foldl
+                (\leaf acc ->
+                    when acc is
+                        Nothing ->
+                            Nothing
+
+                        Just ref ->
+                            when leaf is
+                                KOpaque other ->
+                                    if opaqueEq ref other then
+                                        acc
+
+                                    else
+                                        Nothing
+
+                                _ ->
+                                    Nothing
+                )
+                (Just seed)
+                leaves
+
+        _ ->
+            Nothing
+
+
+opaqueEq : NamedRef -> NamedRef -> Bool
+opaqueEq a b =
+    a.name == b.name && a.moduleName == b.moduleName
 
 
 leafRep : KeyShape -> Maybe KeyRep
@@ -197,6 +296,9 @@ leafRep shape =
         KString ->
             Just RepString
 
+        KOpaque ref ->
+            Just (RepNamed ref)
+
         KNested _ ->
             Nothing
 
@@ -212,10 +314,15 @@ keyAnn shapes =
 
 elementAnn : KeyRep -> TypeAnn
 elementAnn rep =
-    TypeTyped
-        { ref = { moduleName = Nothing, name = repName rep }
-        , arguments = []
-        }
+    when rep is
+        RepNamed ref ->
+            TypeTyped { ref = ref, arguments = [] }
+
+        _ ->
+            TypeTyped
+                { ref = { moduleName = Nothing, name = repName rep }
+                , arguments = []
+                }
 
 
 repName : KeyRep -> String
@@ -232,6 +339,9 @@ repName rep =
 
         RepString ->
             "String"
+
+        RepNamed ref ->
+            ref.name
 
 
 
@@ -508,6 +618,12 @@ repZero rep =
 
         RepString ->
             ExprString ""
+
+        -- Opaque named leaves are aliases of comparable prims in every
+        -- known specimen (`NodeId = Int`). `0` unifies with the alias.
+        -- Unreachable by construction (array length is static).
+        RepNamed _ ->
+            ExprInt 0
 
 
 stringFn : String -> Expr

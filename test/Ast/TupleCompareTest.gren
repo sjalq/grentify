@@ -40,6 +40,9 @@ tests =
     , comparatorEqualTuples
     , comparatorNestedTuple
     , rewritesPipedSortViaReturnShape
+    , rewritesSortWithFlippedCompareOnCons
+    , sortWithCustomComparatorUntouched
+    , flippedComparatorOrdersLikeFlipCompare
     ]
 
 
@@ -252,12 +255,122 @@ rewritesPipedSortViaReturnShape =
             fail "rewritesPipedSortViaReturnShape" ("got: " ++ Debug.toString other)
 
 
+{-| D81 flate residual: `List.sortWith (\a b -> compare b a) (tuple :: rest)`
+becomes sortWith with the generated flipped comparator (list shape from `::`).
+-}
+rewritesSortWithFlippedCompareOnCons : Check
+rewritesSortWithFlippedCompareOnCons =
+    let
+        flippedCompare =
+            ExprLambda
+                { arguments = [ PatVar "a", PatVar "b" ]
+                , expression =
+                    ExprApplication
+                        [ ExprVar { moduleName = Just "Basics", name = "compare" }
+                        , ExprVar { moduleName = Nothing, name = "b" }
+                        , ExprVar { moduleName = Nothing, name = "a" }
+                        ]
+                }
+
+        consList =
+            ExprBinop
+                { operator = "::"
+                , left = ExprTuple [ ExprInt 1, ExprInt 2 ]
+                , right = ExprVar { moduleName = Nothing, name = "rest" }
+                }
+
+        file =
+            fileWith Nothing
+                [ PatVar "rest" ]
+                (ExprApplication
+                    [ ExprVar { moduleName = Just "List", name = "sortWith" }
+                    , flippedCompare
+                    , consList
+                    ]
+                )
+    in
+    when subjectBody (TupleCompare.apply Dict.empty file) is
+        Just
+            (ExprApplication
+                [ ExprVar { name = "sortWith" }
+                , ExprLambda { arguments = [ PatVar "d24FL", PatVar "d24FR" ], expression = _ }
+                , _
+                ]
+            ) ->
+            ok "rewritesSortWithFlippedCompareOnCons"
+
+        other ->
+            fail "rewritesSortWithFlippedCompareOnCons" ("got: " ++ Debug.toString other)
+
+
+{-| A custom comparator is never rewritten even when the list is proven. -}
+sortWithCustomComparatorUntouched : Check
+sortWithCustomComparatorUntouched =
+    let
+        custom =
+            ExprLambda
+                { arguments = [ PatVar "a", PatVar "b" ]
+                , expression =
+                    ExprApplication
+                        [ ExprVar { moduleName = Just "Basics", name = "compare" }
+                        , ExprAccess
+                            { record = ExprVar { moduleName = Nothing, name = "a" }
+                            , field = "first"
+                            }
+                        , ExprAccess
+                            { record = ExprVar { moduleName = Nothing, name = "b" }
+                            , field = "first"
+                            }
+                        ]
+                }
+
+        consList =
+            ExprBinop
+                { operator = "::"
+                , left = ExprTuple [ ExprInt 1, ExprInt 2 ]
+                , right = ExprVar { moduleName = Nothing, name = "rest" }
+                }
+
+        file =
+            fileWith Nothing
+                [ PatVar "rest" ]
+                (ExprApplication
+                    [ ExprVar { moduleName = Just "List", name = "sortWith" }
+                    , custom
+                    , consList
+                    ]
+                )
+    in
+    when subjectBody (TupleCompare.apply Dict.empty file) is
+        Just (ExprApplication [ _, ExprLambda { expression = ExprApplication [ _, ExprAccess _, _ ] }, _ ]) ->
+            ok "sortWithCustomComparatorUntouched"
+
+        other ->
+            fail "sortWithCustomComparatorUntouched" ("got: " ++ Debug.toString other)
+
+
 -- BEHAVIOR (Eval oracle on generated comparators) -----------------------------
 
 
 tuple2 : Int -> Int -> Expr
 tuple2 a b =
     ExprTuple [ ExprInt a, ExprInt b ]
+
+
+{-| PROPERTY (D81): the flipped comparator is Elm's `compare b a` on pairs —
+first element of the larger first-component wins when flipped. -}
+flippedComparatorOrdersLikeFlipCompare : Check
+flippedComparatorOrdersLikeFlipCompare =
+    let
+        -- (2,0) vs (1,9): unflipped is GT; flipped is LT
+        expr =
+            ExprApplication
+                [ TupleCompare.flippedComparator pairShape
+                , tuple2 2 0
+                , tuple2 1 9
+                ]
+    in
+    evalToOrder "flippedComparatorOrdersLikeFlipCompare" expr "LT"
 
 
 evalToOrder : String -> Expr -> String -> Check

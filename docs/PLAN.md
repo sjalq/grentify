@@ -163,9 +163,64 @@ by being written through this law; nothing edits the ledger by hand.
 
 ## 6. Known defects register (2026-07-17 audit; independently verified)
 
+- **D81 Elm tuples used as `comparable` in positions D24a/D65 miss**
+  (found 2026-07-26 on three packages; FIXED same day). Gren has no
+  tuples; the port lowers them to records `{ first, second }` which are
+  NOT comparable. Three packages failed in two positions the existing
+  evidence laws did not fire on:
+
+  1. **D24a residual — `List.sortWith` already, with a compare-shaped
+     comparator** (`folkertdev/elm-flate` Huffman, and `justgook/elm-image`
+     via the same dep). Source:
+     `List.sortWith (\a b -> compare b a) ((w1+w2, 1+max w1 w2) :: rest)`.
+     D24a rewrote `List.sort` / bare `compare` / order binops, but a
+     source that already used `sortWith` never entered those laws, and
+     the list shape was carried by a `::` cons the list-shape index did
+     not read. FIX in `Ast.TupleCompare`: (a) `listShapeOfExpr` takes
+     the head of a `::` as element evidence; (b) `List.sortWith cmp xs`
+     rewrites when `xs` is proven list-of-tuples AND `cmp` is
+     compare-shaped (`compare`, `\a b -> compare a b`,
+     `\a b -> compare b a`) — anything else is left alone. PROPERTY:
+     the generated flipped comparator orders pairs as Elm's
+     `compare b a` (Eval oracle).
+  2. **D65 residual — `Dict Alias` where Alias is NOT R1-eligible**
+     (`goyalarchit/elm-dagre` Dagre.Acyclic / Normalize / Render).
+     Source: `type alias Edge = ( G.NodeId, G.NodeId )` with
+     `Dict Edge (List NodeId)` and also `List Edge` / function args, so
+     R1 refuses (otherUses > 0). R2 wanted an inline `Dict (…, …)`;
+     R3's key-seed wanted a package function returning a tuple.
+     NodeId is itself a dep alias of Int, so Codec could not see the
+     body as encodable either. FIX (R2b + Codec KOpaque + multi-dict
+     gate):
+     * Codec treats homogeneous 0-arg named leaves as `KOpaque` —
+       identity-encoded into `Array NodeId` (Gren expands the alias;
+       the array is comparable). Mixed opaque/prim refused (no total
+       String render for an unknown name).
+     * Evidence keeps ALL encodable tuple aliases as `tupleAliases`
+       (R1's eligibility set stays separate). `resolvedKeySlot` treats
+       `Dict Edge v` like an inline tuple when Edge is in
+       `tupleAliases` and NOT R1-eligible (R1-eligible aliases still
+       follow through the alias body).
+     * R3 seeds from that resolved slot; rewrite encodes keys /
+       decodes reads as before.
+     * Multi-dict safety: a declaration that also types a
+       non-tuple-keyed Dict/Set (Render.edgeDrawing's
+       `Dict NodeId coords` next to `Dict (NodeId, NodeId) controlPts`)
+       forces proven-only rewrite for that kind — full-declaration
+       rewrite would encode NodeId keys as Edge arrays. Specimens
+       with a single world (Acyclic.undoHelper, triangular-mesh) keep
+       full R3.
+  RECEIPTS: `folkertdev/elm-flate@2.0.6`, `justgook/elm-image@4.0.0`,
+  `goyalarchit/elm-dagre@4.0.1` all port and gren-verify clean
+  (`--no-ported-cache`). Non-regression:
+  `ianmackenzie/elm-triangular-mesh`, `jfmengels/elm-review` EXIT=0.
+  Tier 0 **332** checks (was 326; 6 new: 3 TupleCompare structural +
+  property, 3 KeyEncode R2b). Canary 14/14.
+
 - **D80 `Transform.Pipeline` re-read the WHOLE MODULE SOURCE once per
   qualified-name step, to confirm a fact it already held** (found by V8 tick
-  profile 2026-07-26; FIXED same day). `qualifiedNameFrom` /
+  profile 2026-07-26; FIXED same day).
+ `qualifiedNameFrom` /
   `fullQualifiedNameFrom` walk `Module.Sub.name` token by token, and each step
   guarded with `String.slice previousEnd next.startOffset source == "."`. Gren's
   `String.slice` is CODE-POINT indexed — `Array.from(str).slice(a,b).join("")` —
@@ -1278,10 +1333,10 @@ Coverage and pipeline:
   `Advanced.Token` arriving as `{ first, second }` where Gren wants
   `{ str, expecting }` — the D63 dependency-constructor family, ONE fix
   for five packages. `ThinkAlexandria/css-in-elm` is the same shape on
-  `Platform.worker`'s `{ model, command }`. `justgook/elm-image` is the
-  D24a residual: a `sortWith` whose comparator is `compare` over a
-  lowered tuple record, with no evidence for a generated lexicographic
-  one.
+  `Platform.worker`'s `{ model, command }`. `justgook/elm-image` was the
+  D24a residual (sortWith + compare over lowered tuples) — CLOSED by
+  **D81** together with elm-flate and elm-dagre.
+
 - **D70 a reference resolved in Elm does not resolve after the port —
   FOUR independent leaks of the same law** (found 2026-07-26 across six
   packages, FIXED same day, Fable). Reported as four symptoms; bisected to

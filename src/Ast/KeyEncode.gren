@@ -5,8 +5,8 @@ module Ast.KeyEncode exposing
     , emptyEvidence
     )
 
-{-| D24b/D65: Elm tuples are `comparable` so they serve as Dict keys / Set
-members; the port lowers tuples to records and Gren records are not
+{-| D24b/D65/D81: Elm tuples are `comparable` so they serve as Dict keys /
+Set members; the port lowers tuples to records and Gren records are not
 comparable, so every tuple-keyed Dict/Set type-errors after the port.
 
 This pass rewrites PROVEN tuple keys to the comparable array
@@ -32,13 +32,23 @@ PROVEN (a signature-typed variable, a proven record field access, or a
 call to a package function whose signature returns such a container) are
 encoded (elm-review's `suppressions` field).
 
+R2b / R3 seed (D81 alias-key law): `Dict Alias v` / `Set Alias` where
+Alias is a PACKAGE type alias of an encodable tuple is treated exactly
+like the inline form, WITHOUT rewriting the alias itself. Specimens
+like goyalarchit/elm-dagre's `type alias Edge = ( NodeId, NodeId )` have
+non-key uses (`List Edge`, function arguments), so R1 refuses them; the
+Dict/Set KEY SLOT still rewrites, and R3 seeds from the signature. The
+alias body stays a tuple so non-key uses keep working. Opaque named
+leaves (`NodeId`) are identity-encoded into `Array NodeId` (Codec
+`KOpaque`) — Gren expands the alias and the array is comparable.
+
 R3 (declaration law, D65): R1 and R2 can only serve keys that are never
 read back, and they cannot see a container that never appears in an
 annotation. R3 closes both gaps at the granularity of ONE TOP-LEVEL
 DECLARATION, all-or-nothing:
 
   * SEED. The declaration's Dict world (resp. Set world) has key shape S
-    when S is witnessed by: an inline `Dict ( enc, … ) v` / `Set ( enc, … )`
+    when S is witnessed by: an inline OR alias-keyed `Dict … v` / `Set …`
     anywhere in its signature; a proven container expression in its body;
     or a KEY-position argument that is an application of a package
     function whose signature returns `( enc, … )`. Elm's own typing makes
@@ -56,14 +66,15 @@ DECLARATION, all-or-nothing:
 
 R3 cannot regress a package that ports today: a seed requires either a
 tuple key in a comparable position (which Gren rejects today) or an
-inline tuple-keyed annotation (which R2 already rewrote today). Where the
-seed is wrong the shapes cannot unify and the site fails at gren-verify —
-encoded arrays and lowered tuple records never unify, so a mis-seeded
-site is always loud, never silently wrong.
+inline/alias tuple-keyed annotation (which R2/R2b already rewrote today).
+Where the seed is wrong the shapes cannot unify and the site fails at
+gren-verify — encoded arrays and lowered tuple records never unify, so a
+mis-seeded site is always loud, never silently wrong.
 
-Encodable element types: Int, Float, Char, String, and nested tuples
-thereof — concrete names required (type variables / custom types /
-records are never encodable; those sites stay untouched and fail
+Encodable element types: Int, Float, Char, String, nested tuples thereof,
+and homogeneous opaque named leaves (type aliases of comparable prims) —
+concrete names required (type variables / records / mixed opaque-prim
+tuples are never encodable; those sites stay untouched and fail
 gren-verify exactly as before this pass).
 -}
 
@@ -123,20 +134,25 @@ applyDeclaration evidence moduleName declaration =
             let
                 rewrittenSignature =
                     Maybe.map
-                        (\sig -> { sig | typeAnnotation = rewriteAnn sig.typeAnnotation })
+                        (\sig ->
+                            { sig
+                                | typeAnnotation =
+                                    rewriteAnn evidence sig.typeAnnotation
+                            }
+                        )
                         fn.signature
 
                 signatureSeeds =
                     when fn.signature is
                         Just sig ->
-                            annotationSeeds sig.typeAnnotation noSeeds
+                            annotationSeeds evidence sig.typeAnnotation noSeeds
 
                         Nothing ->
                             noSeeds
             in
             -- Every witness this pass can find comes either from the package
-            -- indexes or from an inline container in THIS signature. With
-            -- neither, no rule can fire, so the body is not walked at all.
+            -- indexes or from an inline/alias container in THIS signature.
+            -- With neither, no rule can fire, so the body is not walked at all.
             if Evidence.isEmpty evidence && signatureSeeds == noSeeds then
                 DeclFunction { fn | signature = rewrittenSignature }
 
@@ -161,8 +177,16 @@ applyDeclaration evidence moduleName declaration =
                     env =
                         envFromSignature evidence fn.signature fn.arguments
 
+                    foreign =
+                        when fn.signature is
+                            Just sig ->
+                                foreignKinds evidence sig.typeAnnotation noForeign
+
+                            Nothing ->
+                                noForeign
+
                     scope =
-                        declarationScope env signatureSeeds withTails
+                        declarationScope env signatureSeeds foreign withTails
                 in
                 DeclFunction
                     { fn
@@ -176,7 +200,10 @@ applyDeclaration evidence moduleName declaration =
                     | constructors =
                         Array.map
                             (\ctor ->
-                                { ctor | arguments = Array.map rewriteAnn ctor.arguments }
+                                { ctor
+                                    | arguments =
+                                        Array.map (rewriteAnn evidence) ctor.arguments
+                                }
                             )
                             custom.constructors
                 }
@@ -204,25 +231,29 @@ rewriteAliasBody evidence moduleName alias =
                 Codec.keyAnn info.shapes
 
             else
-                rewriteAnn alias.typeAnnotation
+                rewriteAnn evidence alias.typeAnnotation
 
         Nothing ->
-            rewriteAnn alias.typeAnnotation
+            rewriteAnn evidence alias.typeAnnotation
 
 
-{-| R2: inline tuple keys of Dict/Set become the key type, everywhere in
-the annotation tree.
+{-| R2 / R2b: inline OR package-alias tuple keys of Dict/Set become the
+key type, everywhere in the annotation tree.
 -}
-rewriteAnn : TypeAnn -> TypeAnn
-rewriteAnn annotation =
+rewriteAnn : Evidence -> TypeAnn -> TypeAnn
+rewriteAnn evidence annotation =
     when annotation is
         TypeTyped { ref = ref, arguments = arguments } ->
             let
                 rewritten =
-                    Array.map rewriteAnn arguments
+                    Array.map (rewriteAnn evidence) arguments
 
                 keyed =
-                    when Evidence.inlineSlot annotation is
+                    when
+                        Evidence.resolvedKeySlot evidence.tupleAliases
+                            evidence.aliases
+                            annotation
+                    is
                         Just slot ->
                             Array.indexedMap
                                 (\index argument ->
@@ -240,13 +271,15 @@ rewriteAnn annotation =
             TypeTyped { ref = ref, arguments = keyed }
 
         TypeTuple elements ->
-            TypeTuple (Array.map rewriteAnn elements)
+            TypeTuple (Array.map (rewriteAnn evidence) elements)
 
         TypeRecord fields ->
             TypeRecord
                 (Array.map
                     (\field ->
-                        { field | typeAnnotation = rewriteAnn field.typeAnnotation }
+                        { field
+                            | typeAnnotation = rewriteAnn evidence field.typeAnnotation
+                        }
                     )
                     fields
                 )
@@ -257,13 +290,19 @@ rewriteAnn annotation =
                     | fields =
                         Array.map
                             (\field ->
-                                { field | typeAnnotation = rewriteAnn field.typeAnnotation }
+                                { field
+                                    | typeAnnotation =
+                                        rewriteAnn evidence field.typeAnnotation
+                                }
                             )
                             generic.fields
                 }
 
         TypeFunction { left = left, right = right } ->
-            TypeFunction { left = rewriteAnn left, right = rewriteAnn right }
+            TypeFunction
+                { left = rewriteAnn evidence left
+                , right = rewriteAnn evidence right
+                }
 
         _ ->
             annotation
@@ -515,6 +554,13 @@ type alias Env =
 type alias Scope =
     { set : Maybe (Array KeyShape)
     , dict : Maybe (Array KeyShape)
+    , -- D81: when the declaration also types a Dict/Set whose key is NOT
+      -- an encodable tuple (e.g. `Dict NodeId v` next to `Dict Edge v`),
+      -- R3 must not rewrite every Dict/Set call — only those whose
+      -- container is proven at the seeded shape. Full-declaration rewrite
+      -- would encode NodeId keys as Edge arrays (Render.edgeDrawing).
+      setProvenOnly : Bool
+    , dictProvenOnly : Bool
     }
 
 
@@ -561,7 +607,8 @@ envFromSignature evidence signature arguments =
                     when state.spine is
                         TypeFunction { left = left, right = right } ->
                             { spine = right
-                            , env = bindContainerPattern argument left state.env
+                            , env =
+                                bindContainerPattern evidence argument left state.env
                             }
 
                         _ ->
@@ -572,11 +619,15 @@ envFromSignature evidence signature arguments =
                 |> .env
 
 
-bindContainerPattern : Pattern -> TypeAnn -> Env -> Env
-bindContainerPattern pattern annotation env =
+bindContainerPattern : Evidence -> Pattern -> TypeAnn -> Env -> Env
+bindContainerPattern evidence pattern annotation env =
     when pattern is
         PatVar name ->
-            when Evidence.inlineSlot annotation is
+            when
+                Evidence.resolvedKeySlot evidence.tupleAliases
+                    evidence.aliases
+                    annotation
+            is
                 Just slot ->
                     { env | containerVars = Dict.set name slot env.containerVars }
 
@@ -587,11 +638,109 @@ bindContainerPattern pattern annotation env =
             env
 
 
-{-| R3: seed the declaration's Set and Dict worlds, then refuse any kind
-whose calls are not all carriable.
+type alias Foreign =
+    { set : Bool, dict : Bool }
+
+
+noForeign : Foreign
+noForeign =
+    { set = False, dict = False }
+
+
+{-| A Dict/Set annotation whose key is not an encodable tuple: coexists
+with a tuple-keyed container and forces proven-only rewrite for that kind.
 -}
-declarationScope : Env -> Seeds -> Expr -> Scope
-declarationScope env fromSignature body =
+foreignKinds : Evidence -> TypeAnn -> Foreign -> Foreign
+foreignKinds evidence annotation acc =
+    let
+        self =
+            when isKeyedContainerAnn annotation is
+                Just kind ->
+                    when
+                        Evidence.resolvedKeySlot evidence.tupleAliases
+                            evidence.aliases
+                            annotation
+                    is
+                        Just _ ->
+                            acc
+
+                        Nothing ->
+                            markForeign kind acc
+
+                Nothing ->
+                    acc
+    in
+    when annotation is
+        TypeTyped { arguments = arguments } ->
+            Array.foldl (foreignKinds evidence) self arguments
+
+        TypeTuple elements ->
+            Array.foldl (foreignKinds evidence) self elements
+
+        TypeRecord fields ->
+            Array.foldl
+                (\field inner -> foreignKinds evidence field.typeAnnotation inner)
+                self
+                fields
+
+        TypeGenericRecord { fields = fields } ->
+            Array.foldl
+                (\field inner -> foreignKinds evidence field.typeAnnotation inner)
+                self
+                fields
+
+        TypeFunction { left = left, right = right } ->
+            foreignKinds evidence right (foreignKinds evidence left self)
+
+        _ ->
+            self
+
+
+isKeyedContainerAnn : TypeAnn -> Maybe Kind
+isKeyedContainerAnn annotation =
+    when annotation is
+        TypeTyped { ref = ref, arguments = arguments } ->
+            if
+                ref.name
+                    == "Dict"
+                    && (ref.moduleName == Nothing || ref.moduleName == Just "Dict")
+                    && Array.length arguments
+                    == 2
+            then
+                Just DictKind
+
+            else if
+                ref.name
+                    == "Set"
+                    && (ref.moduleName == Nothing || ref.moduleName == Just "Set")
+                    && Array.length arguments
+                    == 1
+            then
+                Just SetKind
+
+            else
+                Nothing
+
+        _ ->
+            Nothing
+
+
+markForeign : Kind -> Foreign -> Foreign
+markForeign kind foreign =
+    when kind is
+        SetKind ->
+            { foreign | set = True }
+
+        DictKind ->
+            { foreign | dict = True }
+
+
+{-| R3: seed the declaration's Set and Dict worlds, then refuse any kind
+whose calls are not all carriable. A foreign (non-tuple-keyed) container
+in the signature forces proven-only rewrite for that kind (D81).
+-}
+declarationScope : Env -> Seeds -> Foreign -> Expr -> Scope
+declarationScope env fromSignature foreign body =
     let
         seeds =
             bodySeeds env body fromSignature
@@ -613,6 +762,8 @@ declarationScope env fromSignature body =
     in
     { set = settle seeds.set total.set
     , dict = settle seeds.dict total.dict
+    , setProvenOnly = foreign.set
+    , dictProvenOnly = foreign.dict
     }
 
 
@@ -635,11 +786,15 @@ addKindSeed slot seeds =
             { seeds | dict = addSeed slot.shapes seeds.dict }
 
 
-annotationSeeds : TypeAnn -> Seeds -> Seeds
-annotationSeeds annotation seeds =
+annotationSeeds : Evidence -> TypeAnn -> Seeds -> Seeds
+annotationSeeds evidence annotation seeds =
     let
         self =
-            when Evidence.inlineSlot annotation is
+            when
+                Evidence.resolvedKeySlot evidence.tupleAliases
+                    evidence.aliases
+                    annotation
+            is
                 Just slot ->
                     addKindSeed slot seeds
 
@@ -648,19 +803,25 @@ annotationSeeds annotation seeds =
     in
     when annotation is
         TypeTyped { arguments = arguments } ->
-            Array.foldl annotationSeeds self arguments
+            Array.foldl (annotationSeeds evidence) self arguments
 
         TypeTuple elements ->
-            Array.foldl annotationSeeds self elements
+            Array.foldl (annotationSeeds evidence) self elements
 
         TypeRecord fields ->
-            Array.foldl (\field acc -> annotationSeeds field.typeAnnotation acc) self fields
+            Array.foldl
+                (\field acc -> annotationSeeds evidence field.typeAnnotation acc)
+                self
+                fields
 
         TypeGenericRecord { fields = fields } ->
-            Array.foldl (\field acc -> annotationSeeds field.typeAnnotation acc) self fields
+            Array.foldl
+                (\field acc -> annotationSeeds evidence field.typeAnnotation acc)
+                self
+                fields
 
         TypeFunction { left = left, right = right } ->
-            annotationSeeds right (annotationSeeds left self)
+            annotationSeeds evidence right (annotationSeeds evidence left self)
 
         _ ->
             self
@@ -834,6 +995,16 @@ scopeShapes scope kind =
             scope.dict
 
 
+provenOnly : Scope -> Kind -> Bool
+provenOnly scope kind =
+    when kind is
+        SetKind ->
+            scope.setProvenOnly
+
+        DictKind ->
+            scope.dictProvenOnly
+
+
 {-| Bottom-up: children are rewritten before the node, so a rewrite that
 wraps a call (`List.map decode (Set.toList s)`) is never revisited.
 -}
@@ -851,10 +1022,21 @@ rewriteNode context generation expr =
                 Just kind ->
                     when scopeShapes context.scope kind is
                         Just shapes ->
-                            -- R3: the declaration's whole kind is proven
                             when operationFor kind call.ref.name (argCount call) is
                                 Just operation ->
-                                    applyOperation generation shapes operation call expr
+                                    if provenOnly context.scope kind then
+                                        -- D81 multi-dict: only rewrite when
+                                        -- the container is proven at this shape.
+                                        applyIfProvenContainer context
+                                            generation
+                                            shapes
+                                            operation
+                                            call
+                                            expr
+
+                                    else
+                                        -- R3: the declaration's whole kind
+                                        applyOperation generation shapes operation call expr
 
                                 Nothing ->
                                     expr
@@ -862,6 +1044,58 @@ rewriteNode context generation expr =
                         Nothing ->
                             -- R2: only a call whose container is itself proven
                             encodeProvenCall context generation kind call expr
+
+                Nothing ->
+                    expr
+
+        Nothing ->
+            expr
+
+
+{-| Proven-only gate: the container argument (last arg, or the sole arg of
+a read) must be a proven container whose shapes match the seed. Unproven
+sites and differently-keyed proven containers are left alone.
+-}
+applyIfProvenContainer :
+    Context
+    -> Int
+    -> Array KeyShape
+    -> Operation
+    -> Call
+    -> Expr
+    -> Expr
+applyIfProvenContainer context generation shapes operation call expr =
+    let
+        containerArg =
+            when operation is
+                OpEncodeKey _ ->
+                    Array.last call.parts
+
+                OpEncodeElements _ ->
+                    -- fromList builds a fresh container; allow when we have
+                    -- a seed and no other interpretation (caller already
+                    -- gated on provenOnly, so only fire if shapes match a
+                    -- known return — leave alone if ambiguous).
+                    Nothing
+
+                OpDecodeResult _ ->
+                    Array.get 1 call.parts
+
+                OpDecodeCallback _ ->
+                    Array.last call.parts
+
+                OpNeutral ->
+                    Nothing
+    in
+    when containerArg is
+        Just container ->
+            when provenContainer context.env container is
+                Just slot ->
+                    if slot.shapes == shapes then
+                        applyOperation generation shapes operation call expr
+
+                    else
+                        expr
 
                 Nothing ->
                     expr

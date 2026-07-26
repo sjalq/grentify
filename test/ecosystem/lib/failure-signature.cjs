@@ -26,7 +26,14 @@ const BANNER = /^--\s+([A-Z][A-Z ']*[A-Z])\s+-+\s*(.*)$/;
 
 /** Tool-side refusal codes, most specific first. */
 const TOOL_CODES =
-  /\b(PORT_TIMEOUT|OUTPUT_FAILED|GREN_VERIFY_FAILED|EXTRACT_LOCK|EXTRACT_FAILED|AST_UNPORTED_[A-Z_]+|SOURCE_INVALID|SOURCE_MANIFEST_MISMATCH|SOURCE_CLONE_FAILED|ARCHIVE_INVALID|DOWNLOAD_FAILED|PACKAGE_NOT_FOUND|PROCESS_FAILED|NO_ELM_SOURCES|REVIEW_[A-Z_]+)\b/;
+  /\b(PORT_TIMEOUT|OUTPUT_FAILED|GREN_VERIFY_FAILED|GREN_MANIFEST_INVALID|EXTRACT_LOCK|EXTRACT_FAILED|AST_UNPORTED_[A-Z_]+|AST_DECODE_FAILED|UNSUPPORTED_[A-Z_]+|SOURCE_INVALID|SOURCE_MANIFEST_MISMATCH|SOURCE_CLONE_FAILED|ARCHIVE_INVALID|DOWNLOAD_FAILED|PACKAGE_NOT_FOUND|PROCESS_FAILED|NO_ELM_SOURCES|REVIEW_[A-Z_]+|ADD_[A-Z_]+|CACHE_[A-Z_]+)\b/;
+
+/** Diagnostics the transform prints as prose, with no code in front of them. */
+const TOOL_PROSE = [
+  /could not be resolved safely/i,
+  /non-exhaustive pattern match/i,
+  /unported (cons|list) pattern/i,
+];
 
 /** Lines that carry no diagnostic value (progress, downloads, hints). */
 const NOISE =
@@ -196,6 +203,11 @@ function failureSignature(raw) {
     evidence.split("\n")[0] || "",
   );
   if (summarized) return build(summarized[1], summarized[2], summarized[3]);
+
+  for (const prose of TOOL_PROSE) {
+    const hit = text.split("\n").map((r) => r.trim()).find((r) => prose.test(r));
+    if (hit) return build("TRANSFORM", "-", hit);
+  }
 
   const coded = TOOL_CODES.exec(text);
   if (coded) {

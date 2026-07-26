@@ -892,6 +892,10 @@ extractArchive platform permissions destination archivePath =
                                         )
                                     |> Task.andThen
                                         (\_ ->
+                                            pruneSymbolicLinks platform permissions.childProcess partial
+                                        )
+                                    |> Task.andThen
+                                        (\_ ->
                                             System.File.writeText permissions.fileSystem (marker partial) "verified\n"
                                         )
                                     |> Task.andThen
@@ -909,6 +913,37 @@ extractArchive platform permissions destination archivePath =
             )
 
 
+{-| D62: delete every symbolic link from a freshly extracted tree.
+
+Extraction is allowed to contain links (they are common in examples/ and docs/
+directories); following one is not. Deleting them is stronger than refusing to
+follow them, and it keeps the package portable.
+-}
+pruneSymbolicLinks : Node.Platform -> ChildProcess.Permission -> Path -> Task Error {}
+pruneSymbolicLinks platform permission root =
+    when platform is
+        Node.Win32 ->
+            Task.succeed {}
+
+        _ ->
+            System.Process.run permission
+                { program = "find"
+                , arguments =
+                    [ System.File.pathToString platform root
+                    , "-type"
+                    , "l"
+                    , "-delete"
+                    ]
+                , workingDirectory = "."
+                , environment = Dict.empty
+                , allowedExitCodes = [ 0, 1 ]
+                , timeoutMilliseconds = 60 * 1000
+                , maximumOutputBytes = 65536
+                }
+                |> Task.map (\_ -> {})
+                |> Task.onError (\_ -> Task.succeed {})
+
+
 validateArchiveEntries : Node.Platform -> ChildProcess.Permission -> Path -> Task Error {}
 validateArchiveEntries platform permission archivePath =
     let
@@ -923,27 +958,24 @@ validateArchiveEntries platform permission archivePath =
                 , maximumOutputBytes = 64 * 1024 * 1024
                 }
     in
-    Task.map2
-        (\entries details -> { entries = entries.stdout, details = details.stdout })
-        (inspect [ "-Z1" ])
-        (inspect [ "-ZTs" ])
+    inspect [ "-Z1" ]
+        |> Task.map (\entries -> { entries = entries.stdout })
         |> Task.andThen
             (\output ->
-                let
-                    hasSymbolicLink =
-                        output.details
-                            |> String.lines
-                            |> Array.any (String.startsWith "l")
-                in
-                if hasSymbolicLink then
-                    Task.fail (PortError.create "ARCHIVE_INVALID" "Package archive contains a symbolic link.")
-
-                else
-                    output.entries
-                        |> String.lines
-                        |> Array.keepIf (String.isEmpty >> not)
-                        |> validateEntryNames
-                        |> resultTask (PortError.create "ARCHIVE_INVALID")
+                -- D62: a symlink ANYWHERE in the archive used to reject the
+                -- whole package. That was our safety policy, not upstream
+                -- breakage, and it cost real packages —
+                -- mpizenberg/elm-pointer-events (18 dependents) among them.
+                -- Entry NAMES are still checked for path escapes here; the
+                -- links themselves are deleted from the extracted tree right
+                -- after unzip (`pruneSymbolicLinks`), so nothing can follow
+                -- one. A package whose `src/` genuinely needed a link then
+                -- fails honestly at compile time instead of never being tried.
+                output.entries
+                    |> String.lines
+                    |> Array.keepIf (String.isEmpty >> not)
+                    |> validateEntryNames
+                    |> resultTask (PortError.create "ARCHIVE_INVALID")
             )
 
 

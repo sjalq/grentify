@@ -32,40 +32,40 @@ tests =
     [ reservedEscapesAroundExistingUnderscore
     , docsRewriteKeepsCommasWhenNameUnchanged
     , crossModuleReferenceFollowsDefiningModuleEscape
+    , letBoundReservedBinderMovesWithItsReferences
+    , aliasQualifiedReferenceFollowsDefiningModuleEscape
     , letBoundFunctionNameIsEscaped
     ]
 
 
-{-| D67 (json-tools/json-schema LET PROBLEM): `rewriteExpr` sent `ExprLet` to
-the generic walk, which maps a binding's patterns and body but never its
-`LetFunction` *name*. The call site was escaped to `when_` while the binding
-itself stayed `when`, so Gren's parser hit the keyword mid-`let`.
+{-| D70: a let binding named `alias` is counted by the occupancy walk, so every
+REFERENCE to it is escaped to `alias_` — and the generic child walk carried the
+binder's own name through untouched, leaving `let alias = … in Just alias_`.
+`Ast.MatchCompile` lowers Elm tuple patterns into exactly this shape, so
+mdgriffith/elm-codegen's `( aliasModName, alias ) :: remain` produced it.
 -}
-letBoundFunctionNameIsEscaped : TestResult
-letBoundFunctionNameIsEscaped =
+letBoundReservedBinderMovesWithItsReferences : TestResult
+letBoundReservedBinderMovesWithItsReferences =
     let
         file =
             emptyFile
                 [ DeclFunction
-                    { name = "validate"
+                    { name = "findAlias"
                     , documentation = Nothing
                     , signature = Nothing
-                    , arguments = [ PatVar "n" ]
+                    , arguments = [ PatVar "pair" ]
                     , expression =
                         ExprLet
                             { declarations =
                                 [ LetFunction
-                                    { name = "when"
-                                    , arguments = [ PatVar "propOf" ]
+                                    { name = "alias"
+                                    , arguments = []
                                     , expression =
-                                        ExprVar { moduleName = Nothing, name = "propOf" }
+                                        ExprVar { moduleName = Nothing, name = "pair" }
                                     }
                                 ]
                             , expression =
-                                ExprApplication
-                                    [ ExprVar { moduleName = Nothing, name = "when" }
-                                    , ExprVar { moduleName = Nothing, name = "n" }
-                                    ]
+                                ExprVar { moduleName = Nothing, name = "alias" }
                             }
                     }
                 ]
@@ -76,12 +76,66 @@ letBoundFunctionNameIsEscaped =
                 |> Print.print
 
         passed =
-            String.contains "when_ propOf =" printed
-                && String.contains "when_ n" printed
-                && not (String.contains "when propOf =" printed)
+            String.contains "alias_ =" printed
+                && not (String.contains "alias =" printed)
     in
     outcome
-        "reserved escape reaches let-bound function names"
+        "let-bound reserved binder is escaped with its references"
+        passed
+        ("printed:\n" ++ printed)
+
+
+{-| D70: `Ast.NameSub.qualifyRef` runs first and replaces a reference's home
+module with the qualifier the file prints it under, so by the time this pass
+runs `Elm.Annotation.alias` reads as `Type.alias`. Looking the package export
+map up under the qualifier alone missed every aliased import and emitted
+`Type.alias` against a module that exposes `alias_`.
+-}
+aliasQualifiedReferenceFollowsDefiningModuleEscape : TestResult
+aliasQualifiedReferenceFollowsDefiningModuleEscape =
+    let
+        caller =
+            { schemaVersion = 1
+            , moduleDefinition =
+                { kind = NormalModule
+                , moduleName = "Gen.Json.Decode"
+                , exposing_ = ExposeExplicit [ ExposeFunction "value" ]
+                }
+            , comments = []
+            , imports =
+                [ { moduleName = "Elm.Annotation"
+                  , alias = Just "Type"
+                  , exposing_ = Nothing
+                  }
+                ]
+            , declarations =
+                [ DeclFunction
+                    { name = "value"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprApplication
+                            [ ExprVar { moduleName = Just "Type", name = "alias" }
+                            , ExprVar { moduleName = Nothing, name = "moduleName_" }
+                            ]
+                    }
+                ]
+            }
+
+        -- What the dependency banked: its own module's decision.
+        packageExports =
+            Dict.set "Elm.Annotation.alias" "alias_" Dict.empty
+
+        printed =
+            Print.print (Reserved.apply packageExports caller)
+
+        passed =
+            String.contains "Type.alias_" printed
+                && not (String.contains "Type.alias " printed)
+    in
+    outcome
+        "alias-qualified reference follows the defining module's escape"
         passed
         ("printed:\n" ++ printed)
 
@@ -317,3 +371,53 @@ outcome name passed details =
         else
             details
     }
+
+
+{-| D67 (json-tools/json-schema LET PROBLEM): `rewriteExpr` sent `ExprLet` to
+the generic walk, which maps a binding's patterns and body but never its
+`LetFunction` *name*. The call site was escaped to `when_` while the binding
+itself stayed `when`, so Gren's parser hit the keyword mid-`let`.
+-}
+letBoundFunctionNameIsEscaped : TestResult
+letBoundFunctionNameIsEscaped =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "validate"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "n" ]
+                    , expression =
+                        ExprLet
+                            { declarations =
+                                [ LetFunction
+                                    { name = "when"
+                                    , arguments = [ PatVar "propOf" ]
+                                    , expression =
+                                        ExprVar { moduleName = Nothing, name = "propOf" }
+                                    }
+                                ]
+                            , expression =
+                                ExprApplication
+                                    [ ExprVar { moduleName = Nothing, name = "when" }
+                                    , ExprVar { moduleName = Nothing, name = "n" }
+                                    ]
+                            }
+                    }
+                ]
+
+        printed =
+            file
+                |> Reserved.apply Dict.empty
+                |> Print.print
+
+        passed =
+            String.contains "when_ propOf =" printed
+                && String.contains "when_ n" printed
+                && not (String.contains "when propOf =" printed)
+    in
+    outcome
+        "reserved escape reaches let-bound function names"
+        passed
+        ("printed:\n" ++ printed)

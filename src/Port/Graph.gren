@@ -731,6 +731,7 @@ formatStaging platform fileSystem permission formatExecutable rootIdentity plann
 
                                         else
                                             Format.formatPackage platform
+                                                fileSystem
                                                 permission
                                                 { packageDirectory = dir
                                                 , formatExecutable = formatExecutable

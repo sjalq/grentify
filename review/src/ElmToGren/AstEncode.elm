@@ -197,7 +197,7 @@ encodeSignature lookup signature =
 
 
 encodeType : ModuleNameLookupTable -> Node TypeAnnotation -> Encode.Value
-encodeType lookup (Node range typeAnnotation) =
+encodeType lookup (Node _ typeAnnotation) =
     case typeAnnotation of
         GenericType name ->
             Encode.object
@@ -205,11 +205,19 @@ encodeType lookup (Node range typeAnnotation) =
                 , ( "name", Encode.string name )
                 ]
 
-        Typed (Node _ ( moduleName, name )) args ->
+        -- The lookup table keys a type's home on the range of the type NAME
+        -- node, never on the enclosing `Typed` node (elm-review's
+        -- `collectModuleNamesFromTypeAnnotation` calls `Builder.add` with
+        -- exactly that inner range). The two ranges coincide only for a type
+        -- with no arguments, so asking at `range` silently resolved every
+        -- PARAMETERIZED type to `Nothing` and fell back to the written
+        -- qualifier — which is a lie whenever the qualifier is an alias
+        -- (`import OrderedDict as Dict` → home recorded as `Dict`). D70.
+        Typed (Node nameRange ( moduleName, name )) args ->
             Encode.object
                 [ ( "kind", Encode.string "typed" )
                 , ( "moduleName"
-                  , resolveModule lookup range moduleName
+                  , resolveModule lookup nameRange moduleName
                         |> Maybe.map Encode.string
                         |> Maybe.withDefault
                             (if List.isEmpty moduleName then

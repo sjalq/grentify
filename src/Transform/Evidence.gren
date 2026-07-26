@@ -3,6 +3,7 @@ module Transform.Evidence exposing
     , PackageEvidence
     , collect
     , collectConstructorArities
+    , collectRecordAliases
     , collectSoleConstructors
     , mappedRecordAliases
     )
@@ -35,6 +36,8 @@ import Transform.AstPipeline as AstPipeline
 type alias DependencyEvidence =
     { constructorArities : Dict String Int
     , soleConstructors : Dict String {}
+    , recordAliases : Dict String (Array String)
+    , reservedExports : Dict String String
     }
 
 
@@ -77,14 +80,22 @@ collect registry dependencies modules =
             Dict.foldl Dict.set dependencies.constructorArities
                 ownConstructorArities
 
+        -- Three layers, weakest first (D71 + D70d, landed independently).
+        --
         -- Mapped platform packages (elm/parser → gren-lang/parser …) are never
-        -- transpiled, so no port ever reads their alias declarations. The
-        -- registry states those shapes; they seed the alias table *underneath*
-        -- everything this package actually declares, so real evidence always
-        -- wins over the hint (D12).
+        -- transpiled, so no port ever reads their alias declarations; the
+        -- registry states those shapes and seeds the table underneath
+        -- everything real, so evidence always beats the hint (D12).
+        -- A record alias applied like a constructor is then lowered from the
+        -- DEFINING module's field names, so transpiled dependency aliases must
+        -- be in scope too or the application is left standing for `CtorLaw` to
+        -- mis-recordify. Own modules win every clash.
         recordAliases =
             Dict.foldl Dict.set
-                (mappedRecordAliases registry namedFiles constructorArities)
+                (Dict.foldl Dict.set
+                    (mappedRecordAliases registry namedFiles constructorArities)
+                    dependencies.recordAliases
+                )
                 ownRecordAliases
 
         ownSoleConstructors =
@@ -120,13 +131,21 @@ collect registry dependencies modules =
                 Dict.empty
                 preparedFiles
 
-        reservedExports =
+        ownReservedExports =
             Array.foldl
                 (\one found ->
                     Dict.foldl Dict.set found (AstPipeline.reservedExportsOf one)
                 )
                 Dict.empty
                 preparedFiles
+
+        -- D70: `Ast.Reserved` reads a reference's escape from the DEFINING
+        -- module's decision, never the caller's occupancy. A dependency's
+        -- modules are just as defining as our own, so their decisions belong in
+        -- the same map or every cross-package reference to an escaped name
+        -- (`Elm.Annotation.alias` → `alias_`) is emitted unescaped.
+        reservedExports =
+            Dict.foldl Dict.set dependencies.reservedExports ownReservedExports
     in
     { tupleReturns = prepEvidence.tupleReturns
     , constructorHomes = prepEvidence.constructorHomes
@@ -139,6 +158,8 @@ collect registry dependencies modules =
     , exports =
         { constructorArities = ownConstructorArities
         , soleConstructors = ownSoleConstructors
+        , recordAliases = ownRecordAliases
+        , reservedExports = ownReservedExports
         }
     }
 
@@ -152,6 +173,17 @@ collectConstructorArities registry modules =
         |> decodeFiles
         |> Array.map (BareResolve.apply >> NameSub.apply registry)
         |> mergeFileMaps CtorLaw.collectFromFile
+
+
+collectRecordAliases :
+    Registry
+    -> Array Protocol.ModuleExtraction
+    -> Dict String (Array String)
+collectRecordAliases registry modules =
+    modules
+        |> decodeFiles
+        |> Array.map (BareResolve.apply >> NameSub.apply registry)
+        |> mergeFileMaps RecordAlias.collectFromFile
 
 
 collectSoleConstructors :

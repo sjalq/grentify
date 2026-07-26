@@ -6,6 +6,7 @@ module Transform.Pipeline exposing
     , DepMaps
     , collectMappingEdits
     , collectPackageCtorArities
+    , collectPackageRecordAliases
     , collectPackageSoleCtors
     , convertEditKind
     , emptyDepMaps
@@ -92,10 +93,28 @@ type alias TransformResult =
     }
 
 
-{-| Cross-package knowledge a dependency exports to its dependents. -}
+{-| Cross-package knowledge a dependency exports to its dependents.
+
+D70 added `recordAliases`: Elm lets a record type alias be applied like a
+constructor (`PortFunnel.GenericMessage moduleName tag args`) and Gren does not,
+so `Ast.RecordAlias` lowers those to record literals from the *defining*
+module's field names. Field names are knowledge only the defining package holds,
+so a dependent that cannot see them silently left the application standing and
+`Ast.CtorLaw` recordified it as if it were a data constructor — emitting
+`PortFunnel.GenericMessage { first = …, second = …, third = … }` against an
+alias that is not a variant at all.
+
+D70 also added `reservedExports`: `Ast.Reserved` already refuses to guess a
+cross-MODULE escape and reads the defining module's decision from a package-wide
+map, for exactly the desync reason stated in its header. The package boundary is
+the same boundary — elm-codegen's `Elm.Annotation.alias` escapes to `alias_`,
+and a dependent that could not see that decision emitted `Type.alias`.
+-}
 type alias DepMaps =
     { ctorArities : Dict String Int
     , soleCtors : Dict String {}
+    , recordAliases : Dict String (Array String)
+    , reservedExports : Dict String String
     }
 
 
@@ -103,6 +122,8 @@ emptyDepMaps : DepMaps
 emptyDepMaps =
     { ctorArities = Dict.empty
     , soleCtors = Dict.empty
+    , recordAliases = Dict.empty
+    , reservedExports = Dict.empty
     }
 
 
@@ -387,6 +408,8 @@ transform registry depMaps extraction sources =
                         Evidence.collect registry
                             { constructorArities = depMaps.ctorArities
                             , soleConstructors = depMaps.soleCtors
+                            , recordAliases = depMaps.recordAliases
+                            , reservedExports = depMaps.reservedExports
                             }
                             extraction.modules
                 in
@@ -440,6 +463,10 @@ transform registry depMaps extraction sources =
                                     collected.evidence.exports.constructorArities
                                 , soleCtors =
                                     collected.evidence.exports.soleConstructors
+                                , recordAliases =
+                                    collected.evidence.exports.recordAliases
+                                , reservedExports =
+                                    collected.evidence.exports.reservedExports
                                 }
                             }
                         )
@@ -452,6 +479,14 @@ collectPackageCtorArities :
     -> Dict String Int
 collectPackageCtorArities =
     Evidence.collectConstructorArities
+
+
+collectPackageRecordAliases :
+    Registry
+    -> Array Protocol.ModuleExtraction
+    -> Dict String (Array String)
+collectPackageRecordAliases =
+    Evidence.collectRecordAliases
 
 
 collectPackageSoleCtors :

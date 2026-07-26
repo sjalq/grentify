@@ -380,6 +380,10 @@ transformSources context permissions cache offline namespaceModules extractCache
                                                                     Dict.foldl Dict.set state.depMaps.ctorArities draft.depExports.ctorArities
                                                                 , soleCtors =
                                                                     Dict.foldl Dict.set state.depMaps.soleCtors draft.depExports.soleCtors
+                                                                , recordAliases =
+                                                                    Dict.foldl Dict.set state.depMaps.recordAliases draft.depExports.recordAliases
+                                                                , reservedExports =
+                                                                    Dict.foldl Dict.set state.depMaps.reservedExports draft.depExports.reservedExports
                                                                 }
                                                             }
                                                         )
@@ -444,27 +448,36 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
                                     (\cached ->
                                         when cached is
                                             Just cachePath ->
-                                                logPortedCached context coordinate
+                                                Task.succeed {}
                                                     |> Task.andThen
                                                         (\_ ->
-                                                            materializeDraftFromCache permissions.fileSystem source cachePath digestHex
+                                                            -- D57/D70: an entry is a hit only if it
+                                                            -- carries its OWN cross-package facts. The
+                                                            -- extract cache is keyed on other
+                                                            -- ingredients and drifts, so falling back
+                                                            -- to it degraded silently to empty maps
+                                                            -- (D57's TYPE MISMATCH storm); an entry
+                                                            -- written before a fact joined the set
+                                                            -- cannot supply it at all. Both cases are
+                                                            -- the same answer: this entry is not
+                                                            -- self-sufficient, so re-port and re-bank.
+                                                            PortedCache.loadExports permissions.fileSystem entry
                                                                 |> Task.andThen
-                                                                    (\draft ->
-                                                                        -- D57: prefer the facts the ENTRY stored for
-                                                                        -- itself; the extract cache is keyed on other
-                                                                        -- ingredients and drifts, and its miss used to
-                                                                        -- degrade silently to empty arities.
-                                                                        PortedCache.loadExports permissions.fileSystem entry
-                                                                            |> Task.andThen
-                                                                                (\stored ->
-                                                                                    when stored is
-                                                                                        Just exports ->
-                                                                                            Task.succeed { draft | depExports = exports }
+                                                                    (\stored ->
+                                                                        when stored is
+                                                                            Just exports ->
+                                                                                logPortedCached context coordinate
+                                                                                    |> Task.andThen
+                                                                                        (\_ ->
+                                                                                            materializeDraftFromCache permissions.fileSystem source cachePath digestHex
+                                                                                        )
+                                                                                    |> Task.map (\draft -> { draft | depExports = exports })
 
-                                                                                        Nothing ->
-                                                                                            cachedDepExports permissions extractCacheEnabled cacheRoot assets registry coordinate source
-                                                                                                |> Task.map (\exports -> { draft | depExports = exports })
-                                                                                )
+                                                                            Nothing ->
+                                                                                Task.fail
+                                                                                    (PortError.create "PORTED_CACHE_INCOMPLETE"
+                                                                                        "Cached entry does not carry its own dependency facts."
+                                                                                    )
                                                                     )
                                                                 |> Task.onError
                                                                     (\_ ->
@@ -760,42 +773,6 @@ replaceSrcFromEntry context permissions cachePath packageDir =
                                 )
                         )
             )
-
-
-{-| D45: recover a ported-cache-served dependency's ctor arities from its
-cached extraction. Never fails — every miss degrades to an empty map (the
-dependent then behaves exactly as before D45 for this dep's ctors).
--}
-cachedDepExports :
-    Permissions
-    -> Bool
-    -> Path
-    -> Assets
-    -> Registry
-    -> PortedCache.Coordinate
-    -> Acquire.PackageSource
-    -> Task x Pipeline.DepMaps
-cachedDepExports permissions extractCacheEnabled cacheRoot assets registry coordinate source =
-    when ExtractCache.keyFor extractCacheEnabled cacheRoot coordinate source.sourceUrl is
-        Nothing ->
-            Task.succeed Pipeline.emptyDepMaps
-
-        Just key ->
-            Review.Runner.loadCachedExtraction permissions.fileSystem assets.review [ "src" ] key
-                |> Task.map
-                    (\maybeExtraction ->
-                        when maybeExtraction is
-                            Just extraction ->
-                                { ctorArities =
-                                    Pipeline.collectPackageCtorArities registry extraction.modules
-                                , soleCtors =
-                                    Pipeline.collectPackageSoleCtors registry extraction.modules
-                                }
-
-                            Nothing ->
-                                Pipeline.emptyDepMaps
-                    )
-                |> Task.onError (\_ -> Task.succeed Pipeline.emptyDepMaps)
 
 
 {-| Rebuild a Draft from a previously verified ported src/ tree so planning and
@@ -1406,6 +1383,7 @@ maybeFormatPackage platform fileSystem permission formatExecutable packageDir =
 
                 else
                     Format.formatPackage platform
+                        fileSystem
                         permission
                         { packageDirectory = packageDir
                         , formatExecutable = formatExecutable

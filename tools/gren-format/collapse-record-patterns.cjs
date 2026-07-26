@@ -282,9 +282,113 @@ function joinCtorPayloads(source) {
 /**
  * gren-format sometimes glues a short type body to the next declaration's
  * `{-|` doc comment on the same line. Force docs onto their own paragraph.
+ *
+ * Must be string-aware: packages that *emit* doc-comment delimiters as
+ * string literals (e.g. `Parser.multiComment "{-|"` or `Pretty.string "{-| "`)
+ * must not be rewritten. A naive `/(\S)([ \t]*)(\{-\|)/g` splits those
+ * literals across lines (ENDLESS STRING). Tracking string state closes the
+ * D48 idempotency hole for this pass — re-applying never damages `"{-|"`
+ * content, so a second walk of already-collapsed trees is safe for this
+ * rewrite even without the walker skip.
  */
 function separateDocComments(source) {
-  return source.replace(/(\S)([ \t]*)(\{-\|)/g, "$1\n\n$3");
+  let out = "";
+  let i = 0;
+  let inString = false;
+  let stringCh = "";
+  let inTriple = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  while (i < source.length) {
+    const ch = source[i];
+
+    if (inLineComment) {
+      out += ch;
+      if (ch === "\n") inLineComment = false;
+      i += 1;
+      continue;
+    }
+
+    if (inBlockComment) {
+      out += ch;
+      if (ch === "-" && source[i + 1] === "}") {
+        out += "}";
+        i += 2;
+        inBlockComment = false;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+
+    if (inString) {
+      out += ch;
+      if (inTriple) {
+        if (ch === '"' && source.startsWith('"""', i)) {
+          out += '""';
+          i += 3;
+          inString = false;
+          inTriple = false;
+          continue;
+        }
+        i += 1;
+        continue;
+      }
+      if (ch === "\\" && i + 1 < source.length) {
+        out += source[i + 1];
+        i += 2;
+        continue;
+      }
+      if (ch === stringCh) inString = false;
+      i += 1;
+      continue;
+    }
+
+    if (source.startsWith('"""', i)) {
+      inString = true;
+      inTriple = true;
+      stringCh = '"';
+      out += '"""';
+      i += 3;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      inTriple = false;
+      stringCh = ch;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === "-" && source[i + 1] === "-") {
+      inLineComment = true;
+      out += "--";
+      i += 2;
+      continue;
+    }
+    // Block / doc comments. Doc form `{-|` may need a blank line inserted
+    // when format glued it to the previous declaration; then both forms
+    // enter block-comment mode so their bodies are not re-tokenized.
+    if (ch === "{" && source[i + 1] === "-") {
+      if (source[i + 2] === "|") {
+        const glued = out.match(/(\S)([ \t]*)$/);
+        if (glued) {
+          out = out.slice(0, out.length - glued[0].length) + glued[1] + "\n\n";
+        }
+        out += "{-|";
+        i += 3;
+      } else {
+        out += "{-";
+        i += 2;
+      }
+      inBlockComment = true;
+      continue;
+    }
+
+    out += ch;
+    i += 1;
+  }
+  return out;
 }
 
 /**
@@ -538,13 +642,24 @@ function parenRecordFnArgs(source) {
  * The repair is the same shape as `joinTypeHeaders`: put the header back on one
  * line. A candidate is an INDENTED line opening with `(` or `{` — exactly what
  * `Ast.Print` emits for a `LetDestructure` pattern — that is not already a
- * complete header. Continuations are absorbed only while they stay at or below
- * the candidate's own indent depth (a shallower line is a sibling binding or a
- * new top-level declaration, never a continuation), and the join is committed
- * only if the result is bracket-balanced, ends in `=`, and holds no `->` (which
- * would mean we had walked into a type annotation, not a pattern).
+ * complete header.
+ *
+ * Continuations are absorbed only at the candidate's EXACT indent. Format's
+ * bug (the one we repair) places the split at the binding column; deeper
+ * lines are nested body (`let` / `when` / values), never header pieces.
+ * Absorbing deeper lines turned expression-level peels into bogus headers:
+ *   (cons x) <|
+ *       let                 ← deeper: body, not header
+ *           pm_3400109_0 =
+ * became `(cons x) <| let pm_3400109_0 =` → UNFINISHED DEFINITION (hrldcpr/elm-cons).
+ * Keyword-headed lines are also refused, so a same-indent `let` cannot be
+ * folded in either.
  */
 const MAX_HEADER_JOIN_LINES = 12;
+
+/** Line whose trimmed head is a Gren keyword — never a header continuation. */
+const HEADER_STOP_KEYWORD =
+  /^(let|in|if|then|else|when|is|case|of|type|alias|module|import|exposing|port)\b/;
 
 /** Bracket depth of `text`, skipping string and char literals. -1 if unbalanced. */
 function bracketDepth(text) {
@@ -577,6 +692,8 @@ function bracketDepth(text) {
 function isCompleteHeader(text) {
   if (!/=$/.test(text) || /[=/<>|!+*&^%-]=$/.test(text)) return false;
   if (text.includes("->")) return false;
+  // Expression peels that swallowed a nested `let … =` are not headers.
+  if (/\blet\b/.test(text)) return false;
   return bracketDepth(text) === 0;
 }
 
@@ -598,16 +715,19 @@ function joinSplitDefinitionHeaders(source) {
     while (j < lines.length && j - i <= MAX_HEADER_JOIN_LINES) {
       const next = lines[j];
       const nextIndent = (next.match(/^[ \t]*/) || [""])[0].length;
-      // Blank line, comment, or a shallower line: not a wrapped continuation.
+      const nextTrim = next.trim();
+      // Blank, comment, keyword body, shallower, or DEEPER: not a format wrap.
+      // Format's split lands at the binding column (same indent); deeper is body.
       if (
-        next.trim() === "" ||
+        nextTrim === "" ||
         next.includes("--") ||
         next.includes("{-") ||
-        nextIndent < indent
+        nextIndent !== indent ||
+        HEADER_STOP_KEYWORD.test(nextTrim)
       ) {
         break;
       }
-      joined = joined + " " + next.trim();
+      joined = joined + " " + nextTrim;
       j += 1;
       if (isCompleteHeader(joined)) {
         end = j;
@@ -656,6 +776,7 @@ module.exports = {
   joinBrokenRecordFieldValues,
   parenRecordFnArgs,
   joinSplitDefinitionHeaders,
+  isCompleteHeader,
   transform,
 };
 

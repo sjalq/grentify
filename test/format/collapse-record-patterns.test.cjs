@@ -9,6 +9,7 @@ const {
   transform,
   parenRecordFnArgs,
   separateGluedExprAndRecordBind,
+  separateDocComments,
   collapse,
   joinCtorPayloads,
   joinSplitDefinitionHeaders,
@@ -429,6 +430,143 @@ check("D67 leaves a multi-line parenthesized expression alone", () => {
   ].join("\n");
   const out = joinSplitDefinitionHeaders(src);
   assert.equal(out, src, "expression must stay untouched:\n" + out);
+});
+
+// --- D82: string-aware doc separation + no expression-let header join --------
+
+check("D82 separateDocComments leaves multiComment string delimiter intact", () => {
+  // the-sett/elm-syntax-dsl Elm.DSLParser
+  const src =
+    '        |= ((Parser.multiComment "{-| " "-}" Parser.Nestable)\n';
+  const out = separateDocComments(src);
+  assert.equal(out, src, "string literal must not be split:\n" + out);
+  assert.ok(!out.includes('"\n\n{-|'), out);
+});
+
+check("D82 separateDocComments leaves Pretty.string doc opener intact", () => {
+  // the-sett/elm-syntax-dsl Elm.Pretty
+  const src =
+    '    (((Pretty.string "{-| ") |> (Pretty.a doc)) |> (Pretty.a Pretty.line))\n';
+  const out = separateDocComments(src);
+  assert.equal(out, src, "Pretty.string body must stay one literal:\n" + out);
+});
+
+check("D82 separateDocComments still unglues a real glued doc comment", () => {
+  const src = "type alias Foo = Int{-| Bar docs\n-}\n";
+  const out = separateDocComments(src);
+  assert.ok(
+    out.includes("Int\n\n{-| Bar docs"),
+    "glued doc must gain a blank line:\n" + out,
+  );
+});
+
+check("D82 separateDocComments is idempotent on string and real docs", () => {
+  const src = [
+    'parser = Parser.multiComment "{-| " "-}" Parser.Nestable',
+    "type alias Foo = Int{-| docs",
+    "-}",
+    "",
+  ].join("\n");
+  const once = separateDocComments(src);
+  const twice = separateDocComments(once);
+  assert.equal(twice, once, "second apply must be a fixed point:\n" + twice);
+  assert.ok(once.includes('Parser.multiComment "{-| "'), once);
+  assert.ok(once.includes("Int\n\n{-| docs"), once);
+});
+
+check("D82 joinSplitDefinitionHeaders leaves expression-level let peel alone", () => {
+  // hrldcpr/elm-cons scanlList — Print/format layout before collapse
+  const src = [
+    "scanlList f x l =",
+    "    (cons x) <|",
+    "        let",
+    "            pm_3400109_0 =",
+    "                l",
+    "        in",
+    "        when Array.popFirst pm_3400109_0 is",
+    "            Nothing ->",
+    "                []",
+    "",
+  ].join("\n");
+  const out = transform(src);
+  assert.ok(
+    !out.includes("(cons x) <| let pm_"),
+    "must not glue let onto <| line:\n" + out,
+  );
+  assert.ok(/\(cons x\) <\|\n\s+let\n/.test(out), "let must stay nested:\n" + out);
+  assert.ok(
+    /pm_3400109_0 =\n\s+l/.test(out),
+    "binding body must remain:\n" + out,
+  );
+});
+
+check("D82 joinSplitDefinitionHeaders still joins same-indent multi-Cons header", () => {
+  const src = [
+    "    map3 f",
+    "        (Cons { first = x, second = xs }) (Cons { first = y, second = ys })",
+    "        (Cons { first = z, second = zs }) =",
+    "            f x y z",
+    "",
+  ].join("\n");
+  const out = joinSplitDefinitionHeaders(src);
+  assert.ok(
+    out.includes(
+      "(Cons { first = x, second = xs }) (Cons { first = y, second = ys }) (Cons { first = z, second = zs }) =",
+    ),
+    "same-indent header pieces must still join:\n" + out,
+  );
+});
+
+// --- W6.5: transform is a fixed point (format-post-pass idempotence) ---------
+
+check("W6.5 transform is idempotent on D82 specimens", () => {
+  const specimens = [
+    '        |= ((Parser.multiComment "{-| " "-}" Parser.Nestable)\n',
+    '    (((Pretty.string "{-| ") |> (Pretty.a doc)) |> (Pretty.a Pretty.line))\n',
+    [
+      "scanlList f x l =",
+      "    (cons x) <|",
+      "        let",
+      "            pm_3400109_0 =",
+      "                l",
+      "        in",
+      "        when Array.popFirst pm_3400109_0 is",
+      "            Nothing ->",
+      "                []",
+      "",
+    ].join("\n"),
+    [
+      "    let",
+      "        (Interval { first = Quantity.Quantity a, second = Quantity.Quantity b })",
+      "        =",
+      "            getInterval first",
+      "    in",
+      "    a",
+      "",
+    ].join("\n"),
+    [
+      "    let",
+      "        (DeltaState",
+      "        (Tuple8 { first = a, second = b, third = c, fourth = d })) =",
+      "            reduce",
+      "    in",
+      "    State a",
+      "",
+    ].join("\n"),
+    "type alias Foo = Int{-| docs\n-}\n\nf x =\n    { first =\n  a\n, second =\n  b\n}\n",
+  ];
+  for (const src of specimens) {
+    const once = transform(src);
+    const twice = transform(once);
+    assert.equal(
+      twice,
+      once,
+      "transform must be a fixed point:\n--- once ---\n" +
+        once +
+        "\n--- twice ---\n" +
+        twice,
+    );
+  }
 });
 
 if (failed > 0) {

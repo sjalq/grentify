@@ -427,36 +427,46 @@ collectExpr expr acc =
                                     |> collectExpr field.value) a fields)
 
         _ ->
+            -- D61: `foldExprChildren` ALREADY visits the scrutinee, every case
+            -- arm body, lambda bodies, let-declaration expressions and let
+            -- bodies. The branches below must therefore collect BINDERS ONLY.
+            -- They used to re-walk those same child expressions, so every
+            -- nested case doubled the work: a 10-deep cons pattern lowers to
+            -- 10 nested cases and cost 2^10 visits. `ktonon/elm-word` never
+            -- finished a port because of this; a 20-line repro took 14s, and
+            -- each extra level of list pattern multiplied it by ~2.6.
             Walk.foldExprChildren collectExpr acc expr
                 |>
                     (\a ->
                         when expr is
-                            ExprLambda
-                                { arguments = arguments, expression = body } ->
+                            ExprLambda { arguments = arguments } ->
                                 Array.foldl collectPattern a arguments
-                                    |> collectExpr body
 
-                            ExprCase { expression = scrutinee, cases = arms } ->
-                                collectExpr scrutinee a
-                                    |>
-                                        (\inner ->
-                                            Array.foldl
-                                                (\arm acc2 ->
-                                                    collectPattern arm.pattern
-                                                        acc2
-                                                        |> collectExpr arm.body)
-                                                inner arms)
+                            ExprCase { cases = arms } ->
+                                Array.foldl
+                                    (\arm acc2 -> collectPattern arm.pattern acc2)
+                                    a
+                                    arms
 
-                            ExprLet
-                                { declarations = declarations
-                                , expression = body
-                                } ->
-                                Array.foldl collectLetDecl a declarations
-                                    |> collectExpr body
+                            ExprLet { declarations = declarations } ->
+                                Array.foldl collectLetDeclBinders a declarations
 
                             _ ->
-                                -- foldExprChildren already walked child exprs for other forms
                                 a)
+
+
+{-| Binders only: the declaration's own expressions are visited by
+`Walk.foldExprChildren` (see D61 in `collectExpr`).
+-}
+collectLetDeclBinders : LetDecl -> Dict String {} -> Dict String {}
+collectLetDeclBinders declaration acc =
+    when declaration is
+        LetFunction fn ->
+            occupy fn.name acc
+                |> (\a -> Array.foldl collectPattern a fn.arguments)
+
+        LetDestructure { pattern = pattern } ->
+            collectPattern pattern acc
 
 
 collectLetDecl : LetDecl -> Dict String {} -> Dict String {}

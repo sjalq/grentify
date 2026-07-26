@@ -1873,10 +1873,21 @@ compileMatrixRows sole currentFunction seed scope columnNames rows terminalFail 
                         []
                         row.patterns
 
+                -- D60: inlining the fallthrough duplicates the ENTIRE remaining
+                -- match into this row, so an N-row match nests N copies of its
+                -- own tail. `ktonon/elm-word`'s `case ( wordSize, bytes )` (5
+                -- rows, cons patterns up to 8 deep) never finished a port.
+                -- D35 needs the inline only so a self-call stays in syntactic
+                -- tail position for Gren's TCO; that pays off on the small
+                -- recursive matches it was written for (list-extra's
+                -- isPrefixOf and friends) and is worthless on a match whose
+                -- tail is enormous. Above the budget, fall back to the shared
+                -- thunk: a deep-recursion risk beats never terminating.
                 mustInline =
                     when currentFunction is
                         Just functionName ->
                             tailHasSelfCall functionName nextRow
+                                && withinInlineBudget nextRow
 
                         Nothing ->
                             False
@@ -1936,6 +1947,39 @@ compileMatrixRow sole seed scope columnNames patterns body fail =
         )
         body
         pairs
+
+
+{-| Node budget for duplicating a fallthrough continuation (D60).
+
+Counting stops as soon as the budget is exceeded, so a pathological tail costs
+`inlineBudget` steps to reject, not a full traversal.
+-}
+inlineBudget : Int
+inlineBudget =
+    400
+
+
+withinInlineBudget : Expr -> Bool
+withinInlineBudget expression =
+    countNodesUpTo inlineBudget expression <= inlineBudget
+
+
+countNodesUpTo : Int -> Expr -> Int
+countNodesUpTo budget expression =
+    if budget <= 0 then
+        1
+
+    else
+        Walk.foldExprChildren
+            (\child total ->
+                if total > budget then
+                    total
+
+                else
+                    total + countNodesUpTo (budget - total) child
+            )
+            1
+            expression
 
 
 {-| Whether the current function calls itself in a syntactic tail position.

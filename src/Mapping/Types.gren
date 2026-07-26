@@ -16,6 +16,7 @@ module Mapping.Types exposing
     , adapterIdName
     , guaranteeName
     , weakestGuarantee
+    , mappingAbsentModules
     , mappingElmPackage
     , mappingGrenPackage
     , mappingKind
@@ -128,12 +129,21 @@ type alias ModuleMapping =
     }
 
 
+{-| `absentModules` names source modules of a MAPPED package that the Gren
+analogue does not have — `Shrink` and `Test.Html.*` against gren-lang/test,
+whose 5.0.0 exposes neither. A mapped package is never transpiled, so its
+module set is a fact about the mapping and is held nowhere else; without it the
+import survives untouched and the port only fails much later, as a Gren
+`MODULE NOT FOUND` that names no package and no cause. Values are the reason,
+read off the Gren package source, and are printed verbatim in the refusal.
+-}
 type alias PackageDetails =
     { elmPackage : String
     , grenPackage : String
     , grenVersion : String
     , platform : Platform
     , modules : Array ModuleMapping
+    , absentModules : Dict String String
     }
 
 
@@ -199,6 +209,19 @@ mappingModules mapping =
 
         Transpile _ ->
             []
+
+
+mappingAbsentModules : PackageMapping -> Dict String String
+mappingAbsentModules mapping =
+    when mapping is
+        GrenAnalogue details ->
+            details.absentModules
+
+        Absorbed details ->
+            details.absentModules
+
+        Transpile _ ->
+            Dict.empty
 
 
 mappingPlatform : PackageMapping -> Maybe Platform

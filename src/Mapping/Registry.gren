@@ -1,5 +1,6 @@
 module Mapping.Registry exposing
-    ( empty
+    ( absentModuleFor
+    , empty
     , applyVersionedMappings
     , fromDocument
     , inferPlatform
@@ -15,7 +16,7 @@ module Mapping.Registry exposing
 import Array
 import Dict exposing (Dict)
 import Elm.Semver as Semver exposing (Range)
-import Mapping.Types exposing (MappingDocument, ModuleMapping, PackageMapping, Platform(..), PlatformInferenceError(..), Registry, mappingElmPackage, mappingModules, mappingPlatform, platformName)
+import Mapping.Types exposing (MappingDocument, ModuleMapping, PackageMapping, Platform(..), PlatformInferenceError(..), Registry, mappingAbsentModules, mappingElmPackage, mappingGrenPackage, mappingModules, mappingPlatform, platformName)
 import Maybe exposing (Maybe(..))
 import Result exposing (Result(..))
 
@@ -151,6 +152,32 @@ recordAliasShapes registry =
         )
         Dict.empty
         registry.modules
+
+
+{-| The mapped package that states `moduleName` has no Gren counterpart.
+
+Answers "the import is unmappable, and here is who says so", which no other
+lookup can: a mapped package is never transpiled, so its module set is a fact
+about the mapping and is held only in the mapping file.
+-}
+absentModuleFor :
+    String
+    -> Registry
+    -> Maybe { elmPackage : String, grenPackage : String, reason : String }
+absentModuleFor moduleName registry =
+    packagesInOrder registry
+        |> Array.mapAndKeepJust
+            (\mapping ->
+                Dict.get moduleName (mappingAbsentModules mapping)
+                    |> Maybe.map
+                        (\reason ->
+                            { elmPackage = mappingElmPackage mapping
+                            , grenPackage = mappingGrenPackage mapping
+                            , reason = reason
+                            }
+                        )
+            )
+        |> Array.first
 
 
 packagesInOrder : Registry -> Array PackageMapping

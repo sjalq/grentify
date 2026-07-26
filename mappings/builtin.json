@@ -560,7 +560,13 @@
           },
           "types": { "Fuzzer": "Fuzzer" }
         }
-      ]
+      ],
+      "absentModules": {
+        "Shrink": "gren-lang/test 5.0.0 exposes no Shrink; shrinking is internal (Simplify) and there is no user-facing shrinker API to map onto",
+        "Test.Html.Event": "gren-lang/test 5.0.0 exposes no Test.Html.* modules; Gren has no HTML-testing analogue",
+        "Test.Html.Query": "gren-lang/test 5.0.0 exposes no Test.Html.* modules; Gren has no HTML-testing analogue",
+        "Test.Html.Selector": "gren-lang/test 5.0.0 exposes no Test.Html.* modules; Gren has no HTML-testing analogue"
+      }
     },
     {
       "kind": "gren-analogue",

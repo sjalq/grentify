@@ -85,7 +85,7 @@ validate spec =
                 invalid ("Unsupported SPDX license " ++ spec.license ++ ".")
 
             else if not (validExposedModules spec.exposedModules) then
-                invalid "One or more exposed Gren module names are invalid."
+                invalid (invalidExposedMessage spec.exposedModules)
 
             else if not (validDependencies spec.dependencies) then
                 invalid "One or more Gren dependencies or requirements are invalid."
@@ -116,14 +116,31 @@ validModule value =
 
 validExposedModules : ExposedModules -> Bool
 validExposedModules exposed =
+    Array.isEmpty (invalidExposedModules exposed)
+
+
+invalidExposedModules : ExposedModules -> Array String
+invalidExposedModules exposed =
     when exposed is
         ExposedArray modules ->
-            Array.all validModule modules
+            Array.keepIf (\name -> not (validModule name)) modules
 
         ExposedDict groups ->
             groups
                 |> Dict.values
-                |> Array.all (Array.all validModule)
+                |> Array.flatten
+                |> Array.keepIf (\name -> not (validModule name))
+
+
+{-| Name the offending values, not just the rule: a Gren module name is
+dot-separated segments of `[A-Z][A-Za-z0-9]*`, so the usual cause is a
+character (`_`) that is legal in Elm and has no Gren spelling.
+-}
+invalidExposedMessage : ExposedModules -> String
+invalidExposedMessage exposed =
+    "These exposed Gren module names are invalid: "
+        ++ String.join ", " (invalidExposedModules exposed)
+        ++ ". Every segment must start with an uppercase letter and continue with letters and digits only."
 
 
 validDependencies : Dict String Dependency -> Bool

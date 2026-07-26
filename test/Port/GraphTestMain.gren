@@ -123,6 +123,7 @@ checkDependencyStrategies =
             , grenVersion = "1.0.0"
             , platform = Common
             , modules = []
+            , absentModules = Dict.empty
             }
 
         registry =

@@ -12,6 +12,7 @@ module Port.Plan exposing
 names, platforms, dependency requirements, and package manifests.
 -}
 
+import Ast.ModuleName as ModuleName
 import Cli
 import Compiler.Platform as CompilerPlatform exposing (Platform)
 import Dict exposing (Dict)
@@ -158,7 +159,9 @@ buildManifest options =
                 , summary = options.source.summary
                 , license = options.source.license
                 , version = options.identity.version
-                , exposedModules = ExposedArray options.source.exposedModules
+                , exposedModules =
+                    -- Same rename the emitted module headers carry (Ast.ModuleName).
+                    ExposedArray (Array.map ModuleName.toGren options.source.exposedModules)
                 , grenVersion =
                     if options.source.isApplication then
                         "0.6.6"

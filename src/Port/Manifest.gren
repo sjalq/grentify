@@ -1,5 +1,6 @@
 module Port.Manifest exposing (Built, LocalDependency, build)
 
+import Ast.ModuleName as ModuleName
 import Cli
 import Compiler.Platform as GrenPlatform exposing (Platform)
 import Dict exposing (Dict)
@@ -59,7 +60,7 @@ build options =
                                                     , summary = options.source.summary
                                                     , license = options.source.license
                                                     , version = Elm.Semver.versionToString options.source.version
-                                                    , exposedModules = GrenManifest.ExposedArray options.source.exposedModules
+                                                    , exposedModules = GrenManifest.ExposedArray (Array.map ModuleName.toGren options.source.exposedModules)
                                                     -- Applications pin an exact compiler version.
                                                     , grenVersion = "0.6.6"
                                                     , dependencies = dependencies
@@ -78,7 +79,7 @@ build options =
                                                     , summary = options.source.summary
                                                     , license = options.source.license
                                                     , version = Elm.Semver.versionToString options.source.version
-                                                    , exposedModules = GrenManifest.ExposedArray options.source.exposedModules
+                                                    , exposedModules = GrenManifest.ExposedArray (Array.map ModuleName.toGren options.source.exposedModules)
                                                     , grenVersion = "0.6.0 <= v < 0.7.0"
                                                     , dependencies = dependencies
                                                     , sourceDirectories = [ "src" ]

@@ -1,0 +1,251 @@
+module Ast.ModuleNameTest exposing (tests)
+
+{-| D72: Elm module names may contain `_`; Gren module names may not. The
+rename is proved against the compiler's own `Compiler.ModuleName.fromString`,
+which is the parser that refused the ports.
+-}
+
+import Array exposing ( Array )
+import Ast.ModuleName as ModuleName
+import Ast.Print as Print
+import Ast.Types exposing
+    ( Declaration(..)
+    , Expr(..)
+    , Exposing(..)
+    , File
+    , ModuleKind(..)
+    , Pattern(..)
+    , TypeAnn(..)
+    )
+import Compiler.ModuleName as CompilerModuleName
+import Compiler.Platform as CompilerPlatform
+import Dict
+import Emit.Manifest as EmitManifest
+import Port.Error as PortError
+
+
+type alias Check =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array Check
+tests =
+    [ identityOnLegalNames
+    , renamesUnderscoredSegments
+    , renamesPathSegments
+    , everyElmNameBecomesGrenLegal
+    , renameIsIdempotent
+    , printerRenamesEveryModulePosition
+    , manifestNamesTheOffendingModule
+    ]
+
+
+ok : String -> Check
+ok name =
+    { name = name, passed = True, details = "" }
+
+
+fail : String -> String -> Check
+fail name details =
+    { name = name, passed = False, details = details }
+
+
+expectEqual : String -> String -> String -> Check
+expectEqual name expected actual =
+    if expected == actual then
+        ok name
+
+    else
+        fail name ("expected " ++ expected ++ ", got " ++ actual)
+
+
+identityOnLegalNames : Check
+identityOnLegalNames =
+    let
+        legal =
+            [ "Main", "String.Graphemes", "Derberos.Date.L10n", "Base64", "A" ]
+
+        changed =
+            Array.keepIf (\name -> ModuleName.toGren name /= name) legal
+    in
+    if Array.isEmpty changed then
+        ok "toGren is the identity on names Gren already accepts"
+
+    else
+        fail "toGren is the identity on names Gren already accepts"
+            (String.join ", " changed)
+
+
+renamesUnderscoredSegments : Check
+renamesUnderscoredSegments =
+    let
+        cases =
+            [ { from = "Extended_Pictographic", to = "ExtendedPictographic" }
+            , { from = "EN_US", to = "ENUS" }
+            , { from = "Internals_", to = "Internals" }
+            , { from = "My_module", to = "MyModule" }
+            , { from = "A__B", to = "AB" }
+            , { from = "Foo_1", to = "Foo1" }
+            , { from = "String.Graphemes.Data.Extended_Pictographic"
+              , to = "String.Graphemes.Data.ExtendedPictographic"
+              }
+            ]
+
+        wrong =
+            cases
+                |> Array.keepIf (\case_ -> ModuleName.toGren case_.from /= case_.to)
+                |> Array.map (\case_ -> case_.from ++ " -> " ++ ModuleName.toGren case_.from)
+    in
+    if Array.isEmpty wrong then
+        ok "underscored segments lose the underscore and capitalize the next character"
+
+    else
+        fail "underscored segments lose the underscore and capitalize the next character"
+            (String.join ", " wrong)
+
+
+renamesPathSegments : Check
+renamesPathSegments =
+    expectEqual "toGrenPath renames each segment and keeps the separators"
+        "src/String/Graphemes/Data/ExtendedPictographic"
+        (ModuleName.toGrenPath "src/String/Graphemes/Data/Extended_Pictographic")
+
+
+{-| Property: every Elm-legal module name has a Gren-legal rename. Names are
+enumerated over an alphabet that covers the whole difference between the two
+grammars (`_`, digits, lower, upper), so the space is small and exhaustive.
+-}
+elmLegalNames : Array String
+elmLegalNames =
+    let
+        alphabet =
+            [ "A", "b", "1", "_" ]
+
+        grow names =
+            names
+                |> Array.map (\name -> Array.map (\char -> name ++ char) alphabet)
+                |> Array.flatten
+    in
+    [ "A", "Z" ]
+        |> (\seed -> Array.append seed (grow seed))
+        |> (\seed -> Array.append seed (grow (grow [ "A", "Z" ])))
+        |> (\seed -> Array.append seed (grow (grow (grow [ "A" ]))))
+
+
+everyElmNameBecomesGrenLegal : Check
+everyElmNameBecomesGrenLegal =
+    let
+        rejected =
+            elmLegalNames
+                |> Array.keepIf
+                    (\name ->
+                        CompilerModuleName.fromString (ModuleName.toGren name) == Nothing
+                    )
+    in
+    if Array.isEmpty rejected then
+        ok
+            ("every Elm-legal module name renames to one Gren parses ("
+                ++ String.fromInt (Array.length elmLegalNames)
+                ++ " names)"
+            )
+
+    else
+        fail "every Elm-legal module name renames to one Gren parses"
+            (String.join ", " (Array.takeFirst 5 rejected))
+
+
+renameIsIdempotent : Check
+renameIsIdempotent =
+    let
+        unstable =
+            elmLegalNames
+                |> Array.keepIf
+                    (\name ->
+                        ModuleName.toGren (ModuleName.toGren name) /= ModuleName.toGren name
+                    )
+    in
+    if Array.isEmpty unstable then
+        ok "the rename is idempotent"
+
+    else
+        fail "the rename is idempotent" (String.join ", " (Array.takeFirst 5 unstable))
+
+
+{-| The printer is the only place a module name becomes output text: header,
+import, alias, and the qualifier of a reference must all carry the rename, or a
+dependent module would import a name its owner never emitted.
+-}
+printerRenamesEveryModulePosition : Check
+printerRenamesEveryModulePosition =
+    let
+        file : File
+        file =
+            { schemaVersion = 1
+            , moduleDefinition =
+                { kind = NormalModule
+                , moduleName = "String.Graphemes.Data.Extended_Pictographic"
+                , exposing_ = ExposeAll
+                }
+            , comments = []
+            , imports =
+                [ { moduleName = "Derberos.Date.L10n.EN_US"
+                  , alias = Just "EN_US"
+                  , exposing_ = Nothing
+                  }
+                ]
+            , declarations =
+                [ DeclFunction
+                    { name = "subject"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprVar { moduleName = Just "Derberos.Date.L10n.EN_US", name = "config" }
+                    }
+                ]
+            }
+
+        printed =
+            Print.print file
+
+        leftovers =
+            [ "Extended_Pictographic", "EN_US" ]
+                |> Array.keepIf (\name -> String.contains name printed)
+    in
+    if Array.isEmpty leftovers && String.contains "ENUS.config" printed then
+        ok "the printer renames header, import, alias and reference qualifier"
+
+    else
+        fail "the printer renames header, import, alias and reference qualifier" printed
+
+
+{-| D64 rule: a refusal names the offending value. -}
+manifestNamesTheOffendingModule : Check
+manifestNamesTheOffendingModule =
+    let
+        spec =
+            { kind = EmitManifest.PackageKind
+            , platform = CompilerPlatform.Common
+            , name = "AdrianRibao/elm-derberos-date"
+            , summary = "fixture"
+            , license = "MIT"
+            , version = "1.2.3"
+            , exposedModules = EmitManifest.ExposedArray [ "Derberos.Date.Core", "Derberos.Date.L10n.EN_US" ]
+            , grenVersion = "0.6.0 <= v < 0.7.0"
+            , dependencies = Dict.empty
+            , sourceDirectories = [ "src" ]
+            }
+    in
+    when EmitManifest.encode spec is
+        Ok _ ->
+            fail "an invalid exposed module is refused by name" "encode accepted EN_US"
+
+        Err error ->
+            if String.contains "Derberos.Date.L10n.EN_US" (PortError.message error) then
+                ok "an invalid exposed module is refused by name"
+
+            else
+                fail "an invalid exposed module is refused by name" (PortError.message error)

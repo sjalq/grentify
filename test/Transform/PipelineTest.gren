@@ -36,6 +36,7 @@ tests =
     , reportsApproximateGuarantees
     , convertsSourcePathsSafely
     , compiledFixtureHasExpectedBehavior
+    , refusesImportsAbsentFromTheGrenAnalogue
     ]
 
 
@@ -609,6 +610,78 @@ reportsApproximateGuarantees =
                 "The Markdown approximation was not reported exactly once."
 
 
+{-| D74: an import the Gren analogue does not have is refused where it is
+written, naming the module, both packages and the reason — not left to surface
+as a `MODULE NOT FOUND` from the compiler after the whole graph is ported. A
+package that declares the module itself keeps it (D12 fallthrough).
+-}
+refusesImportsAbsentFromTheGrenAnalogue : TestResult
+refusesImportsAbsentFromTheGrenAnalogue =
+    let
+        path =
+            "src/Shrink.elm"
+
+        source =
+            String.join "\n"
+                [ "module Shrink exposing (value)"
+                , ""
+                , "value ="
+                , "    1"
+                , ""
+                ]
+
+        absentRegistry =
+            Registry.fromDocument
+                { schemaVersion = 1
+                , versionedPackages = []
+                , packages =
+                    [ GrenAnalogue
+                        { elmPackage = "elm-explorations/test"
+                        , grenPackage = "gren-lang/test"
+                        , grenVersion = "5.0.0"
+                        , platform = Common
+                        , modules = []
+                        , absentModules =
+                            Dict.singleton "Shrink" "gren-lang/test 5.0.0 exposes no Shrink"
+                        }
+                    ]
+                }
+
+        run moduleName =
+            Pipeline.transform absentRegistry
+                Pipeline.emptyDepMaps
+                (withImportedModules [ "Shrink" ] (extractionFor path moduleName))
+                [ { path = path, source = source } ]
+
+        refusal =
+            when run "Importer" is
+                Err error ->
+                    { refused = PortError.code error == "MAPPING_MODULE_ABSENT"
+                    , message = PortError.message error
+                    }
+
+                Ok _ ->
+                    { refused = False, message = "the unmappable import was accepted" }
+
+        ownerKeepsIt =
+            when run "Shrink" is
+                Err _ ->
+                    False
+
+                Ok _ ->
+                    True
+    in
+    outcome "an import absent from the Gren analogue is refused by name"
+        (refusal.refused
+            && String.contains "Shrink" refusal.message
+            && String.contains "elm-explorations/test" refusal.message
+            && String.contains "gren-lang/test" refusal.message
+            && String.contains "exposes no Shrink" refusal.message
+            && ownerKeepsIt
+        )
+        refusal.message
+
+
 diagnosticCodes : Result PortError.Error Pipeline.TransformResult -> Array String
 diagnosticCodes result =
     when result is
@@ -908,6 +981,7 @@ registry =
                       , recordAliases = Dict.empty
                       }
                     ]
+                , absentModules = Dict.empty
                 }
             ]
         }

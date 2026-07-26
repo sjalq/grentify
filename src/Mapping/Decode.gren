@@ -143,12 +143,14 @@ decodePackageKind object kind elmPackage grenPackage =
 decodeMappedDetails object elmPackage grenPackage =
     Result.map3
         (\grenVersion platform modules ->
-            { elmPackage = elmPackage
-            , grenPackage = grenPackage
-            , grenVersion = grenVersion
-            , platform = platform
-            , modules = modules
-            }
+            \absentModules ->
+                { elmPackage = elmPackage
+                , grenPackage = grenPackage
+                , grenVersion = grenVersion
+                , platform = platform
+                , modules = modules
+                , absentModules = absentModules
+                }
         )
         (requiredString "grenVersion" object
             |> Result.andThen validateSemanticVersion
@@ -159,6 +161,46 @@ decodeMappedDetails object elmPackage grenPackage =
         (requiredField "modules" (Decode.array moduleDecoder) object
             |> Result.andThen (ensureUniqueModules elmPackage)
         )
+        |> Result.andMap
+            (optionalStringMap "absentModules" object
+                |> Result.andThen (validateAbsentModules elmPackage)
+            )
+
+
+{-| A module cannot be both mapped and absent, and an absence without a stated
+reason is a claim with no evidence behind it.
+-}
+validateAbsentModules : String -> Dict String String -> Result String (Dict String String)
+validateAbsentModules elmPackage absentModules =
+    Dict.foldl
+        (\moduleName reason validation ->
+            validation
+                |> Result.andThen
+                    (\_ ->
+                        if not (isValidModuleName moduleName) then
+                            Err
+                                ("Absent modules for '"
+                                    ++ elmPackage
+                                    ++ "' contain invalid module name '"
+                                    ++ moduleName
+                                    ++ "'."
+                                )
+
+                        else if String.isEmpty reason then
+                            Err
+                                ("Absent module '"
+                                    ++ moduleName
+                                    ++ "' of '"
+                                    ++ elmPackage
+                                    ++ "' must state why the Gren package has no counterpart."
+                                )
+
+                        else
+                            Ok absentModules
+                    )
+        )
+        (Ok absentModules)
+        absentModules
 
 
 decodePlatform : String -> Result String Platform

@@ -64,6 +64,12 @@ DECLARATION, all-or-nothing:
     key-taking callbacks are wrapped. The declaration is rewritten
     consistently or not at all.
 
+**Law (let signatures, D72):** `rewriteAnn` applied to a top-level
+`DeclFunction.signature` is also applied to every nested
+`LetFunction.signature` via `Walk.mapLetSignatures`. A let annotation
+that still said `Dict (a, b) v` after the rest of the file used the
+encoded key type would be silent wrong output.
+
 R3 cannot regress a package that ports today: a seed requires either a
 tuple key in a comparable position (which Gren rejects today) or an
 inline/alias tuple-keyed annotation (which R2/R2b already rewrote today).
@@ -154,7 +160,21 @@ applyDeclaration evidence moduleName declaration =
             -- indexes or from an inline/alias container in THIS signature.
             -- With neither, no rule can fire, so the body is not walked at all.
             if Evidence.isEmpty evidence && signatureSeeds == noSeeds then
-                DeclFunction { fn | signature = rewrittenSignature }
+                -- Still rewrite nested let signatures: R2 can fire on a
+                -- let-level `Dict (a, b) v` even when the outer decl is clean.
+                DeclFunction
+                    { fn
+                        | signature = rewrittenSignature
+                        , expression =
+                              Walk.mapLetSignatures
+                                  (\sig ->
+                                      { sig
+                                          | typeAnnotation =
+                                              rewriteAnn evidence sig.typeAnnotation
+                                      }
+                                  )
+                                  fn.expression
+                    }
 
             else
                 let
@@ -191,7 +211,17 @@ applyDeclaration evidence moduleName declaration =
                 DeclFunction
                     { fn
                         | signature = rewrittenSignature
-                        , expression = rewriteExpr { env = env, scope = scope } 0 withTails
+                        , expression =
+                              rewriteExpr { env = env, scope = scope } 0 withTails
+                                  -- D72: same rewriteAnn as DeclFunction.signature
+                                  -- applied to every nested LetFunction.signature
+                                  |> Walk.mapLetSignatures
+                                      (\sig ->
+                                          { sig
+                                              | typeAnnotation =
+                                                  rewriteAnn evidence sig.typeAnnotation
+                                          }
+                                      )
                     }
 
         DeclCustomType custom ->

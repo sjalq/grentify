@@ -984,6 +984,19 @@ printLetDecl ctx declaration =
     when declaration is
         LetFunction fn ->
             let
+                -- D72: let-level type annotation. ExprLet joins decls with
+                -- `"let\n    "` / `"\n\n    "` so only the FIRST line of each
+                -- decl inherits the let-column indent; later lines must carry
+                -- the same 4-space base themselves. Signature + binder share
+                -- that column (Gren requires equal indent); body stays at +8.
+                signature =
+                    when fn.signature is
+                        Just sig ->
+                            printSignature ctx sig ++ "\n    "
+
+                        Nothing ->
+                            ""
+
                 args =
                     if Array.isEmpty fn.arguments then
                         ""
@@ -993,7 +1006,8 @@ printLetDecl ctx declaration =
                             ++ String.join " "
                                 (Array.map (printPattern ctx 1) fn.arguments)
             in
-            fn.name
+            signature
+                ++ fn.name
                 ++ args
                 ++ " =\n        "
                 ++ indentBlock 2 (printExpr ctx 0 fn.expression)

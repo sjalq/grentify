@@ -60,6 +60,8 @@ tests =
     , encoderInjectiveOnIntPair
     , encoderMatchesLiteralAndLambda
     , homogeneousKeyKeepsElementType
+    -- D72: rewriteAnn on let-level signatures (same as DeclFunction)
+    , letSignatureDictKeyRewritten
     ]
 
 
@@ -661,6 +663,7 @@ edgeIndicesDecl =
                 { declarations =
                     [ LetFunction
                         { name = "addFace"
+                        , signature = Nothing
                         , arguments = [ PatVar "edgeSet" ]
                         , expression =
                             ExprBinop
@@ -758,6 +761,7 @@ edgeFaceCountsDecl =
                 { declarations =
                     [ LetFunction
                         { name = "add"
+                        , signature = Nothing
                         , arguments = [ PatVar "edgeKey", PatVar "edgeDict" ]
                         , expression =
                             ExprApplication
@@ -1098,3 +1102,62 @@ homogeneousKeyKeepsElementType =
     else
         fail "homogeneousKeyKeepsElementType"
             (homogeneous ++ " / " ++ mixed ++ " / identity=" ++ Debug.toString identityOnLeaves)
+
+
+{-| D72: `rewriteAnn` on a top-level signature must also run on nested
+let signatures. A let-bound `Dict ( Int, Int ) v` that kept the tuple key
+while the outer file used the encoded form would be silent wrong output.
+-}
+letSignatureDictKeyRewritten : Check
+letSignatureDictKeyRewritten =
+    let
+        file =
+            applied
+                [ DeclFunction
+                    { name = "outer"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = []
+                    , expression =
+                        ExprLet
+                            { declarations =
+                                [ LetFunction
+                                    { name = "local"
+                                    , signature =
+                                        Just
+                                            { name = "local"
+                                            , typeAnnotation =
+                                                dictOf intPair intType
+                                            }
+                                    , arguments = []
+                                    , expression = bare "Dict.empty"
+                                    }
+                                ]
+                            , expression = bare "local"
+                            }
+                    }
+                ]
+
+        letSig =
+            when bodyOf "outer" file is
+                Just (ExprLet { declarations = decls }) ->
+                    when Array.get 0 decls is
+                        Just (LetFunction { signature = Just sig }) ->
+                            Just sig.typeAnnotation
+
+                        _ ->
+                            Nothing
+
+                _ ->
+                    Nothing
+    in
+    when letSig is
+        -- Encoded key type: Dict (List Int) Int (or similar keyAnn shape)
+        Just (TypeTyped { ref = { name = "Dict" }, arguments = [ TypeTyped { ref = { name = "List" } }, _ ] }) ->
+            ok "letSignatureDictKeyRewritten"
+
+        Just (TypeTyped { ref = { name = "Dict" }, arguments = [ TypeTuple _, _ ] }) ->
+            fail "letSignatureDictKeyRewritten" "let signature still has a tuple key"
+
+        other ->
+            fail "letSignatureDictKeyRewritten" ("got: " ++ Debug.toString other)

@@ -16,6 +16,12 @@ qualifier is ours to choose: `importQualifiers` hands each import a qualifier
 nobody else holds, `requalifyImport` restates the `as` clause to match, and
 `qualifyRef` prints each ref under the qualifier of its own home module. See
 `importQualifiers` for how claims are settled.
+
+**Law (let signatures, D72):** every type rewrite applied to
+`DeclFunction.signature` is also applied to nested `LetFunction.signature`
+via `Walk.mapLetSignatures` (catalog sub, bare remaps, import requalify).
+A let annotation that kept an Elm type name while the rest of the file used
+Gren names would be silent wrong output — worse than dropping the annotation.
 -}
 
 import Array exposing ( Array )
@@ -152,6 +158,9 @@ rewriteBareRemaps topLevel remaps declaration =
                                   remaps
                                   (Array.foldl Scope.addPatternNames topLevel fn.arguments)
                                   fn.expression
+                                  -- D72: bare remaps on let-level type annotations
+                                  |> Walk.mapLetSignatures
+                                      (rewriteBareSignature remaps)
                     }
 
             DeclAlias aliasDecl ->
@@ -179,6 +188,7 @@ rewriteBareRemaps topLevel remaps declaration =
                     { pattern = rewriteBarePattern remaps pattern
                     , expression =
                           Scope.rewriteBareVars (rewriteBarePattern remaps) remaps topLevel expression
+                              |> Walk.mapLetSignatures (rewriteBareSignature remaps)
                     }
 
             DeclInfix ->
@@ -382,7 +392,10 @@ qualifyDeclaration quals declaration =
                     | signature =
                           Maybe.map (qualifySignature quals) fn.signature
                     , arguments = Array.map (qualifyPattern quals) fn.arguments
-                    , expression = qualifyExpr quals fn.expression
+                    , expression =
+                          qualifyExpr quals fn.expression
+                              -- D72: import-qualifier rewrites on let signatures
+                              |> Walk.mapLetSignatures (qualifySignature quals)
                 }
 
         DeclAlias aliasDecl ->
@@ -407,7 +420,9 @@ qualifyDeclaration quals declaration =
         DeclDestructure { pattern = pattern, expression = expression } ->
             DeclDestructure
                 { pattern = qualifyPattern quals pattern
-                , expression = qualifyExpr quals expression
+                , expression =
+                      qualifyExpr quals expression
+                          |> Walk.mapLetSignatures (qualifySignature quals)
                 }
 
         DeclInfix ->
@@ -593,7 +608,10 @@ subDeclaration registry declaration =
                 { fn
                     | signature = Maybe.map (subSignature registry) fn.signature
                     , arguments = Array.map (subPattern registry) fn.arguments
-                    , expression = subExpr registry fn.expression
+                    , expression =
+                          subExpr registry fn.expression
+                              -- D72: catalog name substitution on let signatures
+                              |> Walk.mapLetSignatures (subSignature registry)
                 }
 
         DeclAlias aliasDecl ->
@@ -621,7 +639,9 @@ subDeclaration registry declaration =
         DeclDestructure { pattern = pattern, expression = expression } ->
             DeclDestructure
                 { pattern = subPattern registry pattern
-                , expression = subExpr registry expression
+                , expression =
+                      subExpr registry expression
+                          |> Walk.mapLetSignatures (subSignature registry)
                 }
 
 

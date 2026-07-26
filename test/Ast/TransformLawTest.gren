@@ -227,6 +227,7 @@ aliasUseBody shape fieldNames args =
                         { declarations =
                             [ LetFunction
                                 { name = "partial"
+                                , signature = Nothing
                                 , arguments = []
                                 , expression =
                                     ExprApplication [ bare "P", firstArg ]
@@ -311,6 +312,7 @@ ctorUseBody shape args =
                         { declarations =
                             [ LetFunction
                                 { name = "make"
+                                , signature = Nothing
                                 , arguments = []
                                 , expression =
                                     ExprApplication [ bare "K", firstArg ]

@@ -15,6 +15,7 @@ import Ast.Types exposing
     , LetDecl(..)
     , ModuleKind(..)
     , Pattern(..)
+    , TypeAnn(..)
     )
 import Dict
 import String
@@ -35,6 +36,8 @@ tests =
     , letBoundReservedBinderMovesWithItsReferences
     , aliasQualifiedReferenceFollowsDefiningModuleEscape
     , letBoundFunctionNameIsEscaped
+    -- D72: reserved rename on let-level type annotations
+    , letSignatureReservedTypeIsEscaped
     ]
 
 
@@ -59,6 +62,7 @@ letBoundReservedBinderMovesWithItsReferences =
                             { declarations =
                                 [ LetFunction
                                     { name = "alias"
+                                    , signature = Nothing
                                     , arguments = []
                                     , expression =
                                         ExprVar { moduleName = Nothing, name = "pair" }
@@ -393,6 +397,7 @@ letBoundFunctionNameIsEscaped =
                             { declarations =
                                 [ LetFunction
                                     { name = "when"
+                                    , signature = Nothing
                                     , arguments = [ PatVar "propOf" ]
                                     , expression =
                                         ExprVar { moduleName = Nothing, name = "propOf" }
@@ -419,5 +424,80 @@ letBoundFunctionNameIsEscaped =
     in
     outcome
         "reserved escape reaches let-bound function names"
+        passed
+        ("printed:\n" ++ printed)
+
+
+{-| D72: a let binding with a type annotation renames the signature's
+name the same way as the binder. Without `rewriteSignature` on
+`LetFunction.signature`, the printed source would be
+`when : …` above `when_ = …` — a loud parse failure, but the law is
+still: binder and signature move together.
+-}
+letSignatureReservedTypeIsEscaped : TestResult
+letSignatureReservedTypeIsEscaped =
+    let
+        file =
+            emptyFile
+                [ DeclFunction
+                    { name = "use"
+                    , documentation = Nothing
+                    , signature = Nothing
+                    , arguments = [ PatVar "n" ]
+                    , expression =
+                        ExprLet
+                            { declarations =
+                                [ LetFunction
+                                    { name = "when"
+                                    , signature =
+                                        Just
+                                            { name = "when"
+                                            , typeAnnotation =
+                                                TypeFunction
+                                                    { left =
+                                                        TypeTyped
+                                                            { ref =
+                                                                { moduleName = Nothing
+                                                                , name = "Int"
+                                                                }
+                                                            , arguments = []
+                                                            }
+                                                    , right =
+                                                        TypeTyped
+                                                            { ref =
+                                                                { moduleName = Nothing
+                                                                , name = "Int"
+                                                                }
+                                                            , arguments = []
+                                                            }
+                                                    }
+                                            }
+                                    , arguments = [ PatVar "x" ]
+                                    , expression =
+                                        ExprVar { moduleName = Nothing, name = "x" }
+                                    }
+                                ]
+                            , expression =
+                                ExprApplication
+                                    [ ExprVar { moduleName = Nothing, name = "when" }
+                                    , ExprVar { moduleName = Nothing, name = "n" }
+                                    ]
+                            }
+                    }
+                ]
+
+        printed =
+            file
+                |> Reserved.apply Dict.empty
+                |> Print.print Dict.empty
+
+        passed =
+            String.contains "when_ : Int -> Int" printed
+                && String.contains "when_ x =" printed
+                && not (String.contains "when : " printed)
+                && not (String.contains "when x =" printed)
+    in
+    outcome
+        "let signature name escapes with its reserved binder"
         passed
         ("printed:\n" ++ printed)

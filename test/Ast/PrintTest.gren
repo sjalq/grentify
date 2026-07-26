@@ -13,6 +13,7 @@ import Ast.Types exposing
     , LetDecl(..)
     , ModuleKind(..)
     , Pattern(..)
+    , TypeAnn(..)
     )
 import Dict exposing (Dict)
 import Mapping.Registry as Registry
@@ -67,6 +68,10 @@ tests =
     , mappedCtorPayloadArityMismatchStaysPositional
     , unqualifiedCtorOfMappedNameStaysPositional
     , mappedCtorHintYieldsToPackageEvidence
+    -- D72: let-level type annotations must print (dropped signatures lose
+    -- rigidity that makes Parser foldl type-check).
+    , letSignaturePrintsAnnotation
+    , letSignatureAbsentStaysBare
     ]
 
 
@@ -1352,6 +1357,123 @@ smallTopLevelListStaysInline =
     outcome
         "small top-level list stays inline"
         ok
+        ("printed:\n" ++ printed)
+
+
+-- D72 -----------------------------------------------------------------------
+
+
+{-| Property shape: a let-bound function with a type annotation prints as
+`name : Type` on its own line above the binding. Losing this was D72 —
+`Array.foldl makeParser simpleExpr operators` failed once the rigidity
+from `rassocOp : Parser (a -> a -> a)` was dropped.
+-}
+letSignaturePrintsAnnotation : TestResult
+letSignaturePrintsAnnotation =
+    let
+        printed =
+            Print.print Dict.empty
+                (emptyFile
+                    [ DeclFunction
+                        { name = "expression"
+                        , documentation = Nothing
+                        , signature = Nothing
+                        , arguments = []
+                        , expression =
+                            ExprLet
+                                { declarations =
+                                    [ LetFunction
+                                        { name = "rassocOp"
+                                        , signature =
+                                            Just
+                                                { name = "rassocOp"
+                                                , typeAnnotation =
+                                                    TypeFunction
+                                                        { left =
+                                                            TypeTyped
+                                                                { ref =
+                                                                    { moduleName = Nothing
+                                                                    , name = "Parser"
+                                                                    }
+                                                                , arguments =
+                                                                    [ TypeFunction
+                                                                        { left = TypeGeneric "a"
+                                                                        , right =
+                                                                            TypeFunction
+                                                                                { left = TypeGeneric "a"
+                                                                                , right = TypeGeneric "a"
+                                                                                }
+                                                                        }
+                                                                    ]
+                                                                }
+                                                        , right =
+                                                            TypeTyped
+                                                                { ref =
+                                                                    { moduleName = Nothing
+                                                                    , name = "Parser"
+                                                                    }
+                                                                , arguments = [ TypeGeneric "a" ]
+                                                                }
+                                                        }
+                                                }
+                                        , arguments = []
+                                        , expression =
+                                            ExprVar { moduleName = Nothing, name = "identity" }
+                                        }
+                                    ]
+                                , expression =
+                                    ExprVar { moduleName = Nothing, name = "rassocOp" }
+                                }
+                        }
+                    ]
+                )
+
+        ok =
+            -- Print parenthesizes function-type args: `rassocOp : (Parser …) -> …`
+            String.contains "rassocOp :" printed
+                && String.contains "Parser" printed
+                && String.contains "rassocOp =" printed
+    in
+    outcome "let signature prints type annotation above the binding" ok
+        ("printed:\n" ++ printed)
+
+
+{-| Guard: let functions without a signature still emit a bare binding
+(no empty `:` line).
+-}
+letSignatureAbsentStaysBare : TestResult
+letSignatureAbsentStaysBare =
+    let
+        printed =
+            Print.print Dict.empty
+                (emptyFile
+                    [ DeclFunction
+                        { name = "expression"
+                        , documentation = Nothing
+                        , signature = Nothing
+                        , arguments = []
+                        , expression =
+                            ExprLet
+                                { declarations =
+                                    [ LetFunction
+                                        { name = "helper"
+                                        , signature = Nothing
+                                        , arguments = []
+                                        , expression = ExprInt 1
+                                        }
+                                    ]
+                                , expression =
+                                    ExprVar { moduleName = Nothing, name = "helper" }
+                                }
+                        }
+                    ]
+                )
+
+        ok =
+            String.contains "helper =" printed
+                && not (String.contains "helper :" printed)
+    in
+    outcome "let without signature stays a bare binding" ok
         ("printed:\n" ++ printed)
 
 

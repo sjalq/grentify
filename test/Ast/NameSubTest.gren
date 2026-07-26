@@ -24,9 +24,10 @@ each ref under its own home module's qualifier.
 import Array exposing (Array)
 import Ast.NameSub as NameSub
 import Ast.Print as Print
-import Ast.Types as T exposing (Expr(..), LetDecl(..), Pattern(..))
+import Ast.Types as T exposing (Expr(..), LetDecl(..), Pattern(..), TypeAnn(..))
 import Dict
 import Mapping.Types exposing (Registry)
+import String
 
 
 type alias TestResult =
@@ -165,8 +166,8 @@ letShadowDecl =
         , expression =
             ExprLet
                 { declarations =
-                    [ LetFunction { name = "classList", arguments = [], expression = ExprList [] }
-                    , LetFunction { name = "keptLocal", arguments = [], expression = bare "classList" }
+                    [ LetFunction { name = "classList", signature = Nothing, arguments = [], expression = ExprList [] }
+                    , LetFunction { name = "keptLocal", signature = Nothing, arguments = [], expression = bare "classList" }
                     ]
                 , expression = bare "keptLocal"
                 }
@@ -198,6 +199,8 @@ tests =
     , exhaustedCollisionTakesOccupancyEscape
     , siblingModuleKeepsItsOwnAlias
     , trailingUnderscoreAliasSurvivesPrint
+    -- D72: catalog type renames on let-level signatures (List → Array)
+    , letSignatureTypeIsCatalogSubstituted
     ]
 
 
@@ -538,7 +541,7 @@ letBoundStaysLocalSiblingRemapped =
             when letBody is
                 Just (ExprLet letBlock) ->
                     Array.get 1 letBlock.declarations
-                        == Just (LetFunction { name = "keptLocal", arguments = [], expression = bare "classList" })
+                        == Just (LetFunction { name = "keptLocal", signature = Nothing, arguments = [], expression = bare "classList" })
 
                 _ ->
                     False
@@ -549,4 +552,98 @@ letBoundStaysLocalSiblingRemapped =
     { name = "let-bound `classList` stays local while a sibling unbound use is remapped"
     , passed = letStillLocal && siblingRemapped
     , details = "scope is per-declaration: one function's let binding doesn't leak into another's"
+    }
+
+
+-- D72: LET SIGNATURE TYPE REWRITES --------------------------------------------
+
+
+{-| Minimal registry: `List` type maps to `Array` (the elm/core law). If
+`Walk.mapLetSignatures` is skipped, the let annotation keeps `List` while
+top-level signatures become `Array` — silent wrong Gren.
+-}
+listTypeRegistry : Registry
+listTypeRegistry =
+    { packageOrder = []
+    , packages = Dict.empty
+    , versionedPackages = []
+    , modules =
+        Dict.singleton "List"
+            { source = "List"
+            , target = "Array"
+            , values = Dict.empty
+            , types = Dict.singleton "List" "Array"
+            , recordAliases = Dict.empty
+            , constructorFields = Dict.empty
+            }
+    }
+
+
+{-| D72 property: a `List a` annotation on a let binding becomes `Array a`
+after NameSub, same as a top-level signature. Would have caught the defect
+that dropped let annotations (or rewrote only DeclFunction).
+-}
+letSignatureTypeIsCatalogSubstituted : TestResult
+letSignatureTypeIsCatalogSubstituted =
+    let
+        listOfA =
+            T.TypeTyped
+                { ref = { moduleName = Just "List", name = "List" }
+                , arguments = [ T.TypeGeneric "a" ]
+                }
+
+        file =
+            fileWith
+                [ T.DeclFunction
+                    { name = "outer"
+                    , documentation = Nothing
+                    , signature =
+                        Just
+                            { name = "outer"
+                            , typeAnnotation = listOfA
+                            }
+                    , arguments = []
+                    , expression =
+                        ExprLet
+                            { declarations =
+                                [ LetFunction
+                                    { name = "inner"
+                                    , signature =
+                                        Just
+                                            { name = "inner"
+                                            , typeAnnotation = listOfA
+                                            }
+                                    , arguments = []
+                                    , expression = ExprList []
+                                    }
+                                ]
+                            , expression = bare "inner"
+                            }
+                    }
+                ]
+
+        -- NameSub needs the import so subRef can resolve List → Array.
+        withImport =
+            { file
+                | imports =
+                    [ { moduleName = "List"
+                      , alias = Nothing
+                      , exposing_ = Nothing
+                      }
+                    ]
+            }
+
+        printed =
+            Print.print Dict.empty (NameSub.apply listTypeRegistry withImport)
+
+        ok =
+            -- Both the top-level and the let-level annotation use Array.
+            String.contains "outer : Array" printed
+                && String.contains "inner : Array" printed
+                && not (String.contains "inner : List" printed)
+                && not (String.contains "outer : List" printed)
+    in
+    { name = "let signature List type is catalog-substituted to Array"
+    , passed = ok
+    , details = "printed:\n" ++ printed
     }

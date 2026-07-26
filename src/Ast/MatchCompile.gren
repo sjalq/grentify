@@ -1986,6 +1986,7 @@ compileMatrixRows sole currentFunction seed scope columnNames rows terminalFail 
                     { declarations =
                         [ LetFunction
                             { name = failName
+                            , signature = Nothing
                             , arguments = [ PatAll ]
                             , expression = nextRow
                             }
@@ -2803,6 +2804,7 @@ wrapLet name value body =
         { declarations =
             [ LetFunction
                 { name = name
+                , signature = Nothing
                 , arguments = []
                 , expression = value
                 }

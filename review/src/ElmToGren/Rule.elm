@@ -1702,13 +1702,31 @@ resolveConstructorPattern patternNode range qualifiedName members withChildren =
                     ( "Node", 2 ) ->
                         addPayloadEdits Types.CustomConstructor "=" members withChildren
 
+                    -- elm/parser: `Token String x`. gren-lang/parser names the
+                    -- payload: `Token { str : String, expecting : x }`. The
+                    -- platform packages are mapped rather than transpiled, so
+                    -- the host never learns this arity from a dependency port.
+                    ( "Token", 2 ) ->
+                        addNamedPayloadEdits [ "str", "expecting" ] members withChildren
+
                     _ ->
+                        -- D63: the extractor cannot see dependency constructor
+                        -- arities, but the HOST can: since D45 the orchestrator
+                        -- feeds every dependency's arities and sole-constructor
+                        -- facts into each dependent's CtorLaw. Erroring here
+                        -- killed the port before that knowledge could be
+                        -- applied (`Nonempty`, `MoveTo`, `Token` …). Same law
+                        -- as D23/D46: the extraction is the lie, repair it
+                        -- where the knowledge is held exactly. Emit no edit and
+                        -- warn; the host recordifies the pattern if it knows
+                        -- the constructor, and gren-verify fails honestly if
+                        -- nobody does.
                         addDiagnostic
                             { code = "UNMAPPED_SYMBOL"
-                            , severity = Types.Error
-                            , message = "The multi-argument constructor pattern `" ++ qualifiedName.name ++ "` could not be resolved safely."
+                            , severity = Types.Warning
+                            , message = "The multi-argument constructor pattern `" ++ qualifiedName.name ++ "` was not resolved by the extractor; left for host constructor lowering."
                             , range = Just range
-                            , help = Just "Provide a mapping for the dependency constructor or include its Elm source in the package graph."
+                            , help = Just "If the port fails to compile, provide a mapping for the dependency constructor or include its Elm source in the package graph."
                             }
                             withChildren
 

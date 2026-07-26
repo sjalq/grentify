@@ -164,6 +164,49 @@ by being written through this law; nothing edits the ledger by hand.
 
 ## 6. Known defects register (2026-07-17 audit; independently verified)
 
+- **D83 package-graph module-name collision remains unportable without a
+  public-API change** (re-opened from D82 root 2 on 2026-07-26 for
+  `gampleman/elm-visualization` / `Force` vs `ianmackenzie/elm-units` /
+  `Force`; CLOSED same day: refusal reaffirmed, diagnostic improved).
+
+  Question: does a sound automatic fix exist after D82's deliberate refusal?
+
+  **Reachability.** The edge is real under D76: visualization declares
+  `ianmackenzie/elm-geometry` and `ianmackenzie/elm-units-prefixed`; both
+  pull `ianmackenzie/elm-units`, which exposes `Force`. Visualization's own
+  sources never import units' `Force` (only their own `Force` / `Force.*`),
+  but geometry (`Vector2d`/`Vector3d`) and units-prefixed (`Units.Force`,
+  etc.) do import units' `Force`. Gren rejects the collision at the package
+  graph regardless of whether any single module imports both. `localClosure`
+  correctly includes units; this is not an over-broad hoist and not a lever
+  for hiding the name.
+
+  **Rename.** D72 renames when the rewrite is a pure function of the module
+  name alone (`Extended_Pictographic` → `ExtendedPictographic`); every
+  importer recomputes the same answer with no shared table. A collision
+  rename is not pure of the name (both packages use `Force`). A pure
+  function of `(package, module)` would mean always package-qualifying
+  modules and rewriting imports via ownership resolution — that changes
+  every package's public API and is a different product decision, not a
+  defect fix. A rename that fires only when co-ported packages share a name
+  would make the same coordinate emit different Gren under different roots,
+  breaking the ported-cache law (digest keys coordinate + tool + mappings +
+  platform + namespace flag only). The `add` path's `Elm.` prefix does not
+  solve this: both packages become `Elm.Force` and still collide (and the
+  synthetic module overlay would even overwrite one of the two `Force`
+  entries).
+
+  **Refusal (still correct; diagnostic improved).** Keep refusing at
+  `Port.Plan.buildManifest` with `AMBIGUOUS_MODULE_NAME`. Message still
+  names the module and both packages (D64), states the Elm/Gren difference,
+  and now also says what the user can do (fork and rename one colliding
+  module in Elm source) and what will not help (`add` / `Elm.` prefix).
+  No automatic rewrite.
+
+  RECEIPTS: package still refuses at plan with the improved text; PlanTest
+  specimen checks refusal + "What you can do" / language-level wording;
+  tier 0 green; canary 14/14. Non-regression of D76/D82 machinery.
+
 - **D82 a name that is unambiguous in Elm becomes ambiguous in Gren —
   TWO roots, not one** (found 2026-07-26 on
   `PanagiotisGeorgiadis/elm-datetime` AMBIGUOUS NAME @ DateTime.Internal and
@@ -2475,6 +2518,14 @@ evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-26 D83 CLOSED — package-graph module collision (`Force` on
+  gampleman/elm-visualization vs ianmackenzie/elm-units) re-examined after
+  D82's refusal. No sound automatic fix under the gold guides: collision is
+  real in `localClosure` (not a D76 residue); rename is not pure of the name
+  alone; graph-dependent rename breaks ported-cache purity; `add`'s `Elm.`
+  prefix still collides as `Elm.Force`/`Elm.Force`. Refusal kept; diagnostic
+  now names user action (fork+rename one module) and what will not help.
+  PlanTest updated; tier 0 green; canary 14/14.
 - 2026-07-26 D82 CLOSED — extract vs port dependency-version skew. elm-review
   loads package-dep docs at `constraint.split(' ')[0]` (the range floor);
   the port solver vendors newest-compatible. `Array.interweave` resolved to

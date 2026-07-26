@@ -7,10 +7,27 @@ Phase 1 structural lowers:
 - unit `()` → `{}`
 - N-tuples → `{ first, second, … }` records
 - list cons already rewritten by NameSub to `Array.pushFirst`
+
+**Law of multi-argument constructor payloads.** Gren gives every multi-argument
+constructor ONE record payload, so N arguments must become N named fields. Whose
+names, is decided by who declares the type:
+
+  - this port declares it → this printer also emits the `type` declaration, so
+    the labels are positional (`first`, `second`, …) and the two agree by
+    construction;
+  - a MAPPED package declares it (`Parser.Advanced.Token { str, expecting }`) →
+    the port never sees that declaration and cannot invent the names; they are
+    stated in `mappings/builtin.json` and arrive here as `constructorFields`.
+
+Positional is the fallback, never a guess overruled: a mapped shape applies only
+to a module-qualified reference whose resolved name is in the table AND whose
+argument count equals the stated field count. Anything else prints positionally
+(D12) — a bare name match never renames a payload.
 -}
 
 import Array exposing ( Array )
 import Ast.ModuleName as ModuleName
+import Ast.Ref as Ref
 import Ast.Types as Types exposing
     ( CaseArm
     , Declaration(..)
@@ -34,12 +51,31 @@ import Math
 import Maybe exposing ( Maybe(..) )
 
 
-print : File -> String
-print file =
+{-| What each printer needs besides the node it is printing.
+
+`locals` are this module's own declared names (keep `Module.Name` when
+shortening would clash). `constructorFields` is the mapped-constructor payload
+table, indexed by every spelling that can reach a constructor FROM THIS FILE:
+the qualified Gren name and, for each `import M as A`, `A.Name` too. Resolving
+aliases here is the whole point — the printer sees `Advanced.Token`, never
+`Parser.Advanced.Token`, and a table keyed only by real module names silently
+misses every aliased import.
+-}
+type alias Context =
+    { locals : Dict String {}
+    , constructorFields : Dict String (Array String)
+    }
+
+
+print : Dict String (Array String) -> File -> String
+print constructorFields file =
     let
-        -- Local type/value names: keep Module.Name when it would clash if shortened.
-        locals =
-            localDeclaredNames file.declarations
+        ctx =
+            { locals = localDeclaredNames file.declarations
+            , constructorFields =
+                Ref.addImportAliasKeys file.imports constructorFields
+                    constructorFields
+            }
 
         -- Gren wants module docs *after* the module line (Elm often puts them
         -- before). Emit header first so the compiler never sees a doc block
@@ -58,7 +94,7 @@ print file =
 
         declarations =
             file.declarations
-                |> Array.map (printDeclaration locals)
+                |> Array.map (printDeclaration ctx)
                 |> Array.keepIf (\block -> not (String.isEmpty block))
                 |> String.join "\n\n"
 
@@ -233,8 +269,8 @@ printExposedItem item =
                 name
 
 
-printDeclaration : Dict String {} -> Declaration -> String
-printDeclaration locals declaration =
+printDeclaration : Context -> Declaration -> String
+printDeclaration ctx declaration =
     when declaration is
         DeclFunction fn ->
             let
@@ -249,7 +285,7 @@ printDeclaration locals declaration =
                 signature =
                     when fn.signature is
                         Just sig ->
-                            printSignature locals sig ++ "\n"
+                            printSignature ctx sig ++ "\n"
 
                         Nothing ->
                             ""
@@ -261,7 +297,7 @@ printDeclaration locals declaration =
                     else
                         " "
                             ++ String.join " "
-                                (Array.map (printPattern locals 1)
+                                (Array.map (printPattern ctx 1)
                                     fn.arguments)
 
                 body =
@@ -269,16 +305,16 @@ printDeclaration locals declaration =
                         ExprList items ->
                             let
                                 inline =
-                                    printExpr locals 0 fn.expression
+                                    printExpr ctx 0 fn.expression
                             in
                             if Array.length items > 1 && String.count inline > maxInlineListWidth then
-                                printMultilineList locals items
+                                printMultilineList ctx items
 
                             else
                                 inline
 
                         _ ->
-                            printExpr locals 0 fn.expression
+                            printExpr ctx 0 fn.expression
             in
             docs
                 ++ signature
@@ -309,7 +345,7 @@ printDeclaration locals declaration =
                 ++ aliasDecl.name
                 ++ generics
                 ++ " =\n    "
-                ++ printType locals 0 aliasDecl.typeAnnotation
+                ++ printType ctx 0 aliasDecl.typeAnnotation
 
         DeclCustomType custom ->
             let
@@ -330,7 +366,7 @@ printDeclaration locals declaration =
 
                 ctors =
                     custom.constructors
-                        |> Array.map (printConstructor locals)
+                        |> Array.map (printConstructor ctx)
                         |> String.join "\n    | "
             in
             docs
@@ -341,29 +377,29 @@ printDeclaration locals declaration =
                 ++ ctors
 
         DeclPort signature ->
-            "port " ++ printSignature locals signature
+            "port " ++ printSignature ctx signature
 
         DeclInfix ->
             ""
 
         DeclDestructure { pattern = pattern, expression = expression } ->
-            printPattern locals 1 pattern
+            printPattern ctx 1 pattern
                 ++ " =\n    "
-                ++ printExpr locals 0 expression
+                ++ printExpr ctx 0 expression
 
 
 printConstructor :
-    Dict String {}
+    Context
     -> { name : String, arguments : Array TypeAnn }
     -> String
-printConstructor locals ctor =
+printConstructor ctx ctor =
     if Array.isEmpty ctor.arguments then
         ctor.name
 
     else if Array.length ctor.arguments == 1 then
         when Array.first ctor.arguments is
             Just arg ->
-                ctor.name ++ " " ++ printType locals 1 arg
+                ctor.name ++ " " ++ printType ctx 1 arg
 
             Nothing ->
                 ctor.name
@@ -375,18 +411,18 @@ printConstructor locals ctor =
             ++ String.join ", "
                 (Array.indexedMap
                     (\index arg ->
-                        fieldLabel index ++ " : " ++ printType locals 0 arg)
+                        fieldLabel index ++ " : " ++ printType ctx 0 arg)
                     ctor.arguments)
             ++ " }"
 
 
-printSignature : Dict String {} -> Signature -> String
-printSignature locals signature =
-    signature.name ++ " : " ++ printType locals 0 signature.typeAnnotation
+printSignature : Context -> Signature -> String
+printSignature ctx signature =
+    signature.name ++ " : " ++ printType ctx 0 signature.typeAnnotation
 
 
-printType : Dict String {} -> Int -> TypeAnn -> String
-printType locals prec typeAnn =
+printType : Context -> Int -> TypeAnn -> String
+printType ctx prec typeAnn =
     when typeAnn is
         TypeGeneric name ->
             name
@@ -394,7 +430,7 @@ printType locals prec typeAnn =
         TypeTyped { ref = ref, arguments = args } ->
             let
                 head =
-                    printNamedRef locals True ref
+                    printNamedRef ctx True ref
 
                 rendered =
                     if Array.isEmpty args then
@@ -404,7 +440,7 @@ printType locals prec typeAnn =
                         head
                             ++ " "
                             ++ String.join " "
-                                (Array.map (printType locals 1) args)
+                                (Array.map (printType ctx 1) args)
             in
             if prec > 0 && not (Array.isEmpty args) then
                 "(" ++ rendered ++ ")"
@@ -416,7 +452,7 @@ printType locals prec typeAnn =
             "{}"
 
         TypeTuple items ->
-            printTupleType locals items
+            printTupleType ctx items
 
         TypeRecord fields ->
             if Array.isEmpty fields then
@@ -429,7 +465,7 @@ printType locals prec typeAnn =
                             (\field ->
                                 field.name
                                     ++ " : "
-                                    ++ printType locals 0 field.typeAnnotation)
+                                    ++ printType ctx 0 field.typeAnnotation)
                             fields)
                     ++ " }"
 
@@ -442,16 +478,16 @@ printType locals prec typeAnn =
                         (\field ->
                             field.name
                                 ++ " : "
-                                ++ printType locals 0 field.typeAnnotation)
+                                ++ printType ctx 0 field.typeAnnotation)
                         fields)
                 ++ " }"
 
         TypeFunction { left = left, right = right } ->
             let
                 rendered =
-                    printType locals 1 left
+                    printType ctx 1 left
                         ++ " -> "
-                        ++ printType locals 0 right
+                        ++ printType ctx 0 right
             in
             if prec > 0 then
                 "(" ++ rendered ++ ")"
@@ -460,8 +496,8 @@ printType locals prec typeAnn =
                 rendered
 
 
-printTupleType : Dict String {} -> Array TypeAnn -> String
-printTupleType locals items =
+printTupleType : Context -> Array TypeAnn -> String
+printTupleType ctx items =
     let
         labels =
             tupleFieldLabels (Array.length items)
@@ -473,13 +509,13 @@ printTupleType locals items =
         "{ "
             ++ String.join ", "
                 (Array.map2
-                    (\label item -> label ++ " : " ++ printType locals 0 item)
+                    (\label item -> label ++ " : " ++ printType ctx 0 item)
                     labels items)
             ++ " }"
 
 
-printPattern : Dict String {} -> Int -> Pattern -> String
-printPattern locals prec pattern =
+printPattern : Context -> Int -> Pattern -> String
+printPattern ctx prec pattern =
     when pattern is
         PatAll ->
             "_"
@@ -506,7 +542,7 @@ printPattern locals prec pattern =
             String.fromFloat value
 
         PatTuple items ->
-            printTuplePattern locals items
+            printTuplePattern ctx items
 
         PatRecord fields ->
             "{ " ++ String.join ", " fields ++ " }"
@@ -522,16 +558,16 @@ printPattern locals prec pattern =
                             (\field ->
                                 field.name
                                     ++ " = "
-                                    ++ printPattern locals 0 field.pattern)
+                                    ++ printPattern ctx 0 field.pattern)
                             fields)
                     ++ " }"
 
         PatCons { head = head, tail = tail } ->
-            printConsPattern locals head tail
+            printConsPattern ctx head tail
 
         PatList items ->
             "["
-                ++ String.join ", " (Array.map (printPattern locals 0) items)
+                ++ String.join ", " (Array.map (printPattern ctx 0) items)
                 ++ "]"
 
         PatVar name ->
@@ -540,7 +576,7 @@ printPattern locals prec pattern =
         PatNamed { ref = ref, arguments = args } ->
             let
                 head =
-                    printNamedRef locals False ref
+                    printNamedRef ctx False ref
 
                 rendered =
                     if Array.isEmpty args then
@@ -549,7 +585,7 @@ printPattern locals prec pattern =
                     else if Array.length args == 1 then
                         when Array.first args is
                             Just arg ->
-                                head ++ " " ++ printPattern locals 1 arg
+                                head ++ " " ++ printPattern ctx 1 arg
 
                             Nothing ->
                                 head
@@ -561,7 +597,7 @@ printPattern locals prec pattern =
                         -- `Node\n    ({ first = … })` parses; `Node\n{ first` does not.
                         let
                             labels =
-                                ctorFieldLabels ref.moduleName ref.name
+                                ctorFieldLabels ctx ref.moduleName ref.name
                                     (Array.length args)
 
                             record =
@@ -571,7 +607,7 @@ printPattern locals prec pattern =
                                             (\label arg ->
                                                 label
                                                     ++ " = "
-                                                    ++ printPattern locals 0
+                                                    ++ printPattern ctx 0
                                                         arg) labels args)
                                     ++ " }"
                         in
@@ -590,7 +626,7 @@ printPattern locals prec pattern =
         PatAs { pattern = inner, name = name } ->
             let
                 rendered =
-                    printPattern locals 1 inner ++ " as " ++ name
+                    printPattern ctx 1 inner ++ " as " ++ name
             in
             if prec > 0 then
                 "(" ++ rendered ++ ")"
@@ -599,8 +635,8 @@ printPattern locals prec pattern =
                 rendered
 
 
-printConsPattern : Dict String {} -> Pattern -> Pattern -> String
-printConsPattern locals head tail =
+printConsPattern : Context -> Pattern -> Pattern -> String
+printConsPattern ctx head tail =
     when head is
         PatVar h ->
             when tail is
@@ -621,8 +657,8 @@ printConsPattern locals head tail =
             "_ {- unported-cons-pattern -}"
 
 
-printTuplePattern : Dict String {} -> Array Pattern -> String
-printTuplePattern locals items =
+printTuplePattern : Context -> Array Pattern -> String
+printTuplePattern ctx items =
     let
         labels =
             tupleFieldLabels (Array.length items)
@@ -635,13 +671,13 @@ printTuplePattern locals items =
             ++ String.join ", "
                 (Array.map2
                     (\label item ->
-                        label ++ " = " ++ printPattern locals 0 item) labels
+                        label ++ " = " ++ printPattern ctx 0 item) labels
                     items)
             ++ " }"
 
 
-printExpr : Dict String {} -> Int -> Expr -> String
-printExpr locals prec expr =
+printExpr : Context -> Int -> Expr -> String
+printExpr ctx prec expr =
     when expr is
         ExprUnit ->
             "{}"
@@ -654,19 +690,19 @@ printExpr locals prec expr =
                 Just { first = first, rest = rest } ->
                     let
                         rendered =
-                            when multiArgCtorApplication locals first rest is
+                            when multiArgCtorApplication ctx first rest is
                                 Just text ->
                                     text
 
                                 Nothing ->
                                     if Array.isEmpty rest then
-                                        printExpr locals 1 first
+                                        printExpr ctx 1 first
 
                                     else
-                                        printExpr locals 1 first
+                                        printExpr ctx 1 first
                                             ++ " "
                                             ++ String.join " "
-                                                (Array.map (printExpr locals 1)
+                                                (Array.map (printExpr ctx 1)
                                                     rest)
                     in
                     if prec > 0 then
@@ -684,7 +720,7 @@ printExpr locals prec expr =
             -- (edn-parser String.stringHelp).
             let
                 leftText =
-                    printExpr locals 1 left
+                    printExpr ctx 1 left
 
                 rendered =
                     if isBlockExpr right then
@@ -692,14 +728,14 @@ printExpr locals prec expr =
                             ++ " "
                             ++ op
                             ++ "\n    "
-                            ++ indentBlock 1 (printExpr locals 0 right)
+                            ++ indentBlock 1 (printExpr ctx 0 right)
 
                     else
                         leftText
                             ++ " "
                             ++ op
                             ++ " "
-                            ++ printExpr locals 1 right
+                            ++ printExpr ctx 1 right
             in
             if prec > 0 then
                 "(" ++ rendered ++ ")"
@@ -708,17 +744,17 @@ printExpr locals prec expr =
                 rendered
 
         ExprVar ref ->
-            printNamedRef locals False ref
+            printNamedRef ctx False ref
 
         ExprIf { condition = condition, then_ = ifTrue, else_ = ifFalse } ->
             let
                 rendered =
                     "if "
-                        ++ printExpr locals 0 condition
+                        ++ printExpr ctx 0 condition
                         ++ " then\n    "
-                        ++ indentBlock 1 (printExpr locals 0 ifTrue)
+                        ++ indentBlock 1 (printExpr ctx 0 ifTrue)
                         ++ "\n\nelse\n    "
-                        ++ indentBlock 1 (printExpr locals 0 ifFalse)
+                        ++ indentBlock 1 (printExpr ctx 0 ifFalse)
             in
             if prec > 0 then
                 "(" ++ rendered ++ ")"
@@ -747,7 +783,7 @@ printExpr locals prec expr =
             String.fromFloat value
 
         ExprNegation inner ->
-            "-" ++ printExpr locals 1 inner
+            "-" ++ printExpr ctx 1 inner
 
         ExprString value ->
             "\"" ++ escapeString value ++ "\""
@@ -756,20 +792,20 @@ printExpr locals prec expr =
             "'" ++ escapeChar value ++ "'"
 
         ExprTuple items ->
-            printTupleExpr locals items
+            printTupleExpr ctx items
 
         ExprLet { declarations = declarations, expression = body } ->
             let
                 decls =
                     declarations
-                        |> Array.map (printLetDecl locals)
+                        |> Array.map (printLetDecl ctx)
                         |> String.join "\n\n    "
 
                 rendered =
                     "let\n    "
                         ++ decls
                         ++ "\nin\n"
-                        ++ printExpr locals 0 body
+                        ++ printExpr ctx 0 body
             in
             if prec > 0 then
                 "(\n    " ++ indentBlock 1 rendered ++ "\n)"
@@ -781,12 +817,12 @@ printExpr locals prec expr =
             let
                 armText =
                     arms
-                        |> Array.map (printCaseArm locals)
+                        |> Array.map (printCaseArm ctx)
                         |> String.join "\n\n    "
 
                 rendered =
                     "when "
-                        ++ printExpr locals 0 scrutinee
+                        ++ printExpr ctx 0 scrutinee
                         ++ " is\n    "
                         ++ armText
             in
@@ -803,10 +839,10 @@ printExpr locals prec expr =
             let
                 argsText =
                     String.join " "
-                        (Array.map (printPattern locals 1) arguments)
+                        (Array.map (printPattern ctx 1) arguments)
 
                 bodyText =
-                    printExpr locals 0 body
+                    printExpr ctx 0 body
 
                 rendered =
                     if String.contains "\n" bodyText then
@@ -836,17 +872,17 @@ printExpr locals prec expr =
                     ++ String.join ", "
                         (Array.map
                             (\field ->
-                                printRecordField locals field.name field.value)
+                                printRecordField ctx field.name field.value)
                             fields)
                     ++ " }"
 
         ExprList items ->
             "["
-                ++ String.join ", " (Array.map (printEmbeddedExpr locals) items)
+                ++ String.join ", " (Array.map (printEmbeddedExpr ctx) items)
                 ++ "]"
 
         ExprAccess { record = record, field = field } ->
-            printExpr locals 1 record ++ "." ++ field
+            printExpr ctx 1 record ++ "." ++ field
 
         ExprAccessFunction field ->
             "." ++ field
@@ -858,7 +894,7 @@ printExpr locals prec expr =
                 ++ String.join ", "
                     (Array.map
                         (\field ->
-                            printRecordField locals field.name field.value)
+                            printRecordField ctx field.name field.value)
                         fields)
                 ++ " }"
 
@@ -866,8 +902,8 @@ printExpr locals prec expr =
             "[glsl| " ++ code ++ " |]"
 
 
-printTupleExpr : Dict String {} -> Array Expr -> String
-printTupleExpr locals items =
+printTupleExpr : Context -> Array Expr -> String
+printTupleExpr ctx items =
     let
         labels =
             tupleFieldLabels (Array.length items)
@@ -879,20 +915,20 @@ printTupleExpr locals items =
         "{ "
             ++ String.join ", "
                 (Array.map2
-                    (\label item -> label ++ " = " ++ printExpr locals 0 item)
+                    (\label item -> label ++ " = " ++ printExpr ctx 0 item)
                     labels items)
             ++ " }"
 
 
-printCaseArm : Dict String {} -> CaseArm -> String
-printCaseArm locals arm =
-    printPattern locals 0 arm.pattern
+printCaseArm : Context -> CaseArm -> String
+printCaseArm ctx arm =
+    printPattern ctx 0 arm.pattern
         ++ " ->\n        "
-        ++ indentBlock 2 (printExpr locals 0 arm.body)
+        ++ indentBlock 2 (printExpr ctx 0 arm.body)
 
 
-printLetDecl : Dict String {} -> LetDecl -> String
-printLetDecl locals declaration =
+printLetDecl : Context -> LetDecl -> String
+printLetDecl ctx declaration =
     when declaration is
         LetFunction fn ->
             let
@@ -903,26 +939,26 @@ printLetDecl locals declaration =
                     else
                         " "
                             ++ String.join " "
-                                (Array.map (printPattern locals 1) fn.arguments)
+                                (Array.map (printPattern ctx 1) fn.arguments)
             in
             fn.name
                 ++ args
                 ++ " =\n        "
-                ++ indentBlock 2 (printExpr locals 0 fn.expression)
+                ++ indentBlock 2 (printExpr ctx 0 fn.expression)
 
         LetDestructure { pattern = pattern, expression = expression } ->
             -- Constructor / record / tuple patterns must be parenthesized on the
             -- left of `=`; bare `RD first =` is parsed as a function definition.
-            printPattern locals 1 pattern
+            printPattern ctx 1 pattern
                 ++ " =\n        "
-                ++ indentBlock 2 (printExpr locals 0 expression)
+                ++ indentBlock 2 (printExpr ctx 0 expression)
 
 
 {-| Uppercase head applied to 2+ args → Gren multi-arg ctor record form.
-Platform/Compat ctors keep Gren's named payload fields (see ctorFieldLabels).
+Mapped-package ctors keep the target's own payload fields (see ctorFieldLabels).
 -}
-multiArgCtorApplication : Dict String {} -> Expr -> Array Expr -> Maybe String
-multiArgCtorApplication locals head args =
+multiArgCtorApplication : Context -> Expr -> Array Expr -> Maybe String
+multiArgCtorApplication ctx head args =
     if Array.length args < 2 then
         Nothing
 
@@ -932,7 +968,7 @@ multiArgCtorApplication locals head args =
                 if startsUpper ref.name then
                     let
                         labels =
-                            ctorFieldLabels ref.moduleName ref.name
+                            ctorFieldLabels ctx ref.moduleName ref.name
                                 (Array.length args)
 
                         record =
@@ -942,13 +978,13 @@ multiArgCtorApplication locals head args =
                                         (\label arg ->
                                             label
                                                 ++ " = "
-                                                ++ printEmbeddedExpr locals arg)
+                                                ++ printEmbeddedExpr ctx arg)
                                         labels args)
                                 ++ " }"
                     in
                     -- `Ctor ({ fields })` — format-safe if the name wraps alone.
                     Just
-                        (printNamedRef locals False ref
+                        (printNamedRef ctx False ref
                             ++ " ("
                             ++ record
                             ++ ")")
@@ -960,8 +996,8 @@ multiArgCtorApplication locals head args =
                 Nothing
 
 
-printNamedRef : Dict String {} -> Bool -> NamedRef -> String
-printNamedRef locals isType ref =
+printNamedRef : Context -> Bool -> NamedRef -> String
+printNamedRef ctx isType ref =
     when ref.moduleName is
         Nothing ->
             ref.name
@@ -980,7 +1016,7 @@ printNamedRef locals isType ref =
 
                 -- Local declaration shadows the short name (e.g. this file defines `Dict`).
                 clashes =
-                    Dict.member short locals
+                    Dict.member short ctx.locals
             in
             if isType then
                 if sameModuleType then
@@ -1055,83 +1091,34 @@ tupleFieldLabels count =
 
 {-| Field names for a multi-arg ctor record payload.
 
-Default is positional `first`/`second`/…. Known Gren platform and Compat
-constructors keep their real field names so patterns and construction match
-the host API (same rationale as VirtualDom.Handler / Html.Events adapters).
+Positional `first`/`second`/… unless the reference resolves, module qualifier
+and all, to a constructor a MAPPED package declares — see this module's header.
+The stated field count must equal the argument count: a same-named constructor
+of a different arity is a different constructor, and mislabelling it would be
+silent wrong output rather than a compile error.
 
-Named platform fields apply only when the ref is module-qualified to a
-platform/Compat module. Local ctors that share a name (e.g. local `BadPayload`
-in Http.Legacy) must stay positional first/second — otherwise type definitions
-and helpers disagree (http-upgrade-shim).
+An unqualified reference is never looked up. It is either local to this file or
+restored by `Ast.BareResolve`, and a local ctor that happens to share a mapped
+name (a local `BadPayload` in an Http shim) must stay positional — this printer
+emits its type declaration too, and the two have to agree.
 -}
-ctorFieldLabels : Maybe String -> String -> Int -> Array String
-ctorFieldLabels moduleName name arity =
-    if usesPlatformCtorFields moduleName then
-        when platformCtorFieldLabels name arity is
-            Just labels ->
-                labels
-
-            Nothing ->
-                tupleFieldLabels arity
-
-    else
-        tupleFieldLabels arity
-
-
-usesPlatformCtorFields : Maybe String -> Bool
-usesPlatformCtorFields moduleName =
+ctorFieldLabels : Context -> Maybe String -> String -> Int -> Array String
+ctorFieldLabels ctx moduleName name arity =
     when moduleName is
-        Just "Http" ->
-            True
+        Nothing ->
+            tupleFieldLabels arity
 
-        Just "ElmToGren.Compat.Http" ->
-            True
+        Just qualifier ->
+            when Dict.get (qualifier ++ "." ++ name) ctx.constructorFields is
+                Just fields ->
+                    if Array.length fields == arity then
+                        fields
 
-        Just "VirtualDom" ->
-            True
+                    else
+                        tupleFieldLabels arity
 
-        Just "Html.Events" ->
-            True
-
-        Just "ElmToGren.Compat.Html.Events" ->
-            True
-
-        Just "ElmToGren.Compat.VirtualDom.Handler" ->
-            True
-
-        _ ->
-            False
-
-
-{-| Named payload fields for platform / Compat multi-arg constructors.
-Keys are bare ctor names (only used when module is platform/Compat).
--}
-platformCtorFieldLabels : String -> Int -> Maybe (Array String)
-platformCtorFieldLabels name arity =
-    when name is
-        "BadStatus_" ->
-            if arity == 2 then
-                Just [ "metadata", "body" ]
-
-            else
-                Nothing
-
-        "GoodStatus_" ->
-            if arity == 2 then
-                Just [ "metadata", "body" ]
-
-            else
-                Nothing
-
-        "BadPayload" ->
-            if arity == 2 then
-                Just [ "message", "response" ]
-
-            else
-                Nothing
-
-        _ ->
-            Nothing
+                Nothing ->
+                    tupleFieldLabels arity
 
 
 fieldLabel : Int -> String
@@ -1198,9 +1185,9 @@ absolute indents inside the let no longer line up under the `let` keyword.
 Break after `=` and indent the value so the block owns its own column:
 `{ class =\n        let … in … }`.
 -}
-printRecordField : Dict String {} -> String -> Expr -> String
-printRecordField locals name value =
-    name ++ " = " ++ printEmbeddedExpr locals value
+printRecordField : Context -> String -> Expr -> String
+printRecordField ctx name value =
+    name ++ " = " ++ printEmbeddedExpr ctx value
 
 
 {-| True for expressions whose printed form is a multi-line block that cannot
@@ -1225,11 +1212,11 @@ isBlockExpr expr =
 {-| Embed an expression in a mid-line context (record field, list element).
 Multi-line values move to the next line and are indented one level.
 -}
-printEmbeddedExpr : Dict String {} -> Expr -> String
-printEmbeddedExpr locals value =
+printEmbeddedExpr : Context -> Expr -> String
+printEmbeddedExpr ctx value =
     let
         rendered =
-            printExpr locals 0 value
+            printExpr ctx 0 value
     in
     if String.contains "\n" rendered then
         "\n        " ++ indentBlock 2 rendered
@@ -1261,10 +1248,10 @@ so only the list-level separators are newlines. Valid Gren, and each element lin
 stays under the single-line parser ceiling. Continuation lines are aligned by the
 caller's `indentBlock`.
 -}
-printMultilineList : Dict String {} -> Array Expr -> String
-printMultilineList locals items =
+printMultilineList : Context -> Array Expr -> String
+printMultilineList ctx items =
     "[ "
-        ++ String.join "\n, " (Array.map (printEmbeddedExpr locals) items)
+        ++ String.join "\n, " (Array.map (printEmbeddedExpr ctx) items)
         ++ "\n]"
 
 

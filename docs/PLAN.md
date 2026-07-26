@@ -163,6 +163,92 @@ by being written through this law; nothing edits the ledger by hand.
 
 ## 6. Known defects register (2026-07-17 audit; independently verified)
 
+- **D75 the PRINTER decided multi-arg constructor payload names from a
+  hardcoded module-name table, so every mapped constructor reached through an
+  import alias was labelled `first`/`second`** (the defect D71 measured and
+  left open; FIXED 2026-07-26). Gren gives a multi-argument constructor ONE
+  record payload, and `Ast/Print.ctorFieldLabels` names its fields. For a
+  constructor this port emits that is trivially right — the same printer emits
+  the `type` declaration, so positional `first`/`second` agree by construction.
+  For a constructor a MAPPED package declares, the names belong to the Gren
+  package (`Parser.Advanced.Token { str, expecting }` for Elm's
+  `Token String x`), the port never reads that declaration, and the printer was
+  guessing. D63 taught the EXTRACTOR this exact fact for unresolved `Token`
+  PATTERNS; the host printer never got it, and its table
+  (`usesPlatformCtorFields` / `platformCtorFieldLabels`) knew only
+  `Http`/`VirtualDom`/`Html.Events` — matched by LITERAL module name.
+  **Why a table entry was not the fix** (D71 measured it and reverted): adding
+  `Parser.Advanced → Token` clears `Parser/Advanced/Workaround.gren` and then
+  stops at `Advanced.Token`, because the file says
+  `import Parser.Advanced as Advanced` and the printer never sees the real
+  module name. The literal-name match is the bug; a longer literal list is the
+  same bug with more entries. Nor was it a per-package quirk — the same file
+  class writes `import Parser.Advanced as Parser`, so ANY alias must resolve.
+  **Fix — the fact is DATA about a mapping, and the resolution belongs where
+  aliases are known.** Two halves, both already-existing mechanisms:
+  - `mappings/builtin.json` gains an optional per-module `constructorFields`
+    (`{ "Token": ["str", "expecting"] }`), the constructor sibling of D71's
+    `recordAliases`, decoded into `ModuleMapping` and exposed as
+    `Registry.constructorFieldShapes`. Keys are SOURCE constructor names; the
+    shape is keyed out under the qualified GREN name the port will print,
+    resolved through the module's `values` map first and the module `target`
+    only as fallback — the same rewrite `Ast.NameSub` applies to the
+    constructor itself, so elm/http 1.x `BadPayload` lands on
+    `ElmToGren.Compat.Http.BadPayload` and not on a name nothing emits.
+  - `Ast.Print` takes the table and, in `print`, extends it with
+    `Ast.Ref.addImportAliasKeys file.imports` — the same alias resolution
+    RecordAlias and CtorLaw already use. `ctorFieldLabels` is now a lookup of
+    `qualifier ++ "." ++ name`, and the law is stated in the module header.
+  **The old platform table is RETIRED, not shadowed (G2).** Its three live
+  facts moved into `mappings/builtin.json` (`Http.BadStatus_` /
+  `Http.GoodStatus_` → `{ metadata, body }` on elm/http 2.x;
+  `BadPayload` → `{ message, response }` on the elm/http 1.x versioned entry).
+  Its `VirtualDom`, `Html.Events` and `VirtualDom.Handler` module entries were
+  dead: no constructor name in the table belonged to them, and none of those
+  types has a multi-argument constructor to begin with. `Transform.Pipeline`'s
+  `transformModule` lost eight positional evidence parameters at the same time
+  and now takes the evidence record it was unpacking.
+  **D12 fallthrough, twice over.** `Transform.Evidence.mappedConstructorFields`
+  drops a shape when the package owns a module of that name or declares the
+  qualified name as a real multi-arg constructor (one filter,
+  `unclaimedMappedShapes`, now shared with `mappedRecordAliases`), and the
+  printer additionally requires the stated field count to EQUAL the argument
+  count and refuses to look up an unqualified name at all. A same-named
+  constructor of a different arity is a different constructor; mislabelling it
+  would be silent wrong output rather than a compile error. A decoded entry
+  must state at least two fields (a one-argument Gren constructor keeps its
+  argument instead of boxing it, so a single-field entry is a truncated line,
+  not a hint).
+  Tier 0: 309 checks (7 new — decode + `values`-resolved keying, rejection of
+  entries with nothing to say, the target's field names end to end, the SAME
+  through an import alias, arity mismatch stays positional, an unqualified
+  constructor of a mapped name stays positional, and both hint-yields-to-
+  evidence directions). Canary 14/14. Extractor fixtures pass.
+  **RECEIPT: ymtszw/elm-xml-decode, folkertdev/svg-path-lowlevel and
+  folkertdev/one-true-path-experiment now port and verify clean.** The alias
+  resolution is visible in the output: `svg-path-lowlevel`'s
+  `ParserHelpers.gren` says `import Parser.Advanced as Parser` and prints
+  `Parser.Token ({ str = x, expecting = "invalid symbol" })` — a name-keyed
+  table could not have reached it. Regression-checked in both directions on
+  the retired entries: NoRedInk/elm-string-conversions still prints
+  `Http.BadStatus_ { metadata = …, body = … }` and simonh1000/elm-jwt still
+  ports through the elm/http 1.x Compat path (`--no-ported-cache`, both).
+  **Three of the six advance to the NEXT gap and are NOT ours to close here:**
+  - dillonkearns/elm-markdown — the `Token` mismatches are gone; it now stops
+    at `UNSAFE PATTERN` in `Markdown/Parser.gren`, a `let (RawBlock.Table t) =`
+    destructure of a 14-constructor type. That is an `Ast.MatchCompile` gap
+    (a non-sole constructor in a let-destructure), unrelated to payload names.
+  - dtwrks/elm-book — blocked ONLY on its dependency elm-markdown, above. Its
+    own modules are clean.
+  - ThinkAlexandria/css-in-elm — verified separately and it is a DIFFERENT
+    defect, not this shape. `Platform.worker` gets `{ first = …, second = … }`
+    where gren-lang/core wants `{ model, command }`. That is a TEA pair from
+    `printTupleExpr`, not a constructor payload: the field names are dictated
+    by a mapped FUNCTION's argument type, which is what the
+    `ElmToGren.Compat.Browser` adapter exists to do for `Browser.element` /
+    `document` / `application`. `Platform.worker` simply has no adapter. A
+    missing adapter, filed as its own gap.
+
 - **D72 Elm module names may contain `_` and Gren module names may not, and
   the port never renamed them** (found 2026-07-26 from two different-looking
   refusals — `GREN_MANIFEST_INVALID` on AdrianRibao/elm-derberos-date and
@@ -310,21 +396,13 @@ by being written through this law; nothing edits the ledger by hand.
   directions). Canary 14/14.
   **RECEIPT: pithub/elm-parser-extra now ports and verifies clean.**
   Both remaining packages advance to the NEXT gap in the D63 chain, which
-  is D63's own `Token`, host-side: `Ast/Print.ctorFieldLabels` still emits
+  is D63's own `Token`, host-side: `Ast/Print.ctorFieldLabels` emitted
   `{ first, second }` for `Parser.Token` because its platform-ctor table
-  (`usesPlatformCtorFields` / `platformCtorFieldLabels`, Print.gren
-  ~1080-1133) knows Http/VirtualDom/Html.Events only. D63 patched the
-  EXTRACTOR's unresolved-pattern table; the host printer never got the
-  same fact. Adding `Parser`/`Parser.Advanced` + `Token → [str,
-  expecting]` there was measured (experiment, reverted): it clears
-  `Parser/Advanced/Workaround.gren` completely and then stops at
-  `Advanced.Token` in `Parser/Workaround.gren`, because `Print` matches
-  module names literally and the file imports `Parser.Advanced as
-  Advanced`. So that defect is not a table entry — it needs the ctor
-  payload names resolved where import aliases are known (as
-  `Ast.Ref.addImportAliasKeys` does for RecordAlias/CtorLaw), or moved out
-  of the printer into a pass that carries the registry. Left OPEN and
-  unclaimed rather than half-fixed.
+  knew Http/VirtualDom/Html.Events only, matched by literal module name.
+  Left OPEN and unclaimed here rather than half-fixed by a longer literal
+  list; **CLOSED as D75**, which retires that table into the same mapping
+  file this entry introduced and resolves import aliases through
+  `Ast.Ref.addImportAliasKeys`.
 
 - **D67 unparseable output from four packages — TWO causes, not one**
   (found by the 2026-07-26 parse-failure sweep; both FIXED same day). The

@@ -961,24 +961,28 @@ registry =
                                 ]
                       , types = Dict.singleton "List" "Array"
                       , recordAliases = Dict.empty
+                      , constructorFields = Dict.empty
                       }
                     , { source = "Basics"
                       , target = "Basics"
                       , values = Dict.singleton "sqrt" "Math.sqrt"
                       , types = Dict.empty
                       , recordAliases = Dict.empty
+                      , constructorFields = Dict.empty
                       }
                     , { source = "Json.Decode"
                       , target = "Json.Decode"
                       , values = Dict.singleton "list" "array"
                       , types = Dict.singleton "Decoder" "Decoder"
                       , recordAliases = Dict.empty
+                      , constructorFields = Dict.empty
                       }
                     , { source = "Tuple"
                       , target = "ElmToGren.Compat.Tuple"
                       , values = Dict.empty
                       , types = Dict.empty
                       , recordAliases = Dict.empty
+                      , constructorFields = Dict.empty
                       }
                     ]
                 , absentModules = Dict.empty

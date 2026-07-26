@@ -84,7 +84,7 @@ localCtorNotShadowedByImportedRecordAlias =
             }
 
         printed =
-            Print.print (RecordAlias.apply packageAliases file)
+            Print.print Dict.empty (RecordAlias.apply packageAliases file)
 
         ok =
             String.contains "Internal.empty" printed
@@ -131,7 +131,7 @@ importedAliasStillRewritesWhenQualified =
             }
 
         printed =
-            Print.print (RecordAlias.apply packageAliases file)
+            Print.print Dict.empty (RecordAlias.apply packageAliases file)
 
         ok =
             String.contains "get = f" printed
@@ -151,7 +151,7 @@ mappedPlatformAliasBecomesRecord : TestResult
 mappedPlatformAliasBecomesRecord =
     let
         printed =
-            Print.print
+            Print.print Dict.empty
                 (RecordAlias.apply
                     (Evidence.mappedRecordAliases parserRegistry
                         [ deadEndUser ]
@@ -235,6 +235,7 @@ parserRegistry =
                       , types = Dict.empty
                       , recordAliases =
                             Dict.singleton "DeadEnd" [ "row", "col", "problem" ]
+                      , constructorFields = Dict.empty
                       }
                     ]
                 , absentModules = Dict.empty

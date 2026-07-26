@@ -5,6 +5,7 @@ module Transform.Evidence exposing
     , collectConstructorArities
     , collectRecordAliases
     , collectSoleConstructors
+    , mappedConstructorFields
     , mappedRecordAliases
     )
 
@@ -46,6 +47,7 @@ type alias PackageEvidence =
     , constructorHomes : CtorHome.Homes
     , keyEvidence : KeyEncode.Evidence
     , recordAliases : Dict String (Array String)
+    , constructorFields : Dict String (Array String)
     , constructorArities : Dict String Int
     , soleConstructors : Dict String {}
     , reservedExports : Dict String String
@@ -98,6 +100,13 @@ collect registry dependencies modules =
                 )
                 ownRecordAliases
 
+        -- Same story for the mapped packages' CONSTRUCTORS: the port emits no
+        -- declaration for them, so their Gren payload field names are stated by
+        -- the registry or known nowhere. Nothing this package declares can be
+        -- overwritten — the filter already dropped every name it owns.
+        constructorFields =
+            mappedConstructorFields registry namedFiles constructorArities
+
         ownSoleConstructors =
             mergeFileMaps MatchCompile.collectSoleCtorsFromFile namedFiles
 
@@ -110,6 +119,7 @@ collect registry dependencies modules =
             , constructorHomes = CtorHome.collectHomes resolvedFiles
             , keyEvidence = KeyEncode.collectEvidence resolvedFiles
             , recordAliases = recordAliases
+            , constructorFields = constructorFields
             , constructorArities = constructorArities
             , soleConstructors = soleConstructors
 
@@ -151,6 +161,7 @@ collect registry dependencies modules =
     , constructorHomes = prepEvidence.constructorHomes
     , keyEvidence = prepEvidence.keyEvidence
     , recordAliases = recordAliases
+    , constructorFields = constructorFields
     , constructorArities = constructorArities
     , soleConstructors = soleConstructors
     , reservedExports = reservedExports
@@ -251,19 +262,41 @@ collectTupleReturns files =
 
 {-| Registry-declared record-alias shapes for *mapped* modules, minus every
 name the package graph can speak about itself.
+-}
+mappedRecordAliases : Registry -> Array File -> Dict String Int -> Dict String (Array String)
+mappedRecordAliases registry namedFiles constructorArities =
+    unclaimedMappedShapes (Registry.recordAliasShapes registry) namedFiles
+        constructorArities
+
+
+{-| Registry-declared constructor payload shapes for *mapped* modules, filtered
+the same way. Same fact class, same disqualifiers, one filter.
+-}
+mappedConstructorFields : Registry -> Array File -> Dict String Int -> Dict String (Array String)
+mappedConstructorFields registry namedFiles constructorArities =
+    unclaimedMappedShapes (Registry.constructorFieldShapes registry) namedFiles
+        constructorArities
+
+
+{-| Drop every mapped shape the package graph can speak about itself.
 
 Two things disqualify a hint, both of them positive evidence that the name in
-question is not the mapped alias:
+question is not the mapped one:
 
   - the package declares a module of that (post-substitution) name, so
     `Some.Module.Name` refers to its own declaration, not the platform one;
   - the name is a known multi-argument constructor here or in a transpiled
-    dependency, so it is an ADT constructor and `CtorLaw` owns it.
+    dependency, so this port emitted its type declaration and therefore owns
+    its payload spelling (`CtorLaw` / positional labels).
 
-Everything else falls through to real resolution exactly as before.
+Everything else falls through to real resolution exactly as before (D12).
 -}
-mappedRecordAliases : Registry -> Array File -> Dict String Int -> Dict String (Array String)
-mappedRecordAliases registry namedFiles constructorArities =
+unclaimedMappedShapes :
+    Dict String (Array String)
+    -> Array File
+    -> Dict String Int
+    -> Dict String (Array String)
+unclaimedMappedShapes shapes namedFiles constructorArities =
     let
         ownModules =
             Array.foldl
@@ -273,7 +306,7 @@ mappedRecordAliases registry namedFiles constructorArities =
                 Dict.empty
                 namedFiles
     in
-    Registry.recordAliasShapes registry
+    shapes
         |> Dict.keepIf
             (\key _ ->
                 not (Dict.member key constructorArities)

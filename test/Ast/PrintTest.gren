@@ -14,8 +14,12 @@ import Ast.Types exposing
     , ModuleKind(..)
     , Pattern(..)
     )
+import Dict exposing (Dict)
+import Mapping.Registry as Registry
+import Mapping.Types exposing (PackageMapping(..), Platform(..), Registry)
 import Math
 import String
+import Transform.Evidence as Evidence
 
 
 type alias TestResult =
@@ -56,7 +60,224 @@ tests =
     -- single physical line trips Gren 0.6.6's UNFINISHED RECORD parser ceiling.
     , oversizedTopLevelListWrapsPerRecord
     , smallTopLevelListStaysInline
+    -- D75: a mapped package's constructor keeps the TARGET's payload field
+    -- names, resolved through whatever spelling reaches it from this file.
+    , mappedCtorPayloadUsesTargetFieldNames
+    , mappedCtorPayloadResolvesImportAlias
+    , mappedCtorPayloadArityMismatchStaysPositional
+    , unqualifiedCtorOfMappedNameStaysPositional
+    , mappedCtorHintYieldsToPackageEvidence
     ]
+
+
+{-| D75: `Parser.Advanced.Token String x` is two Elm arguments and ONE Gren
+record payload `{ str, expecting }`. elm/parser is mapped, never transpiled, so
+that shape reaches the printer from the registry or not at all.
+-}
+mappedCtorPayloadUsesTargetFieldNames : TestResult
+mappedCtorPayloadUsesTargetFieldNames =
+    let
+        printed =
+            printTokenUse Nothing "Parser.Advanced" 2
+
+        ok =
+            String.contains "str = " printed
+                && String.contains "expecting = " printed
+                && not (String.contains "first = " printed)
+    in
+    outcome "mapped ctor payload uses the target's field names" ok
+        ("printed:\n" ++ printed)
+
+
+{-| The defect this exists for: the printer sees `Advanced.Token`, never
+`Parser.Advanced.Token`. A table keyed only by real module names silently misses
+every aliased import, and the miss is a Gren TYPE MISMATCH much later.
+-}
+mappedCtorPayloadResolvesImportAlias : TestResult
+mappedCtorPayloadResolvesImportAlias =
+    let
+        printed =
+            printTokenUse (Just "Advanced") "Advanced" 2
+
+        ok =
+            String.contains "str = " printed
+                && String.contains "expecting = " printed
+                && not (String.contains "first = " printed)
+    in
+    outcome "mapped ctor payload resolves through an import alias" ok
+        ("printed:\n" ++ printed)
+
+
+{-| A same-named constructor of a different arity is a different constructor.
+Labelling it anyway would be silent wrong output instead of a compile error.
+-}
+mappedCtorPayloadArityMismatchStaysPositional : TestResult
+mappedCtorPayloadArityMismatchStaysPositional =
+    let
+        printed =
+            printTokenUse Nothing "Parser.Advanced" 3
+
+        ok =
+            String.contains "first = " printed
+                && not (String.contains "str = " printed)
+    in
+    outcome "mapped ctor shape of the wrong arity stays positional" ok
+        ("printed:\n" ++ printed)
+
+
+{-| An unqualified `Token` is this file's own, and this printer emits its type
+declaration too — the two have to agree, so it stays positional.
+-}
+unqualifiedCtorOfMappedNameStaysPositional : TestResult
+unqualifiedCtorOfMappedNameStaysPositional =
+    let
+        printed =
+            Print.print tokenShapes
+                (emptyFile
+                    [ DeclFunction
+                        { name = "make"
+                        , documentation = Nothing
+                        , signature = Nothing
+                        , arguments = []
+                        , expression =
+                            ExprApplication
+                                (Array.pushFirst
+                                    (ExprVar { moduleName = Nothing, name = "Token" })
+                                    [ ExprString "a", ExprString "b" ]
+                                )
+                        }
+                    ]
+                )
+
+        ok =
+            String.contains "first = " printed
+                && not (String.contains "str = " printed)
+    in
+    outcome "unqualified ctor of a mapped name stays positional" ok
+        ("printed:\n" ++ printed)
+
+
+{-| The registry shape is a HINT (D12). A package that speaks for the same
+qualified name itself — by owning the module, or by declaring it as a real
+multi-argument constructor — keeps its own meaning, and the printer never sees
+the hint at all.
+-}
+mappedCtorHintYieldsToPackageEvidence : TestResult
+mappedCtorHintYieldsToPackageEvidence =
+    let
+        user =
+            tokenUser Nothing "Parser.Advanced" 2
+
+        ownsTheModule =
+            Evidence.mappedConstructorFields parserRegistry
+                [ { user
+                    | moduleDefinition =
+                        { kind = NormalModule
+                        , moduleName = "Parser.Advanced"
+                        , exposing_ = ExposeAll
+                        }
+                  }
+                ]
+                Dict.empty
+
+        ownsTheConstructor =
+            Evidence.mappedConstructorFields parserRegistry
+                [ user ]
+                (Dict.singleton "Parser.Advanced.Token" 2)
+
+        stillSeeded =
+            Evidence.mappedConstructorFields parserRegistry [ user ] Dict.empty
+
+        ok =
+            Dict.get "Parser.Advanced.Token" ownsTheModule
+                == Nothing
+                && Dict.get "Parser.Advanced.Token" ownsTheConstructor
+                == Nothing
+                && Dict.get "Parser.Advanced.Token" stillSeeded
+                == Just [ "str", "expecting" ]
+    in
+    outcome "registry ctor shapes lose to the package's own evidence" ok
+        ("owns module: "
+            ++ Debug.toString (Dict.get "Parser.Advanced.Token" ownsTheModule)
+            ++ ", owns ctor: "
+            ++ Debug.toString
+                (Dict.get "Parser.Advanced.Token" ownsTheConstructor)
+        )
+
+
+parserRegistry : Registry
+parserRegistry =
+    Registry.fromDocument
+        { schemaVersion = 1
+        , versionedPackages = []
+        , packages =
+            [ GrenAnalogue
+                { elmPackage = "elm/parser"
+                , grenPackage = "gren-lang/parser"
+                , grenVersion = "6.2.1"
+                , platform = Common
+                , modules =
+                    [ { source = "Parser.Advanced"
+                      , target = "Parser.Advanced"
+                      , values = Dict.empty
+                      , types = Dict.empty
+                      , recordAliases = Dict.empty
+                      , constructorFields =
+                            Dict.singleton "Token" [ "str", "expecting" ]
+                      }
+                    ]
+                , absentModules = Dict.empty
+                }
+            ]
+        }
+
+
+tokenShapes : Dict String (Array String)
+tokenShapes =
+    Registry.constructorFieldShapes parserRegistry
+
+
+{-| `import Parser.Advanced [as alias]` + `make = <qualifier>.Token "a" "b" …`.
+-}
+tokenUser : Maybe String -> String -> Int -> File
+tokenUser aliasName qualifier argumentCount =
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule
+        , moduleName = "Example"
+        , exposing_ = ExposeAll
+        }
+    , comments = []
+    , imports =
+        [ { moduleName = "Parser.Advanced"
+          , alias = aliasName
+          , exposing_ = Nothing
+          }
+        ]
+    , declarations =
+        [ DeclFunction
+            { name = "make"
+            , documentation = Nothing
+            , signature = Nothing
+            , arguments = []
+            , expression =
+                ExprApplication
+                    (Array.pushFirst
+                        (ExprVar
+                            { moduleName = Just qualifier, name = "Token" }
+                        )
+                        (Array.initialize argumentCount 0
+                            (\index -> ExprString (String.fromInt index))
+                        )
+                    )
+            }
+        ]
+    }
+
+
+printTokenUse : Maybe String -> String -> Int -> String
+printTokenUse aliasName qualifier argumentCount =
+    Print.print tokenShapes (tokenUser aliasName qualifier argumentCount)
 
 
 {-| Gren rejects mid-line `{ field = let` (UNFINISHED LET), even parenthesized.
@@ -93,7 +314,7 @@ recordFieldLetIsParenthesized =
                 ]
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         ok =
             not (String.contains "class = let" printed)
@@ -148,7 +369,7 @@ lambdaLetBreaksAfterArrow =
                 ]
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         ok =
             not (String.contains "-> let" printed)
@@ -185,7 +406,7 @@ simpleLambdaStaysInline =
                 ]
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         ok =
             String.contains "\\n -> n + 1" printed
@@ -220,7 +441,7 @@ caseArmStillMultiline =
                 ]
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         ok =
             String.contains "when" printed
@@ -259,7 +480,7 @@ basicsFalseKeepsModuleWhenLocalFalseCtor =
                 ]
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         ok =
             String.contains "Basics.False" printed
@@ -335,7 +556,7 @@ multiDeclLetIfKeepsSiblingBinds =
                 ]
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         -- months bind must appear after the if's else arm, not glued to it
         ok =
@@ -383,7 +604,7 @@ binopLetRhsBreaksAfterOperator =
                 ]
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         ok =
             not (String.contains "|| (let" printed)
@@ -430,7 +651,7 @@ applicationLetArgStartsOwnLine =
                 ]
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         ok =
             not (String.contains "(let" printed)
@@ -486,7 +707,7 @@ nestedLetStaysValid =
                 ]
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         ok =
             String.contains "let" printed
@@ -536,7 +757,7 @@ fixedListPatternPrintsAsArray =
                 ]
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         ok =
             String.contains "when" printed
@@ -749,7 +970,7 @@ stringWithControlCharEmitsUnicodeEscape =
                 ]
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         ok =
             String.contains "\\u{001B}" printed
@@ -782,7 +1003,7 @@ charLiteralWithControlCharEmitsUnicodeEscape =
                 ]
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         ok =
             String.contains "\\u{001B}" printed
@@ -964,7 +1185,7 @@ operatorInRecordFieldParenthesized =
                 ]
 
         printed =
-            Print.print file
+            Print.print Dict.empty file
 
         -- Operator must be parenthesized to parse as a valid record literal
         ok =
@@ -1161,7 +1382,7 @@ outcome name passed details =
 
 printExprBinding : String -> Expr -> String
 printExprBinding name expression =
-    Print.print
+    Print.print Dict.empty
         (emptyFile
             [ DeclFunction
                 { name = name
@@ -1176,7 +1397,7 @@ printExprBinding name expression =
 
 printPatBinding : String -> Pattern -> String
 printPatBinding name pattern =
-    Print.print
+    Print.print Dict.empty
         (emptyFile
             [ DeclFunction
                 { name = "pick"

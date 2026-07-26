@@ -142,9 +142,9 @@ compareFile rawFile =
                 Just False ->
                     Failed
                         ("value mismatch\nBEFORE:\n"
-                            ++ Print.print before
+                            ++ Print.print Dict.empty before
                             ++ "\nAFTER:\n"
-                            ++ Print.print after
+                            ++ Print.print Dict.empty after
                         )
 
                 Nothing ->

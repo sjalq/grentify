@@ -52,6 +52,7 @@ htmlAttributesRegistry =
             , values = Dict.singleton "classList" "ElmToGren.Compat.Html.Attributes.classList"
             , types = Dict.empty
             , recordAliases = Dict.empty
+            , constructorFields = Dict.empty
             }
     }
 
@@ -292,7 +293,7 @@ collidingAliasFallsBackToOwnModule =
                 )
 
         printed =
-            Print.print result
+            Print.print Dict.empty result
     in
     { name = "rose-tree: `import Array.Extra as Array` drops its alias next to `import Array`"
     , passed =

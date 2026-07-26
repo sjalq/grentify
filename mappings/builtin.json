@@ -464,7 +464,16 @@
       "grenVersion": "6.0.2",
       "platform": "browser",
       "modules": [
-        { "source": "Http", "target": "Http", "values": {}, "types": {} }
+        {
+          "source": "Http",
+          "target": "Http",
+          "values": {},
+          "types": {},
+          "constructorFields": {
+            "BadStatus_": ["metadata", "body"],
+            "GoodStatus_": ["metadata", "body"]
+          }
+        }
       ]
     },
     {
@@ -515,6 +524,9 @@
           "types": {},
           "recordAliases": {
             "DeadEnd": ["row", "col", "problem", "contextStack"]
+          },
+          "constructorFields": {
+            "Token": ["str", "expecting"]
           }
         }
       ]
@@ -616,6 +628,9 @@
               "Expect": "ElmToGren.Compat.Http.Expect",
               "Error": "ElmToGren.Compat.Http.Error",
               "Response": "ElmToGren.Compat.Http.Response"
+            },
+            "constructorFields": {
+              "BadPayload": ["message", "response"]
             }
           }
         ]

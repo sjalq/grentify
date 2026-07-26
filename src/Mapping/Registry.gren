@@ -1,5 +1,6 @@
 module Mapping.Registry exposing
     ( absentModuleFor
+    , constructorFieldShapes
     , empty
     , applyVersionedMappings
     , fromDocument
@@ -149,6 +150,40 @@ recordAliasShapes registry =
                 )
                 collected
                 module_.recordAliases
+        )
+        Dict.empty
+        registry.modules
+
+
+{-| Every mapped constructor payload shape, keyed by the QUALIFIED GREN NAME the
+port will print → the target's own payload field names, in Elm argument order.
+
+The key is resolved through the module's `values` mapping and only then through
+`target`, because that is exactly the rewrite `Ast.NameSub` applies to the
+constructor itself (elm/http 1.x `Http.BadPayload` lands on
+`ElmToGren.Compat.Http.BadPayload`, not on `Http.BadPayload`). Keying any other
+way would label a name the printer never emits. Hints only: a package that
+declares the same qualified name itself has real evidence and must win (D12).
+-}
+constructorFieldShapes : Registry -> Dict String (Array String)
+constructorFieldShapes registry =
+    Dict.foldl
+        (\_ module_ collected ->
+            Dict.foldl
+                (\constructor fields inner ->
+                    Dict.set
+                        (when Dict.get constructor module_.values is
+                            Just mapped ->
+                                mapped
+
+                            Nothing ->
+                                module_.target ++ "." ++ constructor
+                        )
+                        fields
+                        inner
+                )
+                collected
+                module_.constructorFields
         )
         Dict.empty
         registry.modules

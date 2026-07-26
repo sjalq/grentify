@@ -82,12 +82,18 @@ type alias Pending =
 
 {-| The cross-package facts an entry banks for its dependents. Keys are
 `"Module.Name"` after name substitution.
+
+D83 added `ctorHomes` (ctor name → declaring modules) and `knownModules`
+(modules fully surveyed for constructors) so CtorHome can re-point value
+refs wrongly homed to a dependency type-alias module.
 -}
 type alias Exports =
     { ctorArities : Dict String Int
     , soleCtors : Dict String {}
     , recordAliases : Dict String (Array String)
     , reservedExports : Dict String String
+    , ctorHomes : Dict String (Array String)
+    , knownModules : Dict String {}
     }
 
 
@@ -388,19 +394,24 @@ decodeExports text =
 
 exportsDecoder : Decode.Decoder Exports
 exportsDecoder =
-    Decode.map4
-        (\arities soles aliases reserved ->
+    Decode.map6
+        (\arities soles aliases reserved homes modules ->
             { ctorArities = arities
             , soleCtors =
                 Array.foldl (\name acc -> Dict.set name {} acc) Dict.empty soles
             , recordAliases = aliases
             , reservedExports = reserved
+            , ctorHomes = homes
+            , knownModules =
+                Array.foldl (\name acc -> Dict.set name {} acc) Dict.empty modules
             }
         )
         (Decode.field "ctorArities" (Decode.dict Decode.int))
         (Decode.field "soleCtors" (Decode.array Decode.string))
         (Decode.field "recordAliases" (Decode.dict (Decode.array Decode.string)))
         (Decode.field "reservedExports" (Decode.dict Decode.string))
+        (Decode.field "ctorHomes" (Decode.dict (Decode.array Decode.string)))
+        (Decode.field "knownModules" (Decode.array Decode.string))
 
 
 {-| Persist a verified package tree under the content-addressed entry path.
@@ -498,6 +509,28 @@ store platform childProcess permission entry sourcePackageDir toolVersion digest
                                                     exports.reservedExports
                                                 )
                                       }
+                                    , { key = "ctorHomes"
+                                      , value =
+                                            Encode.object
+                                                (Dict.foldl
+                                                    (\name modules acc ->
+                                                        Array.pushLast
+                                                            { key = name
+                                                            , value =
+                                                                Encode.array Encode.string
+                                                                    modules
+                                                            }
+                                                            acc
+                                                    )
+                                                    []
+                                                    exports.ctorHomes
+                                                )
+                                      }
+                                    , { key = "knownModules"
+                                      , value =
+                                            Encode.array Encode.string
+                                                (Dict.keys exports.knownModules)
+                                      }
                                     ]
                                     |> Encode.encode 0
                         in
@@ -582,10 +615,18 @@ freshUuid =
 
 renameInto : FileSystem.Permission -> Path -> Path -> Task x {}
 renameInto permission destination tempPath =
-    -- `move new old` renames old -> new (atomic on POSIX). A racing writer that
-    -- already published the destination just wins; drop our temp and adopt it.
-    FileSystem.move permission destination tempPath
-        |> Task.map (\_ -> {})
+    -- Replace any existing entry, then `move dest temp` renames temp -> dest
+    -- (atomic on POSIX). D70/D83 soft-miss re-ports when a banked fact is
+    -- missing from an older manifest at the same digest path; without
+    -- replacing the incomplete entry, every subsequent hit soft-misses forever
+    -- and the new facts never land. Concurrent writers that both finish both
+    -- publish a valid entry (last writer wins).
+    removeIfExists permission destination
+        |> Task.andThen
+            (\_ ->
+                FileSystem.move permission destination tempPath
+                    |> Task.map (\_ -> {})
+            )
         |> Task.onError (\_ -> removeIfExists permission tempPath)
 
 

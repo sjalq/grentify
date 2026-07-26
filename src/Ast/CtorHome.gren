@@ -1,6 +1,16 @@
-module Ast.CtorHome exposing ( Homes, apply, collectHomes )
+module Ast.CtorHome exposing
+    ( Homes
+    , apply
+    , collectHomes
+    , empty
+    , merge
+    , fromMaps
+    , protectRecordAliases
+    , toByCtor
+    , toKnownModules
+    )
 
-{-| D46: re-point constructor references whose recorded module does not
+{-| D46 / D83: re-point constructor references whose recorded module does not
 declare them.
 
 The extractor resolves refs with elm-review's ModuleNameLookupTable. When
@@ -10,18 +20,32 @@ vs `Review.Error.ReviewError.ReviewError (..)` — the table answers with
 the type's module for argument patterns, and the emitted ref
 (`Rule.ReviewError` as a pattern ctor) fails Gren with NAMING ERROR.
 
+D83: the same lie crosses the package boundary. `N.Down` is a type alias
+in dependency `lue-bird/elm-bounded-nat`; the value is constructor
+`Linear.Down` in dependency `lue-bird/elm-linear-direction`. Package-local
+`collectHomes` never sees either module, so the repair was skipped and
+dependents printed `N.Down` as a variant. Dependency constructor homes are
+banked with the rest of DepMaps (D45/D70 channel) and merged in here.
+
+Record type aliases also create value-level names (`Graph.Node id label`).
+A module that declares such an alias MUST block re-pointing — otherwise
+`Vendor.Graph.Node` (record alias) is "corrected" to `Elm.Syntax.Node.Node`
+(the sole custom-type declarer of `Node` among imports) and CtorLaw injects
+the wrong helper. Non-record aliases (`N.Down`) do not create values and do
+not block.
+
 Evidence law (D23 spirit — repair only with knowledge held exactly):
 a capitalized ref `M.N` in ctor position (pattern, or expression var)
 is re-pointed only when BOTH hold:
 
-1. module M is known in this package's extraction set and does NOT
-   declare a constructor N, and
+1. module M is known in the merged home set (this package OR a banked
+   dependency) and does NOT declare a constructor N and does NOT declare
+   a record type alias N, and
 2. exactly ONE module among this file's imports (or the file itself)
    declares constructor N.
 
-Unknown modules (dependencies), ambiguous homes, and declared-as-stated
-refs are never touched. Runs after BareResolve, before NameSub (Elm
-module names).
+Unknown modules, ambiguous homes, and declared-as-stated refs are never
+touched. Runs after BareResolve, before NameSub (Elm module names).
 -}
 
 import Array exposing ( Array )
@@ -37,11 +61,104 @@ import Dict exposing ( Dict )
 
 
 type alias Homes =
-    { -- ctor name -> modules in this package declaring it
+    { -- ctor name -> modules declaring it (package + banked deps)
       byCtor : Dict String (Array String)
-    , -- module name -> {} for every module in the extraction set
+    , -- module name -> {} for every module fully surveyed for ctors
       knownModules : Dict String {}
+    , -- "Module.Name" keys of record type aliases (block re-pointing away)
+      recordAliasKeys : Dict String {}
     }
+
+
+empty : Homes
+empty =
+    { byCtor = Dict.empty
+    , knownModules = Dict.empty
+    , recordAliasKeys = Dict.empty
+    }
+
+
+{-| Rebuild Homes from the DepMaps / banked-export flat maps. -}
+fromMaps : Dict String (Array String) -> Dict String {} -> Homes
+fromMaps byCtor knownModules =
+    { byCtor = byCtor
+    , knownModules = knownModules
+    , recordAliasKeys = Dict.empty
+    }
+
+
+{-| Mark every banked `"Module.Name"` record alias as a declared value name
+for that module, so CtorHome will not re-point away from it.
+-}
+protectRecordAliases : Dict String (Array String) -> Homes -> Homes
+protectRecordAliases recordAliases homes =
+    { homes
+        | recordAliasKeys =
+            Dict.foldl
+                (\key _ acc -> Dict.set key {} acc)
+                homes.recordAliasKeys
+                recordAliases
+    }
+
+
+toByCtor : Homes -> Dict String (Array String)
+toByCtor homes =
+    homes.byCtor
+
+
+toKnownModules : Homes -> Dict String {}
+toKnownModules homes =
+    homes.knownModules
+
+
+{-| Union two home sets. Constructor lists for the same name are
+concatenated with duplicates dropped so `soleImportedHome` stays
+count-accurate.
+-}
+merge : Homes -> Homes -> Homes
+merge left right =
+    { byCtor = mergeByCtor left.byCtor right.byCtor
+    , knownModules =
+        Dict.foldl Dict.set left.knownModules right.knownModules
+    , recordAliasKeys =
+        Dict.foldl Dict.set left.recordAliasKeys right.recordAliasKeys
+    }
+
+
+mergeByCtor :
+    Dict String (Array String)
+    -> Dict String (Array String)
+    -> Dict String (Array String)
+mergeByCtor left right =
+    Dict.foldl
+        (\ctor modules acc ->
+            Dict.update ctor
+                (\existing ->
+                    when existing is
+                        Just prev ->
+                            Just (uniqueAppend prev modules)
+
+                        Nothing ->
+                            Just modules
+                )
+                acc
+        )
+        left
+        right
+
+
+uniqueAppend : Array String -> Array String -> Array String
+uniqueAppend base extra =
+    Array.foldl
+        (\moduleName acc ->
+            if Array.any (\m -> m == moduleName) acc then
+                acc
+
+            else
+                Array.pushLast moduleName acc
+        )
+        base
+        extra
 
 
 collectHomes : Array File -> Homes
@@ -69,7 +186,7 @@ collectHomes files =
                                                 (\existing ->
                                                     when existing is
                                                         Just modules ->
-                                                            Just (Array.pushLast moduleName modules)
+                                                            Just (uniquePush moduleName modules)
 
                                                         Nothing ->
                                                             Just [ moduleName ]
@@ -86,8 +203,17 @@ collectHomes files =
                 withModule
                 file.declarations
         )
-        { byCtor = Dict.empty, knownModules = Dict.empty }
+        empty
         files
+
+
+uniquePush : String -> Array String -> Array String
+uniquePush moduleName modules =
+    if Array.any (\m -> m == moduleName) modules then
+        modules
+
+    else
+        Array.pushLast moduleName modules
 
 
 apply : Homes -> File -> File
@@ -111,11 +237,12 @@ apply homes file =
                         ref
 
                     Just written ->
-                        if declaresCtor homes written ref.name then
+                        if declaresValueName homes written ref.name then
                             ref
 
                         else if not (Dict.member written homes.knownModules) then
-                            -- dependency or unknown module: no evidence
+                            -- never surveyed: no positive evidence that
+                            -- the recorded home is wrong
                             ref
 
                         else
@@ -154,6 +281,15 @@ apply homes file =
                 Array.map (Walk.mapDeclaration fixExpr fixPattern)
                     file.declarations
         }
+
+
+{-| True when the module declares this capitalized name as a custom-type
+constructor OR as a record type alias (both are value-level in Elm).
+-}
+declaresValueName : Homes -> String -> String -> Bool
+declaresValueName homes moduleName name =
+    declaresCtor homes moduleName name
+        || Dict.member (moduleName ++ "." ++ name) homes.recordAliasKeys
 
 
 declaresCtor : Homes -> String -> String -> Bool

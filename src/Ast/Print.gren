@@ -60,10 +60,18 @@ the qualified Gren name and, for each `import M as A`, `A.Name` too. Resolving
 aliases here is the whole point — the printer sees `Advanced.Token`, never
 `Parser.Advanced.Token`, and a table keyed only by real module names silently
 misses every aliased import.
+
+`aliases` are the local import qualifiers that are NOT the imported module's
+own name (`import Calendar.Internal as Calendar_`). Those strings are free
+identifiers, not module names: Gren accepts `_` in them (D68's `Bar_`, authors'
+`Calendar_`), so `ModuleName.toGren` must never touch them. Applying the
+module-name underscore rewrite to an alias collapses `Calendar_` onto
+`Calendar` and produces AMBIGUOUS NAME against `import Calendar` (D82).
 -}
 type alias Context =
     { locals : Dict String {}
     , constructorFields : Dict String (Array String)
+    , aliases : Dict String {}
     }
 
 
@@ -75,6 +83,7 @@ print constructorFields file =
             , constructorFields =
                 Ref.addImportAliasKeys file.imports constructorFields
                     constructorFields
+            , aliases = importAliasSet file.imports
             }
 
         -- Gren wants module docs *after* the module line (Elm often puts them
@@ -207,13 +216,56 @@ printModuleDef moduleDef =
     keyword ++ " " ++ ModuleName.toGren moduleDef.moduleName ++ " exposing " ++ exposingPart
 
 
+{-| Local import aliases that differ from the module they stand for.
+
+**Law (D82):** an alias is a free identifier chosen for this file, not a
+module name. `ModuleName.toGren` rewrites *module* names Gren cannot parse
+(`Extended_Pictographic` → `ExtendedPictographic`); it is illegal on aliases,
+where a trailing `_` is load-bearing (`Calendar_`, D68's occupancy escape
+`Bar_`). Gren accepts `_` in import aliases (probed 0.6.6).
+-}
+importAliasSet : Array Import -> Dict String {}
+importAliasSet imports =
+    Array.foldl
+        (\import_ acc ->
+            when import_.alias is
+                Just aliasName ->
+                    if aliasName == import_.moduleName then
+                        acc
+
+                    else
+                        Dict.set aliasName {} acc
+
+                Nothing ->
+                    acc
+        )
+        Dict.empty
+        imports
+
+
+{-| Qualifier spelling for a reference.
+
+Module names (and unaliased imports, whose qualifier IS the module name) go
+through `ModuleName.toGren`. Import aliases print as written — see
+`importAliasSet`.
+-}
+printQualifier : Context -> String -> String
+printQualifier ctx moduleName =
+    if Dict.member moduleName ctx.aliases then
+        moduleName
+
+    else
+        ModuleName.toGren moduleName
+
+
 printImport : Import -> String
 printImport import_ =
     let
         aliasPart =
             when import_.alias is
                 Just aliasName ->
-                    " as " ++ ModuleName.toGren aliasName
+                    -- Alias is a local identifier, never a module name (D82).
+                    " as " ++ aliasName
 
                 Nothing ->
                     ""
@@ -1007,8 +1059,11 @@ printNamedRef ctx isType ref =
                 short =
                     ref.name
 
+                -- Qualifier may be a local import alias (`Calendar_`) or a real
+                -- module name (`Calendar.Internal` / `Extended_Pictographic`).
+                -- Only the latter is rewritten by ModuleName.toGren (D82 / D72).
                 long =
-                    ModuleName.toGren moduleName ++ "." ++ ref.name
+                    printQualifier ctx moduleName ++ "." ++ ref.name
 
                 sameModuleType =
                     moduleName == ref.name

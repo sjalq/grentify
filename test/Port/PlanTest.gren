@@ -25,10 +25,13 @@ Two directions, both required:
 import Array exposing (Array)
 import Dict exposing (Dict)
 import Elm.Manifest exposing (Manifest)
-import Emit.Manifest exposing (Dependency(..))
+import Emit.Manifest as EmitManifest exposing (Dependency(..), Spec)
 import Mapping.Registry as MappingRegistry
 import Mapping.Types as Mapping
+import Port.Error as PortError
 import Port.Plan as Plan
+import Result exposing (Result(..))
+import String
 
 
 type alias Check =
@@ -47,6 +50,8 @@ tests =
     , closureStopsAtUnportedPackages
     , manifestOmitsTheUnrelatedSibling
     , manifestKeepsTheTransitiveLocal
+    , exposedModuleCollisionWithLocalDepIsRefused
+    , exposedModuleCollisionNamesBothPackages
     ]
 
 
@@ -64,25 +69,26 @@ tests =
 
 packageJson : String -> Array String -> String
 packageJson name dependencies =
+    -- Each package exposes a unique module so D82's exposed-name collision
+    -- check does not fire on the D76 fixture (every package used to expose
+    -- the shared name `Fixture`, which is exactly the D82 shape).
     let
-        deps =
-            dependencies
-                |> Array.map (\dependency -> "\"" ++ dependency ++ "\": \"1.0.0 <= v < 2.0.0\"")
-                |> String.join ", "
+        exposed =
+            name
+                |> String.replace "/" "."
+                |> String.split "."
+                |> Array.map
+                    (\segment ->
+                        when String.popFirst segment is
+                            Just { first, rest } ->
+                                String.toUpper (String.fromChar first) ++ rest
+
+                            Nothing ->
+                                segment
+                    )
+                |> String.join ""
     in
-    "{ \"type\": \"package\""
-        ++ ", \"name\": \""
-        ++ name
-        ++ "\""
-        ++ ", \"summary\": \"fixture\""
-        ++ ", \"license\": \"BSD-3-Clause\""
-        ++ ", \"version\": \"1.0.0\""
-        ++ ", \"exposed-modules\": [ \"Fixture\" ]"
-        ++ ", \"elm-version\": \"0.19.0 <= v < 0.20.0\""
-        ++ ", \"dependencies\": { "
-        ++ deps
-        ++ " }"
-        ++ ", \"test-dependencies\": {} }"
+    packageJsonWithExposed name dependencies [ exposed ]
 
 
 fixture : Dict String { dependencies : Array String, platform : Mapping.Platform }
@@ -258,6 +264,139 @@ manifestKeepsTheTransitiveLocal =
         [ "syntax/syntax", "writer/structured" ]
         (localDependencyNames "review/review")
 
+
+{-| D82 / elm-visualization: package exposes `Force`, dependency also exposes
+`Force`. Gren forbids that; Elm does not. Refuse with a named diagnostic.
+-}
+exposedModuleCollisionWithLocalDepIsRefused : Check
+exposedModuleCollisionWithLocalDepIsRefused =
+    when forceCollisionBuild is
+        Err _ ->
+            { name = "buildManifest: exposed module colliding with a local dep is refused"
+            , passed = True
+            , details = ""
+            }
+
+        Ok _ ->
+            { name = "buildManifest: exposed module colliding with a local dep is refused"
+            , passed = False
+            , details = "expected AMBIGUOUS_MODULE_NAME, buildManifest accepted the collision"
+            }
+
+
+exposedModuleCollisionNamesBothPackages : Check
+exposedModuleCollisionNamesBothPackages =
+    when forceCollisionBuild is
+        Err error ->
+            let
+                text =
+                    PortError.toString error
+
+                ok =
+                    String.contains "AMBIGUOUS_MODULE_NAME" text
+                        && String.contains "Force" text
+                        && String.contains "viz/host" text
+                        && String.contains "units/dep" text
+                        && String.contains "Gren forbids" text
+            in
+            { name = "buildManifest: collision refusal names module and both packages (D64)"
+            , passed = ok
+            , details = text
+            }
+
+        Ok _ ->
+            { name = "buildManifest: collision refusal names module and both packages (D64)"
+            , passed = False
+            , details = "expected a refusal, got Ok"
+            }
+
+
+{-| Minimal D82 specimen: host exposes Force, depends on a local that also
+exposes Force. Distinct from D76 (the edge is real, not an over-broad hoist).
+-}
+forceCollisionBuild : Result PortError.Error Spec
+forceCollisionBuild =
+    let
+        hostJson =
+            packageJsonWithExposed "viz/host" [ "units/dep" ] [ "Force", "Scale" ]
+
+        depJson =
+            packageJsonWithExposed "units/dep" [] [ "Force", "Length" ]
+
+        identities =
+            Dict.empty
+                |> Dict.set "viz/host"
+                    { elmName = "viz/host"
+                    , grenName = "viz/host"
+                    , version = "1.0.0"
+                    , platform = Mapping.Common
+                    }
+                |> Dict.set "units/dep"
+                    { elmName = "units/dep"
+                    , grenName = "units/dep"
+                    , version = "1.0.0"
+                    , platform = Mapping.Common
+                    }
+
+        fixtureFailed =
+            Err (PortError.create "FIXTURE" "force-collision fixture failed to decode")
+    in
+    when Elm.Manifest.decodeString hostJson is
+        Err _ ->
+            fixtureFailed
+
+        Ok host ->
+            when Elm.Manifest.decodeString depJson is
+                Err _ ->
+                    fixtureFailed
+
+                Ok dep ->
+                    Plan.buildManifest
+                        { source = host
+                        , identity =
+                            { elmName = "viz/host"
+                            , grenName = "viz/host"
+                            , version = "1.0.0"
+                            , platform = Mapping.Common
+                            }
+                        , registry = registry
+                        , rootElmName = "viz/host"
+                        , portedManifests =
+                            Dict.empty
+                                |> Dict.set "viz/host" host
+                                |> Dict.set "units/dep" dep
+                        , plannedIdentities = identities
+                        }
+
+
+packageJsonWithExposed : String -> Array String -> Array String -> String
+packageJsonWithExposed name dependencies exposed =
+    let
+        deps =
+            dependencies
+                |> Array.map (\dependency -> "\"" ++ dependency ++ "\": \"1.0.0 <= v < 2.0.0\"")
+                |> String.join ", "
+
+        modules =
+            exposed
+                |> Array.map (\moduleName -> "\"" ++ moduleName ++ "\"")
+                |> String.join ", "
+    in
+    "{ \"type\": \"package\""
+        ++ ", \"name\": \""
+        ++ name
+        ++ "\""
+        ++ ", \"summary\": \"fixture\""
+        ++ ", \"license\": \"BSD-3-Clause\""
+        ++ ", \"version\": \"1.0.0\""
+        ++ ", \"exposed-modules\": [ "
+        ++ modules
+        ++ " ]"
+        ++ ", \"elm-version\": \"0.19.0 <= v < 0.20.0\""
+        ++ ", \"dependencies\": { "
+        ++ deps
+        ++ " }"
+        ++ ", \"test-dependencies\": {} }"
 
 
 -- HELPERS ---------------------------------------------------------------

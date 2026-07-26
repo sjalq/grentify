@@ -197,6 +197,7 @@ tests =
     , freeAliasesAreLeftAlone
     , exhaustedCollisionTakesOccupancyEscape
     , siblingModuleKeepsItsOwnAlias
+    , trailingUnderscoreAliasSurvivesPrint
     ]
 
 
@@ -395,6 +396,56 @@ exhaustedCollisionTakesOccupancyEscape =
         Array.map .qualifier (qualifiersOf result) == [ "Zed", "Bar", "Bar_" ]
             && refsOf result == [ qualified "Bar_" "value" ]
     , details = "`Ast.Reserved.pickFree` mints the name; qualifiers stay pairwise distinct"
+    }
+
+
+{-| D82 / elm-datetime: authors disambiguate with a trailing underscore
+(`import Calendar` + `import Calendar.Internal as Calendar_`). D68 correctly
+leaves the free alias alone, but the printer used to run `ModuleName.toGren` on
+aliases too — collapsing `Calendar_` to `Calendar` and producing AMBIGUOUS NAME
+against the unaliased import. Aliases are free identifiers; only module names
+take the underscore rewrite (D72).
+-}
+trailingUnderscoreAliasSurvivesPrint : TestResult
+trailingUnderscoreAliasSurvivesPrint =
+    let
+        result =
+            NameSub.apply emptyRegistry
+                (moduleUsing
+                    [ importOf "Calendar" Nothing
+                    , importOf "Calendar.Internal" (Just "Calendar_")
+                    , importOf "Clock" Nothing
+                    , importOf "Clock.Internal" (Just "Clock_")
+                    ]
+                    [ qualified "Calendar" "fromPosix"
+                    , qualified "Calendar.Internal" "Date"
+                    , qualified "Clock.Internal" "Time"
+                    ]
+                )
+
+        printed =
+            Print.print Dict.empty result
+    in
+    { name = "elm-datetime: trailing-underscore aliases survive print next to bare module imports"
+    , passed =
+        qualifiersOf result
+            == [ { moduleName = "Calendar", qualifier = "Calendar" }
+               , { moduleName = "Calendar.Internal", qualifier = "Calendar_" }
+               , { moduleName = "Clock", qualifier = "Clock" }
+               , { moduleName = "Clock.Internal", qualifier = "Clock_" }
+               ]
+            && refsOf result
+            == [ qualified "Calendar" "fromPosix"
+               , qualified "Calendar_" "Date"
+               , qualified "Clock_" "Time"
+               ]
+            && String.contains "import Calendar.Internal as Calendar_" printed
+            && String.contains "import Clock.Internal as Clock_" printed
+            && String.contains "Calendar_.Date" printed
+            && String.contains "Clock_.Time" printed
+            && not (String.contains "as Calendar\n" printed)
+            && not (String.contains "as Clock\n" printed)
+    , details = "ModuleName.toGren must not touch import aliases (D82); D68's free-alias law stays intact"
     }
 
 

@@ -164,6 +164,67 @@ by being written through this law; nothing edits the ledger by hand.
 
 ## 6. Known defects register (2026-07-17 audit; independently verified)
 
+- **D82 a name that is unambiguous in Elm becomes ambiguous in Gren —
+  TWO roots, not one** (found 2026-07-26 on
+  `PanagiotisGeorgiadis/elm-datetime` AMBIGUOUS NAME @ DateTime.Internal and
+  `gampleman/elm-visualization` AMBIGUOUS MODULE NAME for `Force`; FIXED same
+  day for the first face, refused legibly for the second).
+
+  The class is "unambiguous-in-Elm becomes ambiguous-in-Gren". Two packages
+  looked like faces of one bug; they are not.
+
+  **Root 1 — import aliases treated as module names (FIXED, host-side).**
+  elm-datetime writes the legal Elm shape
+  `import Calendar` + `import Calendar.Internal as Calendar_` (and the
+  Clock twin). D68 correctly leaves the free trailing-underscore alias
+  alone. D72's `ModuleName.toGren` rewrites *module* names Gren cannot
+  parse (`Extended_Pictographic` → `ExtendedPictographic`, and
+  `Internals_` → `Internals`). The printer applied that rewrite to import
+  *aliases* and to reference qualifiers that were aliases:
+  `Calendar_` collapsed to `Calendar`, colliding with the unaliased
+  `import Calendar`, and gren died with AMBIGUOUS NAME on
+  `Calendar.Date` / `Clock.Time`. Probed: Gren 0.6.6 accepts `_` in
+  import aliases (they are free identifiers, not module names). The same
+  collapse would also destroy D68's occupancy escape (`Bar_` → `Bar`).
+
+  **Fix (one law, printer only).** `Ast.Print`: an import alias is printed
+  raw; a reference qualifier is rewritten with `ModuleName.toGren` only
+  when it is NOT an import alias of this file. Module headers, import
+  paths, unaliased qualifiers, exposed-modules, and emitted paths still
+  take the D72 rewrite. D68's unique-qualifier law is untouched.
+  Properties: NameSub regression that NameSub→Print keeps
+  `as Calendar_` / `Calendar_.Date` next to bare `import Calendar`;
+  ModuleName printer check updated so `as EN_US` stays raw while the
+  module path still renames.
+
+  **Root 2 — package-graph module-name collision (language difference;
+  REFUSED, not rewritten).** elm-visualization exposes `Force` and
+  depends (transitively, via `ianmackenzie/elm-geometry` and
+  `ianmackenzie/elm-units-prefixed`) on `ianmackenzie/elm-units`, which
+  also exposes `Force`. Checked first against D76: the edge is real
+  (`localClosure` of the package's own declared deps), not a residue of
+  over-broad sibling hoist. Elm allows two packages to share a module
+  name when no single module imports both; Gren forbids it at the
+  package graph. A rename would change the package's public API and is
+  not a pure function of the module name alone (both packages use the
+  same name — D72's property does not apply). Sound automatic fix does
+  not exist under the gold guides.
+
+  **Refusal (legible, D64).** `Port.Plan.buildManifest` checks this
+  package's exposed modules against every vendored dependency in its
+  local closure and fails with `AMBIGUOUS_MODULE_NAME` naming the
+  module, this package, and the colliding dependency, and stating the
+  Elm/Gren difference and why rename is refused. PlanTest covers the
+  Force specimen both for refusal and for the named diagnostic.
+
+  RECEIPTS: `PanagiotisGeorgiadis/elm-datetime@1.3.0` ports and
+  gren-verifies (`Calendar_` / `Clock_` preserved in output).
+  `gampleman/elm-visualization@2.4.3` refuses at plan with
+  `AMBIGUOUS_MODULE_NAME` naming `Force` and `ianmackenzie/elm-units`.
+  Non-regression: `maca/elm-rose-tree` (D68 receipt) and
+  `jfmengels/elm-review` EXIT=0. Tier 0 **342** checks (was 339; +1
+  NameSub print, +2 Plan collision). Canary 14/14.
+
 - **D81 non-sole constructor let-destructure emitted unguarded (bare-name
   sole-ctor collision)** (found by dillonkearns/elm-markdown UNSAFE PATTERN
   @ Markdown.Parser, and dtwrks/elm-book via the same dep; FIXED 2026-07-26).

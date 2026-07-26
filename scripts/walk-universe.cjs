@@ -8,6 +8,11 @@
  *    Namespace-level kernel exclusion is decided here (unit-testable);
  *    source-level kernel/GLSL/effect refusals come from the port tool and are
  *    mapped to EXEMPT records with the tool's error as evidence.
+ *    Every exemption is matched on the tool's exact refusal wording and, for
+ *    kernel JS, attributed to the package that ships it — §1 splits
+ *    EXEMPT(kernel) into "contains kernel modules" (`kernel:source`) and
+ *    "requires an unmapped kernel package" (`kernel:dep`) and requires the
+ *    offending module/dep chain as evidence. See D66.
  *  - Every decision is one structured line in test/ecosystem/walk-log.jsonl
  *    (rotated to .jsonl.<n>.gz beyond 50MB). The log is append-only ground
  *    truth for ledger ingestion; nothing edits it in place.
@@ -71,11 +76,42 @@ function classifyCandidacy(entry) {
   return { candidate: true };
 }
 
-/** Port-tool refusal codes that mean "excluded by design", not "bug". */
+/**
+ * Port-tool refusal codes that mean "excluded by design", not "bug".
+ *
+ * D66: every pattern here is the tool's OWN refusal vocabulary, quoted exactly.
+ * The word "kernel" or "GLSL" appearing somewhere in a package's output proves
+ * nothing — `/KERNEL/i` matched stack frames inside a bundled review app
+ * (abinayasudhir/html-parser) and `/GLSL/` matched a dependency banner
+ * (jfmengels/elm-review-common), so two working failures were banked terminal
+ * and became invisible to every drain. That is D51's mistake pointing the other
+ * way, and a terminal state is the one verdict nothing ever revisits.
+ */
 const EXEMPT_SIGNATURES = [
-  { pattern: /Elm\.Kernel|KERNEL/i, reason: "kernel:source" },
-  { pattern: /\[glsl\||GLSL/, reason: "glsl:source" },
-  { pattern: /effect module/i, reason: "effect-module:source" },
+  // Acquire/Hazard.gren, surfaced as `UNSUPPORTED_ELM_SOURCE: <module> ...`.
+  {
+    pattern: /references Elm\.Kernel, whose native Elm kernel code/,
+    reason: "kernel:source",
+  },
+  {
+    pattern: /declares an Elm effect module, which is reserved/,
+    reason: "effect-module:source",
+  },
+  {
+    pattern: /contains an Elm \[glsl\|\.\.\.\|\] shader block/,
+    reason: "glsl:source",
+  },
+  // Transform/Pipeline.gren synthetic diagnostics (rendered UNSUPPORTED_*).
+  {
+    pattern: /Elm kernel (module imports cannot be transpiled|calls cannot be emitted)/,
+    reason: "kernel:source",
+  },
+  {
+    pattern: /Elm effect modules depend on privileged runtime/,
+    reason: "effect-module:source",
+  },
+  // A literal Elm shader block echoed back from the offending source.
+  { pattern: /\[glsl\|/, reason: "glsl:source" },
   // Genuinely gone upstream: the coordinate's GitHub tag no longer exists, so
   // `elm install` cannot fetch it either (spot-checked against the zipball URL
   // Elm itself uses). Terminal per §1.
@@ -84,6 +120,82 @@ const EXEMPT_SIGNATURES = [
     reason: "broken-upstream:unfetchable",
   },
 ];
+
+// ---------------------------------------------------------------------------
+// Kernel attribution (D66). §1 makes EXEMPT(kernel) terminal for a package that
+// "contains Elm.Kernel/effect modules, OR transitively requires an unmapped
+// kernel package", and demands the "offending module/dep chain" as evidence.
+// Those are two different facts about a package and the ledger must not blur
+// them, so the refusal is attributed to the package that actually ships the
+// native JS instead of being filed as if the walked package wrote it.
+// ---------------------------------------------------------------------------
+
+/** `Acquire.gren` refusal; the capture group is a `, `-joined list of paths. */
+const KERNEL_JS_REFUSAL =
+  /UNSUPPORTED_KERNEL: Elm package contains native JavaScript under src: (.+?)\. Add an explicit/g;
+
+/**
+ * Acquisition cache layout:
+ *   <cache>/registry/packages/<author>/<name>/<version>/source-<sha>/<tarball>/<file>
+ * The walked package and its dependencies are unpacked side by side under it,
+ * so the path is what says WHOSE kernel this is.
+ */
+const REGISTRY_SOURCE_PATH =
+  /registry[/\\]packages[/\\]([^/\\]+)[/\\]([^/\\]+)[/\\]([^/\\]+)[/\\]source-[^/\\]+[/\\][^/\\]+[/\\](.+)$/;
+
+/**
+ * @param {string} filePath absolute path to an offending kernel .js
+ * @returns {{owner: string|null, module: string}} owner = "author/name@version"
+ */
+function attributeKernelFile(filePath) {
+  const raw = String(filePath || "").trim();
+  const m = REGISTRY_SOURCE_PATH.exec(raw);
+  if (!m) return { owner: null, module: raw.split(/[/\\]/).slice(-3).join("/") };
+  return { owner: `${m[1]}/${m[2]}@${m[3]}`, module: m[4].replace(/\\/g, "/") };
+}
+
+/**
+ * Classify an `UNSUPPORTED_KERNEL` native-JS refusal against the package we
+ * asked to port.
+ *
+ * Unattributable paths count as the walked package's own kernel: the refusal
+ * literally says "Elm package contains native JavaScript under src", so
+ * "cannot prove it was a dependency" must never soften into "it was".
+ *
+ * @param {string} text combined tool output
+ * @param {string} coordinate walked "author/name@version"
+ * @returns {{reason: string, evidence: string}|null}
+ */
+function classifyKernelRefusal(text, coordinate) {
+  const self = String(coordinate || "").split("@")[0];
+  /** @type {Map<string, Set<string>>} owner -> modules */
+  const offenders = new Map();
+  let ownKernel = false;
+  let matched = false;
+  for (const hit of String(text || "").matchAll(KERNEL_JS_REFUSAL)) {
+    matched = true;
+    for (const file of hit[1].split(", ")) {
+      if (!file.trim()) continue;
+      const { owner, module } = attributeKernelFile(file);
+      const key = owner || coordinate;
+      if (!owner || owner.split("@")[0] === self) ownKernel = true;
+      if (!offenders.has(key)) offenders.set(key, new Set());
+      offenders.get(key).add(module);
+    }
+  }
+  if (!matched) return null;
+  const chain = [...offenders.entries()].map(([owner, modules]) =>
+    owner === coordinate
+      ? `${coordinate} ships ${[...modules].sort().join(", ")}`
+      : `${coordinate} -> ${owner} ships ${[...modules].sort().join(", ")}`,
+  );
+  return {
+    // A package that ships kernel JS itself is `kernel:source` even when a
+    // dependency does too: the nearer, stronger fact wins.
+    reason: ownKernel ? "kernel:source" : "kernel:dep",
+    evidence: `kernel dep chain: ${chain.sort().join(" | ")}`,
+  };
+}
 
 /**
  * D51: OUR refusals, previously filed as `broken-upstream:unfetchable` — 67 of
@@ -106,9 +218,16 @@ function classifyToolRefusal(text) {
   return null;
 }
 
-function classifyExempt(text) {
+/**
+ * @param {string} text combined tool output
+ * @param {string} coordinate walked "author/name@version"
+ * @returns {{reason: string, evidence: string|null}|null} null = not exempt
+ */
+function classifyExempt(text, coordinate) {
+  const kernel = classifyKernelRefusal(text, coordinate);
+  if (kernel) return kernel;
   for (const sig of EXEMPT_SIGNATURES) {
-    if (sig.pattern.test(text)) return sig.reason;
+    if (sig.pattern.test(text)) return { reason: sig.reason, evidence: null };
   }
   return null;
 }
@@ -202,22 +321,87 @@ function selfTest() {
       );
     }
   }
+  // A real acquisition refusal, verbatim, with the cache paths it names.
+  const cache = "/repo/.test-cache/ecosystem/cache/registry/packages";
+  const linAlgJs = `${cache}/elm-explorations/linear-algebra/1.0.3/source-f9d8397/elm-explorations-linear-algebra-182fab3/src/Elm/Kernel/MJS.js`;
+  const ownJs = `${cache}/some/pkg/1.0.0/source-abc1234/some-pkg-deadbee/src/Elm/Kernel/Local.js`;
+  const kernelRefusal = (files) =>
+    `UNSUPPORTED_KERNEL: Elm package contains native JavaScript under src: ${files}. Add an explicit Gren mapping instead of transpiling kernel code.`;
+
   const exemptCases = [
-    ["uses Elm.Kernel.Scheduler", "kernel:source"],
-    ["contains [glsl| shader", "glsl:source"],
-    ["this is an effect module", "effect-module:source"],
-    ["SOURCE_CLONE_FAILED: gone", "broken-upstream:unfetchable"],
-    ["DOWNLOAD_FAILED: Bad status: 404 - Not Found", "broken-upstream:unfetchable"],
-    ["TYPE MISMATCH in Main.elm", null],
+    [
+      "some/pkg@1.0.0",
+      "UNSUPPORTED_ELM_SOURCE: src/Foo.elm references Elm.Kernel, whose native Elm kernel code cannot be emitted as Gren package source.",
+      "kernel:source",
+    ],
+    [
+      "some/pkg@1.0.0",
+      "UNSUPPORTED_FEATURE: Elm kernel module imports cannot be transpiled to portable Gren package source.",
+      "kernel:source",
+    ],
+    ["some/pkg@1.0.0", "contains [glsl| shader", "glsl:source"],
+    [
+      "some/pkg@1.0.0",
+      "UNSUPPORTED_ELM_SOURCE: src/Fx.elm declares an Elm effect module, which is reserved for core/runtime packages.",
+      "effect-module:source",
+    ],
+    [
+      "some/pkg@1.0.0",
+      "UNSUPPORTED_KERNEL: Elm effect modules depend on privileged runtime and kernel APIs.",
+      "effect-module:source",
+    ],
+    ["some/pkg@1.0.0", "SOURCE_CLONE_FAILED: gone", "broken-upstream:unfetchable"],
+    [
+      "some/pkg@1.0.0",
+      "DOWNLOAD_FAILED: Bad status: 404 - Not Found",
+      "broken-upstream:unfetchable",
+    ],
+    ["some/pkg@1.0.0", "TYPE MISMATCH in Main.elm", null],
     // D51: our own refusals must NOT be exempt — they stay in the queue.
-    ["ARCHIVE_INVALID: Package archive contains a symbolic link.", null],
-    ["SOURCE_INVALID: Downloaded Elm package identity does not match.", null],
+    ["some/pkg@1.0.0", "ARCHIVE_INVALID: Package archive contains a symbolic link.", null],
+    ["some/pkg@1.0.0", "SOURCE_INVALID: Downloaded Elm package identity does not match.", null],
+    // D66 negatives: the WORD is not the fact. These are working failures.
+    ["some/pkg@1.0.0", "    at _Kernel_f (/tmp/review-applications/abc-debug.js:3827:5)", null],
+    ["some/pkg@1.0.0", "GREN_VERIFY_FAILED: gren-lang/core ok; GLSL notes ignored", null],
+    ["some/pkg@1.0.0", "NAMING ERROR: I cannot find a `kernel` variable.", null],
+    ["some/pkg@1.0.0", "-- TYPE MISMATCH --- src/Effect/Module.elm", null],
+    // D66 positives: kernel JS attributed to whoever ships it.
+    ["ianmackenzie/elm-3d-camera@4.0.1", kernelRefusal(linAlgJs), "kernel:dep"],
+    ["some/pkg@1.0.0", kernelRefusal(ownJs), "kernel:source"],
+    // Own kernel plus a dependency's: the nearer fact wins.
+    ["some/pkg@1.0.0", kernelRefusal(`${ownJs}, ${linAlgJs}`), "kernel:source"],
+    // Unattributable path: never soften into "it was a dependency".
+    ["some/pkg@1.0.0", kernelRefusal("/elsewhere/src/Elm/Kernel/X.js"), "kernel:source"],
   ];
-  for (const [text, want] of exemptCases) {
-    const got = classifyExempt(text);
-    if (got !== want) {
+  for (const [coordinate, text, want] of exemptCases) {
+    const got = classifyExempt(text, coordinate);
+    const reason = got ? got.reason : null;
+    if (reason !== want) {
       failed += 1;
-      console.error(`FAIL exempt "${text}": got ${got}, want ${want}`);
+      console.error(`FAIL exempt "${text.slice(0, 60)}": got ${reason}, want ${want}`);
+    }
+  }
+
+  // The chain, not the word: §1 requires the offending module/dep chain.
+  const chainCases = [
+    [
+      "ianmackenzie/elm-3d-camera@4.0.1",
+      kernelRefusal(linAlgJs),
+      "kernel dep chain: ianmackenzie/elm-3d-camera@4.0.1 -> elm-explorations/linear-algebra@1.0.3 ships src/Elm/Kernel/MJS.js",
+    ],
+    [
+      "some/pkg@1.0.0",
+      kernelRefusal(ownJs),
+      "kernel dep chain: some/pkg@1.0.0 ships src/Elm/Kernel/Local.js",
+    ],
+  ];
+  for (const [coordinate, text, want] of chainCases) {
+    const got = classifyExempt(text, coordinate);
+    if (!got || got.evidence !== want) {
+      failed += 1;
+      console.error(
+        `FAIL chain ${coordinate}: got ${got && got.evidence}, want ${want}`,
+      );
     }
   }
   const refusalCases = [
@@ -239,7 +423,7 @@ function selfTest() {
     process.exit(1);
   }
   console.log(
-    `walker self-test: ${cases.length + exemptCases.length + refusalCases.length} checks green`,
+    `walker self-test: ${cases.length + exemptCases.length + chainCases.length + refusalCases.length} checks green`,
   );
 }
 
@@ -367,14 +551,17 @@ async function portOne(entry, stamp, opts) {
       moduleCount,
     };
   }
-  const exemptReason = classifyExempt(text);
-  if (exemptReason) {
+  const exempt = classifyExempt(text, coordinate);
+  if (exempt) {
     return {
       status: "EXEMPT",
-      reason: exemptReason,
+      reason: exempt.reason,
       platform,
       ms,
-      evidence: text.split("\n").filter(Boolean).slice(-4).join("\n").slice(0, 500),
+      // §1 requires the offending module/dep chain, and D52 applies to
+      // exemptions too: the blind tail banked machine-local cache paths from
+      // whichever shard happened to run the package, which name nothing.
+      evidence: exempt.evidence || extractEvidence(text, 500),
     };
   }
   // D52: evidence is the error-bearing slice, never the blind tail. Download

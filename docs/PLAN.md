@@ -202,6 +202,70 @@ Throughput and accounting (2026-07-25 external review; all four reproduced):
   consumer compile is attempted and its module-level errors are reported, not
   fatal (`Verify.Package.verifyConsumer`); manifest-level errors and any error
   inside `.elm-to-gren/packages` stay fatal.
+- **D66 kernel exemptions were decided by substring, and never named the dep
+  chain** (FIXED in the walker 2026-07-26): §1 splits `EXEMPT(kernel)` into two
+  facts — a package that *contains* `Elm.Kernel`/effect modules, and one that
+  *transitively requires an unmapped kernel package* — and demands the
+  "offending module/dep chain" as evidence. The walker had neither. It matched
+  `/Elm\.Kernel|KERNEL/i` and `/\[glsl\||GLSL/` against the whole tool output
+  and banked the blind tail as evidence, which failed in both directions at
+  once:
+  - UNDER-REPORTED as terminal. `ianmackenzie/elm-3d-camera@4.0.1`,
+    `elm-3d-scene@1.1.0`, `elm-geometry-linear-algebra-interop@2.0.3` and
+    `justgook/webgl-shape@3.0.0` (4 of the core set's 43 non-passes, fan-in 17)
+    were filed `kernel:source` as if they wrote kernel JS. All four are pure
+    Elm; each declares `elm-explorations/linear-algebra` in its own `elm.json`,
+    and that package ships `src/Elm/Kernel/MJS.js`. They are terminal
+    `EXEMPT(kernel)` by the second clause and belong out of the failure
+    denominator, not in a drain queue. 35 banked records carry the same
+    misattribution.
+  - OVER-REPORTED as terminal — the D51 mistake pointing the other way, and
+    the more expensive one, because nothing ever revisits a terminal verdict.
+    `abinayasudhir/html-parser@1.0.3` was exempted `kernel:source` on the
+    string `Kernel` inside a stack frame of a bundled elm-review debug app, and
+    `jfmengels/elm-review-common@1.3.5` was exempted `glsl:source` on the
+    string `GLSL` in unrelated output. Neither package has anything to do with
+    kernels or shaders; both are working failures that no drain would ever have
+    looked at again.
+  The evidence was worthless besides: it recorded absolute cache paths naming
+  whichever shard directory happened to run the package
+  (`.test-cache/walk-shards/s1/...`), which identify nothing outside that one
+  machine.
+  FIX (`scripts/walk-universe.cjs`). Exemptions match the port tool's exact
+  refusal wording — `Acquire/Hazard.gren`'s three `UNSUPPORTED_ELM_SOURCE`
+  sentences, `Transform/Pipeline.gren`'s two synthetic kernel/effect
+  diagnostics, and a literal `[glsl|` block — never a lone capitalized word.
+  `UNSUPPORTED_KERNEL` native-JS refusals are attributed by parsing the
+  acquisition cache layout
+  (`registry/packages/<author>/<name>/<version>/source-<sha>/<tarball>/<file>`),
+  which is what says whose kernel it is: the walked package's own kernel stays
+  `kernel:source`, a dependency's becomes `kernel:dep`, and the evidence is the
+  chain (`ianmackenzie/elm-3d-camera@4.0.1 -> elm-explorations/linear-algebra@1.0.3
+  ships src/Elm/Kernel/MJS.js`). An unattributable path counts as the walked
+  package's own, because "cannot prove it was a dependency" must never soften
+  into "it was". Non-kernel exemptions now bank `extractEvidence` (D52) instead
+  of the tail.
+  NOT exempted, deliberately: our own refusals (`ARCHIVE_INVALID`,
+  `SOURCE_INVALID`/`SOURCE_MANIFEST_MISMATCH`) stay working failures per D51;
+  the word "kernel"/"GLSL" in a stack frame, a bundled app, a `NAMING ERROR` or
+  a module named `Effect.*` buys no exemption; and `elm-explorations/webgl`
+  dependents are exempted on the kernel JS their closure actually contains, not
+  on the package name.
+  PROOF: walker self-test 32 checks (was 20) — the four new negatives above and
+  the dep/self/mixed/unattributable attribution cases; tier 0 267 checks +
+  property-rows; `npm run test:ledger` green. Replaying every banked evidence
+  string in `walk-log.jsonl` and `core-run.jsonl` through the old and new
+  classifiers yields exactly one class of change, 35 records
+  `kernel:source -> kernel:dep`: no exemption is lost, only correctly
+  attributed. Re-walked into a scratch log (ground truth untouched):
+  all four land `EXEMPT kernel:dep` with the chain as evidence, and the two
+  over-exempted packages come back as the working failures they always were —
+  `abinayasudhir/html-parser@1.0.3` `exit-1` (an elm-review app crash inside
+  its own `elm-stuff/generated-code`, still `unclassified:no-evidence`) and
+  `jfmengels/elm-review-common@1.3.5` `gren-verify` ("I ran into something that
+  bypassed the normal error reporting process", i.e. a Gren compiler crash).
+  CARRIED FORWARD: `walk-log.jsonl` is append-only, so both still resolve as
+  terminal in `loadDoneSet` until a drain re-attempts them with `--only`.
 - **D52 walk evidence was the blind tail** (FIXED 2026-07-25): the walker
   banked `text.split("\n").slice(-4)`, and the last thing printed on most
   failures is download chatter, so 284 of the queue's failures carry no error

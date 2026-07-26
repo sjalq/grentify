@@ -1272,6 +1272,28 @@ evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-26 (end of session) CORE SET **187/232 = 80.6%**, up from 179
+  (77.2%), zero regressions, 12.7 min wall at -j8, median 4.3s/package.
+  Eight packages newly passing, six of them former timeouts and one
+  (`ktonon/elm-word`) that had never completed a port in the project's
+  history. Latest run banked at `test/ecosystem/core-run.jsonl`.
+  Landed today: D50 (double process), D51 (add validation scope + 67 refusals
+  returned to the queue), D52 (evidence + signatures), D53-D55 (red test, stdout
+  ceiling, fresh-clone tier 1), D56 (stranded hub bank + cache-health),
+  **D57 (ported-cache entries now carry their own constructor facts — the
+  cross-cache silent-empty bug, caught regressing elm-review twice)**,
+  D58/D58b/D58c (String.toArray quadratic, token accumulator, char classes),
+  D59 (double lowering), D60 (fallthrough inline budget),
+  **D61 (Reserved.collectExpr double-walk: 2^depth on nested cases — the one
+  that unblocked elm-word)**, D62 (symlink archives), D63 (host-side dependency
+  constructor resolution + elm/parser Token).
+  NEXT, in fan-in order — all now named, none mysterious:
+  12 packages across two clusters are ONE class (tuple-keyed Set/Dict through
+  an unannotated helper; needs a KeyEncode R3 law with value-flow one level
+  into local helpers, plus decode on the read side — the D24b residual);
+  5 GREN_VERIFY_FAILED; 4 legitimately EXEMPT kernel; 2 AMBIGUOUS NAME (two
+  imports collapsing to one alias — printer should use each ref's resolved home
+  module); the rest are 1-2 packages each.
 - 2026-07-26 THE CORE SET IS THE TARGET. `test/ecosystem/packages-core.json`
   is the 232 packages (11.3% of the registry) that carry **88.8% of every
   import in the ecosystem**; 1,561 of the 2,055 snapshot packages are imported

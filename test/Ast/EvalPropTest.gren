@@ -25,6 +25,7 @@ import Ast.Types exposing
     , Declaration(..)
     , Expr(..)
     , File
+    , LetDecl(..)
     , Pattern(..)
     )
 import Dict
@@ -224,6 +225,14 @@ regressionFixtureChecks =
                 (fifoRemoveFixtureFile fifoScrutineeConsNonEmpty)
                 (VArray [ VInt 3, VInt 3, VArray [ VInt 4 ], VArray [ VInt 5 ] ])
       , details = "pre == post == [3,3,[4],[5]] on Fifo [3,4] [5]"
+      }
+    , { name = "regression: D81 non-sole let-destructure agrees (let (A x) = A 7 in x)"
+      , passed = fixtureAgreesInt d81NonSoleLetFixture 7
+      , details = "pre == post == 7; MatchCompile totalizes the refutable let"
+      }
+    , { name = "regression: D81 sole-ctor let-destructure agrees (let (Only x) = Only 7 in x)"
+      , passed = fixtureAgreesInt d81SoleLetFixture 7
+      , details = "pre == post == 7; sole ctor stays irrefutable let"
       }
     ]
 
@@ -485,6 +494,76 @@ fifoScrutineeConsNonEmpty =
         , ExprList [ ExprInt 3, ExprInt 4 ]
         , ExprList [ ExprInt 5 ]
         ]
+
+
+{-| D81: `type M = A Int | B` with `let (A x) = A 7 in x`.
+Non-sole constructor let-destructure must totalize; eval still answers 7.
+-}
+d81NonSoleLetFixture : File
+d81NonSoleLetFixture =
+    buildFileWith
+        [ DeclCustomType
+            { name = "M"
+            , documentation = Nothing
+            , generics = []
+            , constructors =
+                [ { name = "A"
+                  , arguments = [ Ast.Types.TypeGeneric "n" ]
+                  }
+                , { name = "B", arguments = [] }
+                ]
+            }
+        ]
+        (ExprLet
+            { declarations =
+                [ LetDestructure
+                    { pattern =
+                        PatNamed
+                            { ref = { moduleName = Nothing, name = "A" }
+                            , arguments = [ PatVar "x" ]
+                            }
+                    , expression =
+                        ExprApplication
+                            [ bare "A", ExprInt 7 ]
+                    }
+                ]
+            , expression = bare "x"
+            }
+        )
+
+
+{-| D81 companion: sole-ctor `let (Only x) = Only 7 in x` stays irrefutable.
+-}
+d81SoleLetFixture : File
+d81SoleLetFixture =
+    buildFileWith
+        [ DeclCustomType
+            { name = "Only"
+            , documentation = Nothing
+            , generics = []
+            , constructors =
+                [ { name = "Only"
+                  , arguments = [ Ast.Types.TypeGeneric "n" ]
+                  }
+                ]
+            }
+        ]
+        (ExprLet
+            { declarations =
+                [ LetDestructure
+                    { pattern =
+                        PatNamed
+                            { ref = { moduleName = Nothing, name = "Only" }
+                            , arguments = [ PatVar "x" ]
+                            }
+                    , expression =
+                        ExprApplication
+                            [ bare "Only", ExprInt 7 ]
+                    }
+                ]
+            , expression = bare "x"
+            }
+        )
 
 
 batchPat : Pattern -> Pattern

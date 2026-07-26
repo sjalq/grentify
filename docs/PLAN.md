@@ -163,6 +163,41 @@ by being written through this law; nothing edits the ledger by hand.
 
 ## 6. Known defects register (2026-07-17 audit; independently verified)
 
+- **D81 non-sole constructor let-destructure emitted unguarded (bare-name
+  sole-ctor collision)** (found by dillonkearns/elm-markdown UNSAFE PATTERN
+  @ Markdown.Parser, and dtwrks/elm-book via the same dep; FIXED 2026-07-26).
+  Two layers, one class:
+
+  1. **Emission path.** MatchCompile peels list/ctor patterns via
+     `matchNamed` / `matchNamedPattern`. When `isSoleCtor` is true it emits
+     an irrefutable `LetDestructure` (correct for sole ctors; D45b forbids a
+     dead `_` on those — Gren Map.! panic). When false it emits
+     `when Ctor -> body; _ -> fail` through the existing totalizer.
+  2. **False sole.** `isSoleCtor` used a bare-name fallback
+     (`Dict.member ref.name sole`) on *qualified* refs so D45b alias forms
+     like `Node.Node` still looked sole. That is unsound when two modules
+     declare the same constructor name and only one is sole:
+     `Markdown.Table.Table` (sole) registers bare `"Table"`, so
+     `RawBlock.Table` (one of fourteen) was treated as sole and lowered to
+     `let (RawBlock.Table t) = …` — Gren rejects as UNSAFE PATTERN.
+
+  **Lowering chosen:** keep the existing case totalizer (real arm + fail
+  continuation whose body is `Debug.todo` — Elm's let-assert is a runtime
+  crash on mismatch; D4 forbids *wrongly* wiring fail over a covering arm,
+  not faithful assertion failure). Connect original let-destructures of
+  refutable patterns to the same `matchPattern` path (they previously
+  stayed unguarded even when `isSoleCtor` was correct). Fix `isSoleCtor`
+  for qualified refs to check only the qualified key; expand sole keys
+  under each file's import aliases so D45b `Node.Node` stays sole without
+  the bare fallback.
+
+  Properties: eval agreement on non-sole and sole let-destructures
+  (EvalPropTest); structural MatchCompile tests for non-sole→when,
+  sole→let, bare-name collision, and alias expand. RECEIPTS:
+  `dillonkearns/elm-markdown@7.0.1` and `dtwrks/elm-book` port+gren-verify;
+  canary 14/14; list-extra and elm-review compile-verify non-regression.
+  Tier 0: 333 checks.
+
 - **D80 `Transform.Pipeline` re-read the WHOLE MODULE SOURCE once per
   qualified-name step, to confirm a fact it already held** (found by V8 tick
   profile 2026-07-26; FIXED same day). `qualifiedNameFrom` /

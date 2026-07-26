@@ -20,6 +20,22 @@ renamed to match. Outer `as` names on cons arms bind the whole list.
 Sole-constructor custom types (package-wide) are irrefutable when their nested
 patterns are irrefutable — peel matches must not emit a dead `_` arm (Gren
 REDUNDANT PATTERN).
+
+Let-destructure law (D81): a `let (Ctor …) = e in body` is irrefutable only when
+`Ctor` is the type's sole constructor and nested patterns are irrefutable. Any
+other constructor pattern is refutable; Elm treats it as a runtime assertion,
+Gren rejects it as non-exhaustive. Lower refutable let-destructures through the
+same `matchPattern` totalizer used for case/lambda peels — real arm plus fail
+continuation — never as an unguarded `LetDestructure`.
+
+Sole-ctor lookup law (D81): a qualified ref `Mod.Ctor` is sole only when the
+qualified key is in the sole set. Bare-name fallback on a qualified ref is
+unsound when two modules declare the same constructor name and only one is
+sole (elm-markdown: `Markdown.Table.Table` sole vs `RawBlock.Table` one of
+fourteen — the bare `"Table"` key made MatchCompile emit an unguarded let).
+Import aliases are covered by expanding sole keys under each file's import
+qualifiers (replaces the old bare-name fallback for D45b alias forms like
+`Node.Node`).
 -}
 
 import Array exposing ( Array )
@@ -28,6 +44,7 @@ import Ast.Types exposing
     , Declaration(..)
     , Expr(..)
     , File
+    , Import
     , LetDecl(..)
     , NamedRef
     , Pattern(..)
@@ -525,6 +542,7 @@ compile packageSole file =
     let
         sole =
             mergeSoleCtors packageSole (collectSoleCtorsFromFile file)
+                |> expandSoleForImports file.imports
     in
     { file | declarations =
         Array.indexedMap (\i d -> compileDeclaration sole (i * 100003) d)
@@ -535,6 +553,51 @@ compile packageSole file =
 mergeSoleCtors : SoleCtors -> SoleCtors -> SoleCtors
 mergeSoleCtors package local =
     Dict.foldl Dict.set package local
+
+
+{-| Mirror each fully-qualified sole key under every import qualifier that
+names its home module. After NameSub, pattern refs use the local qualifier
+(`Node.Node`, `RawBlock.Table`), not the package home (`Elm.Syntax.Node.Node`,
+`Markdown.RawBlock.Table`). Expanding here keeps D45b alias forms sole without
+the unsound bare-name fallback.
+-}
+expandSoleForImports : Array Import -> SoleCtors -> SoleCtors
+expandSoleForImports imports sole =
+    Array.foldl
+        (\import_ acc ->
+            let
+                home =
+                    import_.moduleName
+
+                local =
+                    when import_.alias is
+                        Just aliasName ->
+                            aliasName
+
+                        Nothing ->
+                            home
+
+                prefix =
+                    home ++ "."
+            in
+            if local == home then
+                acc
+
+            else
+                Dict.foldl
+                    (\key _ inner ->
+                        if String.startsWith prefix key then
+                            let
+                                ctor =
+                                    String.slice (String.count prefix)
+                                        (String.count key) key
+                            in
+                            Dict.set (local ++ "." ++ ctor) {} inner
+
+                        else
+                            inner)
+                    acc
+                    sole) sole imports
 
 
 hasUnportedListPatterns : File -> Bool
@@ -780,11 +843,12 @@ compileExpr sole currentFunction seed expr =
                 -- Elm/Gren lets are mutually recursive in one block. Nesting
                 -- each decl as `let a = … in let b = …` breaks forward refs
                 -- (e.g. `ts = map t …` before `t i = …`). Only peel-fold when
-                -- a destructure needs list/cons totalization.
-                needsListPeel =
-                    Array.any letDeclNeedsListPeel declarations
+                -- a destructure cannot stay as an irrefutable `let` bind
+                -- (list/cons peels, or a non-sole constructor pattern — D81).
+                needsPeel =
+                    Array.any (letDeclNeedsPeel sole) declarations
             in
-            if needsListPeel then
+            if needsPeel then
                 Array.indexedFoldr
                     (\i declaration currentBody ->
                         compileLetDeclInto sole (seed + 20 + i * 31) declaration
@@ -807,19 +871,21 @@ compileExpr sole currentFunction seed expr =
                 expr
 
 
-{-| True when a let bind must become a list/cons peel (cannot stay in one block).
+{-| True when a let bind cannot remain an unguarded `LetDestructure` in one
+mutual block: list/cons peels, or any other refutable pattern (D81).
 -}
-letDeclNeedsListPeel : LetDecl -> Bool
-letDeclNeedsListPeel declaration =
+letDeclNeedsPeel : SoleCtors -> LetDecl -> Bool
+letDeclNeedsPeel sole declaration =
     when declaration is
         LetDestructure { pattern = pattern } ->
-            patternHasUnportedList pattern
+            not (isIrrefutable sole pattern)
 
         LetFunction _ ->
             False
 
 
 {-| Compile one let declaration in place (same mutual block).
+Only reached when every destructure in the block is irrefutable.
 -}
 compileLetDeclKeep : SoleCtors -> Int -> Maybe String -> LetDecl -> LetDecl
 compileLetDeclKeep sole seed currentFunction declaration =
@@ -847,8 +913,9 @@ compileLetDeclKeep sole seed currentFunction declaration =
 
 
 {-| Turn one let declaration into a binding wrapped around `body`.
-List patterns in the bind become peels (same law as case/lambda).
-Only used when the block needs list peels (see `letDeclNeedsListPeel`).
+Refutable binds (list peels, non-sole constructors, …) go through
+`matchPattern` — same totalizer as case/lambda. Irrefutable binds stay as
+`LetDestructure`. Only used when the block needs peels (see `letDeclNeedsPeel`).
 -}
 compileLetDeclInto : SoleCtors -> Int -> LetDecl -> Maybe String -> Expr -> Expr
 compileLetDeclInto sole seed declaration currentFunction body =
@@ -877,11 +944,7 @@ compileLetDeclInto sole seed declaration currentFunction body =
                 value =
                     compileExpr sole currentFunction (seed + 1) expression
             in
-            if patternHasUnportedList pattern then
-                matchPattern sole (seed + 2) emptyScope pattern value body
-                    (todo "elm-to-gren: let list pattern mismatch")
-
-            else
+            if isIrrefutable sole pattern then
                 ExprLet
                     { declarations =
                         [ LetDestructure
@@ -889,6 +952,15 @@ compileLetDeclInto sole seed declaration currentFunction body =
                         ]
                     , expression = body
                     }
+
+            else
+                -- Same fail law as list let-peels and non-exhaustive case rows:
+                -- Elm's let-assert crashes on mismatch; `Debug.todo` is that
+                -- crash. Reachable only when the programmer's assertion is
+                -- false (D4 is about *wrongly* wiring fail over a covering
+                -- arm — not about faithful assertion failure).
+                matchPattern sole (seed + 2) emptyScope pattern value body
+                    (todo "elm-to-gren: let pattern mismatch")
 
 
 -- PATTERN MATRIX -------------------------------------------------------------
@@ -2445,8 +2517,10 @@ isSoleCtor : SoleCtors -> NamedRef -> Bool
 isSoleCtor sole ref =
     when ref.moduleName is
         Just moduleName ->
+            -- Qualified only. Bare-name fallback was D45b's alias hack and
+            -- falsely marks multi-ctor names sole when another type's sole
+            -- ctor shares the bare name (D81 / elm-markdown RawBlock.Table).
             Dict.member (moduleName ++ "." ++ ref.name) sole
-                || Dict.member ref.name sole
 
         Nothing ->
             Dict.member ref.name sole

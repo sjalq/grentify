@@ -10,6 +10,11 @@ duplicated continuation re-matches the scrutinee nested inside the previous
 arm's binding scope, so the same names bind at two nested levels. Gren rejects
 that as shadowing. `MatchCompile.freshenBinders` alpha-renames the nested copy's
 binders; the fix must never move the recursion out of tail position.
+
+D81: a let-destructure of a non-sole constructor must not survive as an
+unguarded `LetDestructure` (Gren non-exhaustive). It lowers through the same
+`matchPattern` totalizer as case peels. Sole-ctor let-destructures stay as
+`let` (D45b: dead `_` on a sole ctor panics Gren).
 -}
 
 import Array exposing ( Array )
@@ -25,6 +30,7 @@ import Ast.Types exposing
     , Pattern(..)
     )
 import Dict exposing ( Dict )
+import Maybe exposing ( Maybe(..) )
 
 
 type alias Check =
@@ -43,6 +49,11 @@ tests =
     , ctorHeadNestedConsNoShadowing
     , nonFirstListColumnNoShadowing
     , nonFirstListColumnKeepsBothArms
+    , nonSoleLetDestructureBecomesWhen
+    , nonSoleLetDestructureHasFailArm
+    , soleCtorLetDestructureStaysLet
+    , bareNameSoleCollisionNotIrrefutable
+    , aliasSoleCtorStillIrrefutable
     ]
 
 
@@ -704,5 +715,572 @@ childExprs expr =
         ExprUpdate { fields = fields } ->
             Array.map (\f -> f.value) fields
 
+        ExprCase { expression = scrutinee, cases = arms } ->
+            Array.pushFirst scrutinee (Array.map (\a -> a.body) arms)
+
+        ExprLambda { expression = body } ->
+            [ body ]
+
+        ExprLet { declarations = declarations, expression = body } ->
+            Array.pushLast body
+                (Array.map
+                    (\decl ->
+                        when decl is
+                            LetFunction fn ->
+                                fn.expression
+
+                            LetDestructure d ->
+                                d.expression
+                    )
+                    declarations
+                )
+
         _ ->
             []
+
+
+
+-- D81: non-sole let-destructure ----------------------------------------------
+
+
+{-| `type M = A Int | B` and `let (A x) = A 7 in x` — the elm-markdown shape
+(`let (RawBlock.Table t) = …`) reduced to two constructors.
+-}
+d81NonSoleFixture : File
+d81NonSoleFixture =
+    let
+        justA =
+            ExprApplication
+                [ ExprVar { moduleName = Nothing, name = "A" }
+                , ExprInt 7
+                ]
+
+        body =
+            ExprLet
+                { declarations =
+                    [ LetDestructure
+                        { pattern =
+                            PatNamed
+                                { ref = { moduleName = Nothing, name = "A" }
+                                , arguments = [ PatVar "x" ]
+                                }
+                        , expression = justA
+                        }
+                    ]
+                , expression = bare "x"
+                }
+    in
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule
+        , moduleName = "Fixture"
+        , exposing_ = ExposeAll
+        }
+    , comments = []
+    , imports = []
+    , declarations =
+        [ DeclCustomType
+            { name = "M"
+            , documentation = Nothing
+            , generics = []
+            , constructors =
+                [ { name = "A"
+                  , arguments = [ Ast.Types.TypeGeneric "n" ]
+                  }
+                , { name = "B", arguments = [] }
+                ]
+            }
+        , DeclFunction
+            { name = "target"
+            , documentation = Nothing
+            , signature = Nothing
+            , arguments = []
+            , expression = body
+            }
+        ]
+    }
+
+
+{-| `type Only = Only Int` and `let (Only x) = Only 7 in x` — sole ctor must
+remain an irrefutable let-destructure (D45b).
+-}
+d81SoleFixture : File
+d81SoleFixture =
+    let
+        only =
+            ExprApplication
+                [ ExprVar { moduleName = Nothing, name = "Only" }
+                , ExprInt 7
+                ]
+
+        body =
+            ExprLet
+                { declarations =
+                    [ LetDestructure
+                        { pattern =
+                            PatNamed
+                                { ref = { moduleName = Nothing, name = "Only" }
+                                , arguments = [ PatVar "x" ]
+                                }
+                        , expression = only
+                        }
+                    ]
+                , expression = bare "x"
+                }
+    in
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule
+        , moduleName = "Fixture"
+        , exposing_ = ExposeAll
+        }
+    , comments = []
+    , imports = []
+    , declarations =
+        [ DeclCustomType
+            { name = "Only"
+            , documentation = Nothing
+            , generics = []
+            , constructors =
+                [ { name = "Only"
+                  , arguments = [ Ast.Types.TypeGeneric "n" ]
+                  }
+                ]
+            }
+        , DeclFunction
+            { name = "target"
+            , documentation = Nothing
+            , signature = Nothing
+            , arguments = []
+            , expression = body
+            }
+        ]
+    }
+
+
+compileTargetBody : File -> Maybe Expr
+compileTargetBody file =
+    let
+        lowered =
+            CtorLaw.apply (CtorLaw.collectFromFile file) file
+
+        compiled =
+            MatchCompile.compile
+                (MatchCompile.collectSoleCtorsFromFile lowered)
+                lowered
+    in
+    compiled.declarations
+        |> Array.mapAndKeepJust
+            (\declaration ->
+                when declaration is
+                    DeclFunction fn ->
+                        if fn.name == "target" then
+                            Just fn.expression
+
+                        else
+                            Nothing
+
+                    _ ->
+                        Nothing
+            )
+        |> Array.first
+
+
+{-| Any remaining `LetDestructure` whose pattern is a named constructor with a
+known multi-ctor type is the defect: Gren will reject it as non-exhaustive.
+-}
+hasUnguardedNamedDestructure : Expr -> Bool
+hasUnguardedNamedDestructure expr =
+    when expr is
+        ExprLet { declarations = declarations, expression = body } ->
+            Array.any
+                (\decl ->
+                    when decl is
+                        LetDestructure { pattern = pattern } ->
+                            isNamedCtorPattern pattern
+
+                        LetFunction fn ->
+                            hasUnguardedNamedDestructure fn.expression
+                )
+                declarations
+                || hasUnguardedNamedDestructure body
+
+        _ ->
+            Array.any hasUnguardedNamedDestructure (childExprs expr)
+
+
+isNamedCtorPattern : Pattern -> Bool
+isNamedCtorPattern pattern =
+    when pattern is
+        PatNamed _ ->
+            True
+
+        PatAs { pattern = inner } ->
+            isNamedCtorPattern inner
+
+        _ ->
+            False
+
+
+{-| Compiled form contains a two-arm case whose second arm is `_` (the fail
+continuation matchNamed emits for a refutable ctor).
+-}
+hasCtorCaseWithFailArm : Expr -> Bool
+hasCtorCaseWithFailArm expr =
+    when expr is
+        ExprCase { cases = arms } ->
+            (Array.length arms == 2)
+                && (when Array.get 0 arms is
+                        Just first ->
+                            isNamedCtorPattern first.pattern
+
+                        Nothing ->
+                            False
+                   )
+                && (when Array.get 1 arms is
+                        Just second ->
+                            second.pattern == PatAll
+
+                        Nothing ->
+                            False
+                   )
+                || Array.any (\arm -> hasCtorCaseWithFailArm arm.body) arms
+
+        _ ->
+            Array.any hasCtorCaseWithFailArm (childExprs expr)
+
+
+{-| Sole-ctor let-destructure of `Only` still present (not expanded to a when).
+-}
+hasOnlyLetDestructure : Expr -> Bool
+hasOnlyLetDestructure expr =
+    when expr is
+        ExprLet { declarations = declarations, expression = body } ->
+            Array.any
+                (\decl ->
+                    when decl is
+                        LetDestructure { pattern = pattern } ->
+                            when pattern is
+                                PatNamed { ref = ref } ->
+                                    ref.name == "Only"
+
+                                _ ->
+                                    False
+
+                        LetFunction fn ->
+                            hasOnlyLetDestructure fn.expression
+                )
+                declarations
+                || hasOnlyLetDestructure body
+
+        _ ->
+            Array.any hasOnlyLetDestructure (childExprs expr)
+
+
+nonSoleLetDestructureBecomesWhen : Check
+nonSoleLetDestructureBecomesWhen =
+    when compileTargetBody d81NonSoleFixture is
+        Just body ->
+            if hasUnguardedNamedDestructure body then
+                fail "D81 non-sole let-destructure becomes when"
+                    "unguarded LetDestructure of named ctor still present"
+
+            else
+                ok "D81 non-sole let-destructure becomes when"
+
+        Nothing ->
+            fail "D81 non-sole let-destructure becomes when" "no target body"
+
+
+nonSoleLetDestructureHasFailArm : Check
+nonSoleLetDestructureHasFailArm =
+    when compileTargetBody d81NonSoleFixture is
+        Just body ->
+            if hasCtorCaseWithFailArm body then
+                ok "D81 non-sole let-destructure has fail arm"
+
+            else
+                fail "D81 non-sole let-destructure has fail arm"
+                    "expected when Ctor -> …; _ -> fail"
+
+        Nothing ->
+            fail "D81 non-sole let-destructure has fail arm" "no target body"
+
+
+soleCtorLetDestructureStaysLet : Check
+soleCtorLetDestructureStaysLet =
+    when compileTargetBody d81SoleFixture is
+        Just body ->
+            if hasOnlyLetDestructure body && not (hasCtorCaseWithFailArm body) then
+                ok "D81 sole-ctor let-destructure stays let"
+
+            else
+                fail "D81 sole-ctor let-destructure stays let"
+                    "sole ctor was totalized or lost its let-destructure"
+
+        Nothing ->
+            fail "D81 sole-ctor let-destructure stays let" "no target body"
+
+
+{-| elm-markdown shape: sole `Markdown.Table.Table` registers bare `"Table"`,
+while multi-ctor `RawBlock.Table` shares the bare name. A list peel whose head
+is `RawBlock.Table` must NOT become an unguarded let-destructure (the path that
+calls `matchNamed` / `isSoleCtor`).
+-}
+d81CollisionFixture : File
+d81CollisionFixture =
+    let
+        body =
+            ExprCase
+                { expression = bare "blocks"
+                , cases =
+                    [ { pattern =
+                            PatCons
+                                { head =
+                                    PatNamed
+                                        { ref =
+                                            { moduleName = Just "RawBlock"
+                                            , name = "Table"
+                                            }
+                                        , arguments = [ PatVar "table" ]
+                                        }
+                                , tail = PatVar "rest"
+                                }
+                      , body = bare "table"
+                      }
+                    , { pattern = PatAll
+                      , body = ExprInt 0
+                      }
+                    ]
+                }
+    in
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule
+        , moduleName = "Fixture"
+        , exposing_ = ExposeAll
+        }
+    , comments = []
+    , imports =
+        [ { moduleName = "Markdown.RawBlock"
+          , alias = Just "RawBlock"
+          , exposing_ = Nothing
+          }
+        , { moduleName = "Markdown.Table"
+          , alias = Nothing
+          , exposing_ = Nothing
+          }
+        ]
+    , declarations =
+        -- Multi-ctor type is NOT declared here: package sole supplies the
+        -- colliding bare `"Table"` from Markdown.Table.Table only. Local
+        -- RawBlock is absent so collectSoleCtors cannot mark anything sole
+        -- under RawBlock — the bug is pure bare-name fallback on the package
+        -- sole key.
+        [ DeclFunction
+            { name = "target"
+            , documentation = Nothing
+            , signature = Nothing
+            , arguments = []
+            , expression = body
+            }
+        ]
+    }
+
+
+{-| D45b alias form: sole ctor living at `Home.Node`, imported `as Node`.
+A list peel of `Node.Node` must stay irrefutable (let-destructure, no dead `_`).
+-}
+d81AliasSoleFixture : File
+d81AliasSoleFixture =
+    let
+        body =
+            ExprCase
+                { expression = bare "hs"
+                , cases =
+                    [ { pattern =
+                            PatCons
+                                { head =
+                                    PatNamed
+                                        { ref =
+                                            { moduleName = Just "Node"
+                                            , name = "Node"
+                                            }
+                                        , arguments = [ PatVar "inner" ]
+                                        }
+                                , tail = PatVar "rest"
+                                }
+                      , body = bare "inner"
+                      }
+                    , { pattern = PatAll
+                      , body = ExprInt 0
+                      }
+                    ]
+                }
+    in
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule
+        , moduleName = "Fixture"
+        , exposing_ = ExposeAll
+        }
+    , comments = []
+    , imports =
+        [ { moduleName = "Home"
+          , alias = Just "Node"
+          , exposing_ = Nothing
+          }
+        ]
+    , declarations =
+        [ DeclFunction
+            { name = "target"
+            , documentation = Nothing
+            , signature = Nothing
+            , arguments = []
+            , expression = body
+            }
+        ]
+    }
+
+
+{-| Compile with package sole pre-loaded under the HOME module key — the shape
+dep maps carry after D45b — so alias expansion is the only path that can make
+`Node.Node` look sole.
+-}
+compileWithPackageSole : Dict String {} -> File -> Maybe Expr
+compileWithPackageSole packageSole file =
+    let
+        lowered =
+            CtorLaw.apply (CtorLaw.collectFromFile file) file
+
+        compiled =
+            MatchCompile.compile packageSole lowered
+    in
+    compiled.declarations
+        |> Array.mapAndKeepJust
+            (\declaration ->
+                when declaration is
+                    DeclFunction fn ->
+                        if fn.name == "target" then
+                            Just fn.expression
+
+                        else
+                            Nothing
+
+                    _ ->
+                        Nothing
+            )
+        |> Array.first
+
+
+{-| True when a LetDestructure binds a constructor whose bare name is `name`.
+-}
+hasLetDestructureNamed : String -> Expr -> Bool
+hasLetDestructureNamed name expr =
+    when expr is
+        ExprLet { declarations = declarations, expression = body } ->
+            Array.any
+                (\decl ->
+                    when decl is
+                        LetDestructure { pattern = pattern } ->
+                            when pattern is
+                                PatNamed { ref = ref } ->
+                                    ref.name == name
+
+                                _ ->
+                                    False
+
+                        LetFunction fn ->
+                            hasLetDestructureNamed name fn.expression
+                )
+                declarations
+                || hasLetDestructureNamed name body
+
+        _ ->
+            Array.any (hasLetDestructureNamed name) (childExprs expr)
+
+
+{-| True when a two-arm case matches constructor `name` then `_`.
+-}
+hasNamedCaseWithFailArm : String -> Expr -> Bool
+hasNamedCaseWithFailArm name expr =
+    when expr is
+        ExprCase { cases = arms } ->
+            let
+                here =
+                    (Array.length arms == 2)
+                        && (when Array.get 0 arms is
+                                Just first ->
+                                    when first.pattern is
+                                        PatNamed { ref = ref } ->
+                                            ref.name == name
+
+                                        _ ->
+                                            False
+
+                                Nothing ->
+                                    False
+                           )
+                        && (when Array.get 1 arms is
+                                Just second ->
+                                    second.pattern == PatAll
+
+                                Nothing ->
+                                    False
+                           )
+            in
+            here
+                || Array.any (\arm -> hasNamedCaseWithFailArm name arm.body)
+                    arms
+
+        _ ->
+            Array.any (hasNamedCaseWithFailArm name) (childExprs expr)
+
+
+bareNameSoleCollisionNotIrrefutable : Check
+bareNameSoleCollisionNotIrrefutable =
+    -- Package sole has Markdown.Table.Table (and bare Table).
+    -- A peel of RawBlock.Table must totalize, not let-destructure.
+    let
+        packageSole =
+            Dict.empty
+                |> Dict.set "Markdown.Table.Table" {}
+                |> Dict.set "Table" {}
+    in
+    when compileWithPackageSole packageSole d81CollisionFixture is
+        Just body ->
+            if hasLetDestructureNamed "Table" body then
+                fail "D81 bare-name sole collision not irrefutable"
+                    "RawBlock.Table became unguarded LetDestructure"
+
+            else if hasNamedCaseWithFailArm "Table" body then
+                ok "D81 bare-name sole collision not irrefutable"
+
+            else
+                fail "D81 bare-name sole collision not irrefutable"
+                    "expected when RawBlock.Table -> …; _ -> fail"
+
+        Nothing ->
+            fail "D81 bare-name sole collision not irrefutable" "no target body"
+
+
+aliasSoleCtorStillIrrefutable : Check
+aliasSoleCtorStillIrrefutable =
+    -- Sole registered under home only; pattern uses import alias Node.
+    let
+        packageSole =
+            Dict.singleton "Home.Node" {}
+    in
+    when compileWithPackageSole packageSole d81AliasSoleFixture is
+        Just body ->
+            if hasLetDestructureNamed "Node" body
+                && not (hasNamedCaseWithFailArm "Node" body)
+            then
+                ok "D81 alias sole ctor still irrefutable"
+
+            else
+                fail "D81 alias sole ctor still irrefutable"
+                    "Node.Node should stay irrefutable let after alias expand"
+
+        Nothing ->
+            fail "D81 alias sole ctor still irrefutable" "no target body"

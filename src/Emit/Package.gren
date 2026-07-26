@@ -172,15 +172,27 @@ moduleRelativePath original =
                 |> String.dropLast (String.count ".gren")
                 |> String.replace "/" "."
     in
+    -- Two unrelated refusals used to share one message that named neither: a
+    -- path that leaves the package, and a path whose module name Gren cannot
+    -- parse. Keep them apart so the reader learns which one fired.
     if String.startsWith "/" normalized
         || String.startsWith "\\" original
         || String.contains "\u{0000}" original
         || Array.any (\segment -> segment == "" || segment == "." || segment == "..") segments
-        || ModuleName.fromString inferredModuleName == Nothing
     then
         Err <|
             PortError.create "OUTPUT_FAILED"
-                ("A generated module path escapes its package or is invalid: " ++ original)
+                ("A generated module path escapes its package: " ++ original)
+
+    else if ModuleName.fromString inferredModuleName == Nothing then
+        Err <|
+            PortError.create "OUTPUT_FAILED"
+                ("Generated module path "
+                    ++ original
+                    ++ " implies the module name "
+                    ++ inferredModuleName
+                    ++ ", which Gren cannot parse: every segment must start with an uppercase letter and continue with letters and digits only."
+                )
 
     else
         Ok grenPath

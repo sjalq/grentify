@@ -14,6 +14,7 @@ import Ast.IndexClampTest
 import Ast.CtorHomeTest
 import Ast.KeyEncodeTest
 import Ast.MatchCompileTest
+import Ast.ModuleNameTest
 import Ast.TupleCompareTest
 import Elm.ManifestTest
 import Elm.PackageNameTest
@@ -109,6 +110,7 @@ allChecks =
     , Ast.TupleCompareTest.tests
     , Ast.IndexClampTest.tests
     , Ast.MatchCompileTest.tests
+    , Ast.ModuleNameTest.tests
     , Ast.KeyEncodeTest.tests
     , Ast.CtorHomeTest.tests
     , MappingSemanticsTest.tests

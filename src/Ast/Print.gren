@@ -10,6 +10,7 @@ Phase 1 structural lowers:
 -}
 
 import Array exposing ( Array )
+import Ast.ModuleName as ModuleName
 import Ast.Types as Types exposing
     ( CaseArm
     , Declaration(..)
@@ -167,7 +168,7 @@ printModuleDef moduleDef =
         exposingPart =
             printExposing moduleDef.exposing_
     in
-    keyword ++ " " ++ moduleDef.moduleName ++ " exposing " ++ exposingPart
+    keyword ++ " " ++ ModuleName.toGren moduleDef.moduleName ++ " exposing " ++ exposingPart
 
 
 printImport : Import -> String
@@ -176,7 +177,7 @@ printImport import_ =
         aliasPart =
             when import_.alias is
                 Just aliasName ->
-                    " as " ++ aliasName
+                    " as " ++ ModuleName.toGren aliasName
 
                 Nothing ->
                     ""
@@ -199,7 +200,7 @@ printImport import_ =
                                 (Array.map printExposedItem items)
                             ++ ")"
     in
-    "import " ++ import_.moduleName ++ aliasPart ++ exposingPart
+    "import " ++ ModuleName.toGren import_.moduleName ++ aliasPart ++ exposingPart
 
 
 printExposing : Exposing -> String
@@ -971,7 +972,7 @@ printNamedRef locals isType ref =
                     ref.name
 
                 long =
-                    moduleName ++ "." ++ ref.name
+                    ModuleName.toGren moduleName ++ "." ++ ref.name
 
                 sameModuleType =
                     moduleName == ref.name

@@ -31,6 +31,7 @@ import Array.Builder as Builder
 import Ast.Decode as AstDecode
 import Ast.CtorHome as AstCtorHome
 import Ast.KeyEncode as AstKeyEncode
+import Ast.ModuleName as ModuleName
 import Ast.TupleCompare as AstTupleCompare
 import Char
 import Dict exposing (Dict)
@@ -378,6 +379,7 @@ importEdit registry fact =
 transform : Registry -> DepMaps -> Protocol.Extraction -> Array SourceFile -> Result Error TransformResult
 transform registry depMaps extraction sources =
     validateExtraction extraction sources
+        |> Result.andThen (\_ -> ensureImportsExistInGren registry extraction)
         |> Result.andThen
             (\_ ->
                 let
@@ -731,7 +733,11 @@ finalizeTransformedModule registry input extraction outputPath source reviewEdit
                                         |> addGuaranteeDiagnostics input extraction finalSource
                             in
                             { generated =
-                                { moduleName = extraction.moduleName
+                                -- Underscored Elm module names have no Gren
+                                -- spelling; `Ast.ModuleName` owns the rename and
+                                -- `Ast.Print` emits the same one in the header,
+                                -- so name and path stay in agreement.
+                                { moduleName = ModuleName.toGren extraction.moduleName
                                 , relativePath = outputPath
                                 , source = ensureTrailingNewline finalSource
                                 }
@@ -772,6 +778,66 @@ explicitImportsForDefaultedModules registry extraction =
             )
         |> Array.foldl (\name names -> Dict.set name {} names) Dict.empty
         |> Dict.keys
+
+
+{-| Refuse an import of a module the mapping states the Gren analogue does not
+have, naming the importing module, the mapped package pair, and the reason.
+
+A mapped package is never transpiled, so an unmappable import of one is
+invisible to every other check: it survives the rewrite untouched and only
+surfaces as a Gren `MODULE NOT FOUND` at verify, after the whole graph has been
+ported, naming no package and no cause.
+
+Fallthrough (D12): a package that declares a module of that name itself has
+real evidence and wins over the mapping's claim.
+-}
+ensureImportsExistInGren : Registry -> Protocol.Extraction -> Result Error {}
+ensureImportsExistInGren registry extraction =
+    let
+        owned =
+            extraction.modules
+                |> Array.foldl
+                    (\module_ names -> Dict.set module_.moduleName {} names)
+                    Dict.empty
+
+        checkImport module_ imported validation =
+            validation
+                |> Result.andThen
+                    (\_ ->
+                        if Dict.member imported owned then
+                            Ok {}
+
+                        else
+                            when Registry.absentModuleFor imported registry is
+                                Nothing ->
+                                    Ok {}
+
+                                Just absent ->
+                                    Err <|
+                                        PortError.create "MAPPING_MODULE_ABSENT"
+                                            (module_.moduleName
+                                                ++ " imports "
+                                                ++ imported
+                                                ++ ", which "
+                                                ++ absent.elmPackage
+                                                ++ " provides and its Gren mapping target "
+                                                ++ absent.grenPackage
+                                                ++ " does not: "
+                                                ++ absent.reason
+                                                ++ "."
+                                            )
+                    )
+    in
+    extraction.modules
+        |> Array.foldl
+            (\module_ validation ->
+                validation
+                    |> Result.andThen
+                        (\_ ->
+                            Array.foldl (checkImport module_) (Ok {}) module_.importedModules
+                        )
+            )
+            (Ok {})
 
 
 validateExtraction : Protocol.Extraction -> Array SourceFile -> Result Error {}
@@ -1097,7 +1163,7 @@ toGrenSourcePath original =
                 ("Elm source path '" ++ original ++ "' does not end in .elm.")
 
     else
-        Ok (String.dropLast (String.count ".elm") normalized ++ ".gren")
+        Ok (ModuleName.toGrenPath (String.dropLast (String.count ".elm") normalized) ++ ".gren")
 
 
 normalizePath : String -> { path : String }

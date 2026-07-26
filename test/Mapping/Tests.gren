@@ -44,6 +44,8 @@ checks =
     , check "mapping lexical validation matches the JSON contract" lexicalValidationWorks
     , check "record alias shapes decode and key by target module" recordAliasShapesDecode
     , check "malformed record alias shapes are rejected" malformedRecordAliasShapesRejected
+    , check "absent modules decode and name the mapped package pair" absentModulesDecode
+    , check "absent modules without a stated reason are rejected" unexplainedAbsentModuleRejected
     ]
 
 
@@ -116,6 +118,65 @@ malformedRecordAliasShapesRejected =
             (MappingDecode.decodeString "aliases-field.json"
                 (String.replace "\"row\"" "\"Row\"" recordAliasDocumentJson)
             )
+
+
+{-| D74: a mapped package's module set is a fact about the mapping. `Shrink`
+exists in elm-explorations/test and not in gren-lang/test, so the import has no
+Gren spelling and the refusal must say who says so and why.
+-}
+absentModulesDecode : Bool
+absentModulesDecode =
+    when MappingDecode.decodeString "absent.json" absentModuleDocumentJson is
+        Ok document ->
+            let
+                registry =
+                    Registry.fromDocument document
+            in
+            (Registry.absentModuleFor "Shrink" registry
+                == Just
+                    { elmPackage = "elm-explorations/test"
+                    , grenPackage = "gren-lang/test"
+                    , reason = "gren-lang/test 5.0.0 exposes no Shrink"
+                    }
+            )
+                && (Registry.absentModuleFor "Test" registry == Nothing)
+
+        Err _ ->
+            False
+
+
+unexplainedAbsentModuleRejected : Bool
+unexplainedAbsentModuleRejected =
+    isErr
+        (MappingDecode.decodeString "absent-empty.json"
+            (String.replace "\"gren-lang/test 5.0.0 exposes no Shrink\"" "\"\""
+                absentModuleDocumentJson
+            )
+        )
+        && isErr
+            (MappingDecode.decodeString "absent-name.json"
+                (String.replace "\"Shrink\":" "\"shrink\":" absentModuleDocumentJson)
+            )
+
+
+absentModuleDocumentJson : String
+absentModuleDocumentJson =
+    """
+{
+  "schemaVersion": 1,
+  "packages": [{
+    "kind": "gren-analogue",
+    "elmPackage": "elm-explorations/test",
+    "grenPackage": "gren-lang/test",
+    "grenVersion": "5.0.0",
+    "platform": "common",
+    "modules": [
+      { "source": "Test", "target": "Test", "values": {}, "types": {} }
+    ],
+    "absentModules": { "Shrink": "gren-lang/test 5.0.0 exposes no Shrink" }
+  }]
+}
+"""
 
 
 recordAliasDocumentJson : String

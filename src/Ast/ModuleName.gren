@@ -1,0 +1,74 @@
+module Ast.ModuleName exposing ( toGren, toGrenPath )
+
+{-| The Gren module-naming law: `String -> String`, identity on every name Gren
+already accepts.
+
+**Law.** Every dot-separated segment of a Gren module name starts with an
+uppercase letter and continues with ALPHANUMERICS ONLY
+(`Compiler.ModuleName.fromString`). Elm additionally allows `_` inside a
+segment, so legal Elm module names such as `Derberos.Date.L10n.EN_US` and
+`String.Graphemes.Data.Extended_Pictographic` have no spelling in Gren: the
+compiler refuses them in `exposed-modules` ("Not a valid module name") and
+refuses the source file too ("would suggest a module name like …, but this is
+not a valid module name"). A faithful port therefore RENAMES such a module; it
+must never emit the Elm spelling.
+
+**Rename.** Each `_` is dropped and the character that followed it is
+uppercased: `Extended_Pictographic` → `ExtendedPictographic`, `EN_US` → `ENUS`,
+`Internals_` → `Internals`. Word boundaries survive, so the result still reads
+as the original name. Two distinct Elm modules can collapse onto one Gren name
+(`A_B` and `AB`); `Emit.Package.uniqueModules` is the guard and names both.
+
+**Totality.** The rename is a pure function of the name alone, so an importer
+computes exactly the name the owning package emitted without any shared table —
+including across package boundaries. No mapping target in `mappings/` contains
+`_`, so applying it after `Ast.NameSub` can never disturb a catalog rename.
+-}
+
+import String
+
+
+{-| Gren-legal spelling of a module name or qualifier. -}
+toGren : String -> String
+toGren name =
+    if not (String.contains "_" name) then
+        name
+
+    else
+        (String.foldl squashUnderscore { text = "", capitalizeNext = False } name).text
+
+
+{-| Same law applied per path segment, so a module's file path and its declared
+name stay in agreement (`Emit.Package` checks that they do).
+-}
+toGrenPath : String -> String
+toGrenPath path =
+    if not (String.contains "_" path) then
+        path
+
+    else
+        path
+            |> String.split "/"
+            |> Array.map toGren
+            |> String.join "/"
+
+
+squashUnderscore :
+    Char
+    -> { text : String, capitalizeNext : Bool }
+    -> { text : String, capitalizeNext : Bool }
+squashUnderscore char state =
+    if char == '_' then
+        { state | capitalizeNext = True }
+
+    else
+        { text =
+            state.text
+                ++ (if state.capitalizeNext then
+                        String.toUpper (String.fromChar char)
+
+                    else
+                        String.fromChar char
+                   )
+        , capitalizeNext = False
+        }

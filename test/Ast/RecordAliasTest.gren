@@ -237,6 +237,7 @@ parserRegistry =
                             Dict.singleton "DeadEnd" [ "row", "col", "problem" ]
                       }
                     ]
+                , absentModules = Dict.empty
                 }
             ]
         }

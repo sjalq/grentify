@@ -163,6 +163,110 @@ by being written through this law; nothing edits the ledger by hand.
 
 ## 6. Known defects register (2026-07-17 audit; independently verified)
 
+- **D72 Elm module names may contain `_` and Gren module names may not, and
+  the port never renamed them** (found 2026-07-26 from two different-looking
+  refusals — `GREN_MANIFEST_INVALID` on AdrianRibao/elm-derberos-date and
+  `OUTPUT_FAILED … escapes its package` on BrianHicks/elm-string-graphemes;
+  FIXED same day). Both refusals came from the same predicate,
+  `Compiler.ModuleName.fromString` (gren-lang/compiler-common), reached from
+  `Emit.Manifest.validExposedModules` and `Emit.Package.moduleRelativePath`
+  respectively. Its law: every dot-separated segment is `[A-Z][A-Za-z0-9]*` —
+  alphanumerics only. The offending names were `Derberos.Date.L10n.EN_US` /
+  `ES_ES` and `String.Graphemes.Data.Extended_Pictographic` (also
+  `Proto.Google.Protobuf.Internals_` in the protobuf family). All are legal
+  Elm.
+  **OURS OR THEIRS: ours, and not the D62/D64 kind.** Measured, not reasoned:
+  a package whose `exposed-modules` lists `Data.Extended_Pictographic` is
+  refused by gren 0.6.6 with *"Not a valid module name"*, and a source file at
+  that path is refused with *"would suggest a module name like
+  Data.Extended_Pictographic, but this is not a valid module name"*
+  (`scripts/temp/underscore-probe`, since deleted). So the validator was
+  RIGHT — this is not a policy we chose and could relax, it is the target
+  compiler's grammar — but the transform was WRONG: a faithful port must
+  RENAME such a module, never emit a name Gren cannot parse. Unlike D62/D64
+  there is nothing to refuse here; the packages are fine, the port was
+  incomplete.
+  **Fix — one law, one home.** `src/Ast/ModuleName.gren`: `toGren` drops each
+  `_` and uppercases the character that followed it (`Extended_Pictographic` →
+  `ExtendedPictographic`, `EN_US` → `ENUS`, `Internals_` → `Internals`), and
+  is the identity on every already-legal name. It is a pure function of the
+  name alone, so an importing package computes exactly the name the owner
+  emitted with no shared table — the rename works across package boundaries by
+  construction. No mapping target in `mappings/` contains `_`, so applying it
+  after `Ast.NameSub` cannot disturb a catalog rename. Applied at the three
+  places a module name becomes output text (`Ast.Print`: header, import +
+  alias, reference qualifier), at the emitted module name and path
+  (`Transform.Pipeline`), and at `exposed-modules` (`Port.Manifest`,
+  `Port.Plan`).
+  **Diagnostics (D64 rule).** `"One or more exposed Gren module names are
+  invalid."` named no module; it now lists them and states the grammar.
+  `"A generated module path escapes its package or is invalid"` conflated a
+  path that leaves the package with a path whose module name will not parse;
+  those are now two messages, and the second prints the inferred module name.
+  Tier 0: 287 checks (10 new — identity, rename table, path rename, the
+  property that every Elm-legal name renames to one `Compiler.ModuleName`
+  accepts, idempotence, all four printer positions, and the manifest refusal
+  naming the offender). Canary 14/14.
+  **RECEIPT: AdrianRibao/elm-derberos-date and BrianHicks/elm-string-graphemes
+  both port and verify clean.** The rename is visible in the output
+  (`src/Derberos/Date/L10n/ENUS.gren`, `exposed-modules: …L10n.ENUS`;
+  `src/String/Graphemes/Data/ExtendedPictographic.gren`, imported under the
+  same new name by `String/Graphemes/Parser.gren` and `Data.gren`).
+  Two families that were blocked behind the same names came with them, unasked:
+  `anmolitor/protobuf-web-tokens` (through eriktim/elm-protocol-buffers'
+  `Internals_`) and `jxxcarlson/elm-tar` + `andre-dietrich/elm-svgbob` (through
+  elm-string-graphemes) now port and verify clean.
+
+- **D73 — merged into D72.** The elm-string-graphemes refusal was investigated
+  as a separate defect (a suspected over-strict path rule) and proved to be
+  D72's second symptom: the same `Compiler.ModuleName.fromString` predicate,
+  the same underscore, one fix. Recorded rather than deleted so the next
+  reader does not re-open it: two unlike error codes over one predicate is the
+  reason the diagnostic split above was worth doing.
+
+- **D74 a mapped package's module SET is a fact about the mapping, held
+  nowhere, so an unmappable import failed late and anonymously** (found
+  2026-07-26 — avh4/elm-program-test and drathier/elm-graph, both
+  `MODULE NOT FOUND`; DIAGNOSED and made legible same day, NOT portable).
+  elm-program-test imports `Test.Html.Event`, `Test.Html.Query` and
+  `Test.Html.Selector`; elm-graph's `Graph.Random` imports `Shrink`. Both come
+  from elm-explorations/test, which `mappings/builtin.json` maps
+  (`gren-analogue`) to gren-lang/test. Read off the package itself,
+  gren-lang/test 5.0.0 exposes exactly `Test`, `Test.Runner`,
+  `Test.Runner.Failure`, `Test.Runner.String`, `Test.Distribution`, `Expect`,
+  `Fuzz` — no `Shrink` (shrinking is internal, `Simplify`; elm-test 2.x
+  dropped the user-facing shrinker API) and no `Test.Html.*` (Gren has no
+  HTML-testing analogue). So neither is a missing mapping ENTRY and neither is
+  a dependency whose port dropped a module: **the modules have no Gren
+  spelling at all.** Same gap CLASS as D71/D63 — a mapped package is never
+  transpiled, so facts about it live only in the mapping file. Nothing else in
+  the port could discover the absence, so the import survived untouched and
+  the failure surfaced only at verify, from the Gren compiler, naming no
+  package and no cause.
+  **OURS OR THEIRS: neither — an ecosystem gap, and it must not be filed as
+  our bug or as upstream breakage (D51 cuts both ways).** No change to
+  elm-to-gren can port these two packages today; they become portable when
+  gren-lang/test grows a counterpart, or never.
+  **Fix — make the gap legible where it is written.** `absentModules`
+  (optional, per mapped package) in `mappings/builtin.json`, mapping a source
+  module to the REASON its Gren analogue has none, read off the Gren package
+  and printed verbatim. Decoded into `PackageDetails`, exposed as
+  `Registry.absentModuleFor`, checked against every module's
+  `importedModules` in `Transform.Pipeline.ensureImportsExistInGren`. The
+  refusal is now `MAPPING_MODULE_ABSENT` at transform time, naming the
+  importing module, both packages and the reason. D12 fallthrough is explicit:
+  a package that declares a module of that name itself wins over the mapping's
+  claim. A decoded entry must state a reason (an absence with no evidence is
+  rejected).
+  **Known limit, stated rather than hidden:** the ownership guard sees only
+  the package being transformed, so a *transpiled dependency* that provided a
+  module of the same name would be refused wrongly. No such package is in the
+  four names listed; if one appears, the failure is a loud named refusal
+  pointing straight at the mapping line, not silent wrong output.
+  Tier 0: 287 checks (3 new — decode + registry lookup, reason-required and
+  module-name validation, and the refusal + fallthrough end to end).
+  Canary 14/14.
+
 - **D71 platform record-alias shapes were never learned, so a mapped
   alias applied positionally survived into the output as a constructor**
   (found by the 2026-07-26 NAMING ERROR sweep — MaybeJustJames/yaml and
@@ -1413,6 +1517,7 @@ no compiler in the loop.
 | src/Ast/CtorLaw.gren | Gren ctor laws (single payload, multi-arg helpers, sole-ctor irrefutability) |
 | src/Ast/MatchCompile.gren | List/cons pattern totalization → Array peels (split in W6.1) |
 | src/Ast/Reserved.gren | Gren reserved-word renames, @docs token repair |
+| src/Ast/ModuleName.gren | Gren module-naming law (`_` has no Gren spelling); identity on legal names |
 | src/Ast/Print.gren | Ast.Types → Gren source text (split in W6.1) |
 | src/Ast/Eval.gren | (W1.1) Declaration-aware reference evaluator; crash ≠ value |
 | src/Verify/Package.gren | Meaning of "verified": gren make/docs per package |

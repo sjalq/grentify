@@ -51,6 +51,7 @@ htmlAttributesRegistry =
             , target = "Html.Attributes"
             , values = Dict.singleton "classList" "ElmToGren.Compat.Html.Attributes.classList"
             , types = Dict.empty
+            , recordAliases = Dict.empty
             }
     }
 

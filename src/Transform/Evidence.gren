@@ -4,6 +4,7 @@ module Transform.Evidence exposing
     , collect
     , collectConstructorArities
     , collectSoleConstructors
+    , mappedRecordAliases
     )
 
 {-| Package-wide semantic evidence collection.
@@ -25,6 +26,7 @@ import Ast.RecordAlias as RecordAlias
 import Ast.TupleCompare as TupleCompare
 import Ast.Types exposing (Declaration(..), File)
 import Dict exposing (Dict)
+import Mapping.Registry as Registry
 import Mapping.Types exposing (Registry)
 import Review.Protocol as Protocol
 import Transform.AstPipeline as AstPipeline
@@ -65,7 +67,7 @@ collect registry dependencies modules =
         namedFiles =
             Array.map (NameSub.apply registry) resolvedFiles
 
-        recordAliases =
+        ownRecordAliases =
             mergeFileMaps RecordAlias.collectFromFile namedFiles
 
         ownConstructorArities =
@@ -74,6 +76,16 @@ collect registry dependencies modules =
         constructorArities =
             Dict.foldl Dict.set dependencies.constructorArities
                 ownConstructorArities
+
+        -- Mapped platform packages (elm/parser → gren-lang/parser …) are never
+        -- transpiled, so no port ever reads their alias declarations. The
+        -- registry states those shapes; they seed the alias table *underneath*
+        -- everything this package actually declares, so real evidence always
+        -- wins over the hint (D12).
+        recordAliases =
+            Dict.foldl Dict.set
+                (mappedRecordAliases registry namedFiles constructorArities)
+                ownRecordAliases
 
         ownSoleConstructors =
             mergeFileMaps MatchCompile.collectSoleCtorsFromFile namedFiles
@@ -203,6 +215,47 @@ collectTupleReturns files =
         )
         Dict.empty
         files
+
+
+{-| Registry-declared record-alias shapes for *mapped* modules, minus every
+name the package graph can speak about itself.
+
+Two things disqualify a hint, both of them positive evidence that the name in
+question is not the mapped alias:
+
+  - the package declares a module of that (post-substitution) name, so
+    `Some.Module.Name` refers to its own declaration, not the platform one;
+  - the name is a known multi-argument constructor here or in a transpiled
+    dependency, so it is an ADT constructor and `CtorLaw` owns it.
+
+Everything else falls through to real resolution exactly as before.
+-}
+mappedRecordAliases : Registry -> Array File -> Dict String Int -> Dict String (Array String)
+mappedRecordAliases registry namedFiles constructorArities =
+    let
+        ownModules =
+            Array.foldl
+                (\file found ->
+                    Dict.set file.moduleDefinition.moduleName {} found
+                )
+                Dict.empty
+                namedFiles
+    in
+    Registry.recordAliasShapes registry
+        |> Dict.keepIf
+            (\key _ ->
+                not (Dict.member key constructorArities)
+                    && not (Dict.member (moduleOfKey key) ownModules)
+            )
+
+
+{-| `"Parser.Advanced.DeadEnd"` → `"Parser.Advanced"`.
+-}
+moduleOfKey : String -> String
+moduleOfKey key =
+    String.split "." key
+        |> Array.dropLast 1
+        |> String.join "."
 
 
 mergeFileMaps : (File -> Dict String a) -> Array File -> Dict String a

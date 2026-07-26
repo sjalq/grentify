@@ -108,11 +108,23 @@ guaranteeRank guarantee =
             3
 
 
+{-| `recordAliases` records the field names of record type *aliases* the target
+Gren module declares. Elm lets a record alias be applied positionally
+(`DeadEnd row col problem`); Gren removed that form entirely, so every such use
+must be lowered to a record literal with the alias' real field names.
+
+For transpiled packages the host learns those shapes by reading the alias
+declaration (`Ast.RecordAlias.collectFromFile`). Platform packages are *mapped*,
+never transpiled, so no port ever sees their declarations — the shape has to be
+stated here, read off the Gren package source. Keys are alias names in the
+`target` module; values are field names in declaration order.
+-}
 type alias ModuleMapping =
     { source : String
     , target : String
     , values : Dict String String
     , types : Dict String String
+    , recordAliases : Dict String (Array String)
     }
 
 

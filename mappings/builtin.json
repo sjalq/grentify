@@ -499,8 +499,24 @@
       "grenVersion": "6.2.1",
       "platform": "common",
       "modules": [
-        { "source": "Parser", "target": "Parser", "values": {}, "types": {} },
-        { "source": "Parser.Advanced", "target": "Parser.Advanced", "values": {}, "types": {} }
+        {
+          "source": "Parser",
+          "target": "Parser",
+          "values": {},
+          "types": {},
+          "recordAliases": {
+            "DeadEnd": ["row", "col", "problem"]
+          }
+        },
+        {
+          "source": "Parser.Advanced",
+          "target": "Parser.Advanced",
+          "values": {},
+          "types": {},
+          "recordAliases": {
+            "DeadEnd": ["row", "col", "problem", "contextStack"]
+          }
+        }
       ]
     },
     {

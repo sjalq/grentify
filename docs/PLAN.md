@@ -163,6 +163,65 @@ by being written through this law; nothing edits the ledger by hand.
 
 ## 6. Known defects register (2026-07-17 audit; independently verified)
 
+- **D71 platform record-alias shapes were never learned, so a mapped
+  alias applied positionally survived into the output as a constructor**
+  (found by the 2026-07-26 NAMING ERROR sweep — MaybeJustJames/yaml and
+  pithub/elm-parser-bug-workaround through the shared pithub/elm-parser-extra;
+  FIXED same day). `Parser.Extra.problemToDeadEnd` writes
+  `Parser.DeadEnd p.row p.col p.problem`: legal Elm, because `DeadEnd` is a
+  RECORD TYPE ALIAS and Elm gives aliases a positional constructor. Gren
+  removed that form entirely, which is what `src/Ast/RecordAlias.gren` exists
+  to lower — but its alias table is built only from alias DECLARATIONS the
+  port can read (`collectFromFile` over the package's own files). elm/parser
+  is a PLATFORM package: it is *mapped* to gren-lang/parser, never
+  transpiled, so no port ever reads its declarations and the shape is
+  unlearnable by construction. Output was
+  `Parser.DeadEnd ({ first = …, second = …, third = … })` — the generic
+  multi-arg ctor payload — and Gren answered `I cannot find a
+  Parser.DeadEnd variant`. This is the record-alias sibling of D63's
+  `Token` gap, and the same gap CLASS: a mapped package's type shapes are
+  facts about the mapping, held nowhere.
+  **Target shape, read from the Gren source** (not guessed):
+  `gren-lang/parser 6.2.1` `Parser.DeadEnd = { row : Int, col : Int,
+  problem : Problem }` and `Parser.Advanced.DeadEnd context problem =
+  { row : Int, col : Int, problem : problem, contextStack : Array { row :
+  Int, col : Int, context : context } }` — field names and order identical
+  to Elm's, so the lowering is a pure representation change with no
+  semantic delta (no P2 property row is owed).
+  **Fix — the shape is DATA about a mapping, so it lives in the mapping
+  file, not in a name table in code.** `mappings/builtin.json` gains an
+  optional per-module `recordAliases` (`{ "DeadEnd": ["row","col",
+  "problem"] }`), decoded into `ModuleMapping` and exposed as
+  `Registry.recordAliasShapes` keyed `"TargetModule.Alias"` (target,
+  because alias lowering runs on the Gren-named AST). `Transform.Evidence`
+  seeds those shapes UNDERNEATH the package's own evidence, so the whole
+  existing RecordAlias machinery — patterns, partial application,
+  η-expansion, over-application — handles them with no new code path.
+  D12 fallthrough is kept explicitly by `mappedRecordAliases`: a shape is
+  dropped when the package OWNS a module of that name, or when the
+  qualified name is a known multi-arg constructor here or in a transpiled
+  dependency. Nothing is rewritten on a name match alone.
+  Tier 0: 277 checks (4 new — decode + target keying, malformed-entry
+  rejection, end-to-end lowering, and both hint-yields-to-evidence
+  directions). Canary 14/14.
+  **RECEIPT: pithub/elm-parser-extra now ports and verifies clean.**
+  Both remaining packages advance to the NEXT gap in the D63 chain, which
+  is D63's own `Token`, host-side: `Ast/Print.ctorFieldLabels` still emits
+  `{ first, second }` for `Parser.Token` because its platform-ctor table
+  (`usesPlatformCtorFields` / `platformCtorFieldLabels`, Print.gren
+  ~1080-1133) knows Http/VirtualDom/Html.Events only. D63 patched the
+  EXTRACTOR's unresolved-pattern table; the host printer never got the
+  same fact. Adding `Parser`/`Parser.Advanced` + `Token → [str,
+  expecting]` there was measured (experiment, reverted): it clears
+  `Parser/Advanced/Workaround.gren` completely and then stops at
+  `Advanced.Token` in `Parser/Workaround.gren`, because `Print` matches
+  module names literally and the file imports `Parser.Advanced as
+  Advanced`. So that defect is not a table entry — it needs the ctor
+  payload names resolved where import aliases are known (as
+  `Ast.Ref.addImportAliasKeys` does for RecordAlias/CtorLaw), or moved out
+  of the printer into a pass that carries the registry. Left OPEN and
+  unclaimed rather than half-fixed.
+
 - **D67 unparseable output from four packages — TWO causes, not one**
   (found by the 2026-07-26 parse-failure sweep; both FIXED same day). The
   four specimens presented as one family (LET PROBLEM / UNFINISHED

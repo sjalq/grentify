@@ -1929,6 +1929,7 @@ overlayPortedModules sources registry =
                                         , target = "Elm." ++ name
                                         , values = Dict.empty
                                         , types = Dict.empty
+                                        , recordAliases = Dict.empty
                                         }
                                         inner
 

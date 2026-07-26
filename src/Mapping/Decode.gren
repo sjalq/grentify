@@ -202,12 +202,13 @@ decodeModuleObject object =
                                                         target
                                                         |> Result.andThen
                                                             (\_ ->
-                                                                Result.map2
-                                                                    (\values types ->
+                                                                Result.map3
+                                                                    (\values types recordAliases ->
                                                                         { source = source
                                                                         , target = target
                                                                         , values = values
                                                                         , types = types
+                                                                        , recordAliases = recordAliases
                                                                         }
                                                                     )
                                                                     (optionalStringMap "values" object
@@ -217,6 +218,10 @@ decodeModuleObject object =
                                                                     (optionalStringMap "types" object
                                                                         |> Result.andThen
                                                                             (validateStringMap ("Type mappings for '" ++ source ++ "'"))
+                                                                    )
+                                                                    (optionalFieldNameMap "recordAliases" object
+                                                                        |> Result.andThen
+                                                                            (validateFieldNameMap ("Record alias shapes for '" ++ source ++ "'"))
                                                                     )
                                                             )
                                                 )
@@ -316,6 +321,55 @@ optionalStringMap fieldName object =
                             ++ "': expected an object of string values. "
                             ++ Decode.errorToString problem
                     )
+
+
+{-| `{ "DeadEnd": ["row", "col", "problem"] }` — a record alias in the target
+module and the field names it is built from, in declaration order.
+-}
+optionalFieldNameMap : String -> Dict String Value -> Result String (Dict String (Array String))
+optionalFieldNameMap fieldName object =
+    when Dict.get fieldName object is
+        Nothing ->
+            Ok Dict.empty
+
+        Just rawValue ->
+            Decode.decodeValue (Decode.dict (Decode.array Decode.string)) rawValue
+                |> Result.mapError
+                    (\problem ->
+                        "Invalid field '"
+                            ++ fieldName
+                            ++ "': expected an object of string arrays. "
+                            ++ Decode.errorToString problem
+                    )
+
+
+validateFieldNameMap : String -> Dict String (Array String) -> Result String (Dict String (Array String))
+validateFieldNameMap description aliases =
+    Dict.foldl
+        (\aliasName fields validation ->
+            validation
+                |> Result.andThen
+                    (\_ ->
+                        if not (isValidTypeName aliasName) then
+                            Err (description ++ " contains invalid alias name '" ++ aliasName ++ "'.")
+
+                        else if Array.isEmpty fields then
+                            -- An empty-record alias (`type alias Empty = {}`) is
+                            -- legal in Elm but has no positional form worth
+                            -- stating here; an empty array is far more likely to
+                            -- be a truncated entry than a deliberate one.
+                            Err (description ++ " lists no fields for alias '" ++ aliasName ++ "'.")
+
+                        else if not (Array.all isValidFieldName fields) then
+                            Err (description ++ " contains an invalid field name for alias '" ++ aliasName ++ "'.")
+
+                        else
+                            Ok {}
+                    )
+        )
+        (Ok {})
+        aliases
+        |> Result.map (\_ -> aliases)
 
 
 validateStringMap : String -> Dict String String -> Result String (Dict String String)
@@ -427,6 +481,16 @@ isValidTargetSymbol =
     Regex.contains targetSymbolPattern
 
 
+isValidTypeName : String -> Bool
+isValidTypeName =
+    Regex.contains typeNamePattern
+
+
+isValidFieldName : String -> Bool
+isValidFieldName =
+    Regex.contains fieldNamePattern
+
+
 isValidSemanticVersion : String -> Bool
 isValidSemanticVersion =
     Regex.contains semanticVersionPattern
@@ -460,6 +524,16 @@ sourceSymbolPattern =
 targetSymbolPattern : Regex
 targetSymbolPattern =
     regex "^([a-zA-Z][A-Za-z0-9_]*(\\.[a-zA-Z][A-Za-z0-9_]*)*|\\([^\\s()]+\\))$"
+
+
+typeNamePattern : Regex
+typeNamePattern =
+    regex "^[A-Z][A-Za-z0-9_]*$"
+
+
+fieldNamePattern : Regex
+fieldNamePattern =
+    regex "^[a-z][A-Za-z0-9_]*$"
 
 
 semanticVersionPattern : Regex

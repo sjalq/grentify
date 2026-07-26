@@ -42,6 +42,8 @@ checks =
     , check "browser catalog targets discover nested Compat adapters" browserAdaptersCatalogWiring
     , check "every mapping target has an explicit semantic guarantee" mappingGuaranteesAreExplicit
     , check "mapping lexical validation matches the JSON contract" lexicalValidationWorks
+    , check "record alias shapes decode and key by target module" recordAliasShapesDecode
+    , check "malformed record alias shapes are rejected" malformedRecordAliasShapesRejected
     ]
 
 
@@ -76,6 +78,70 @@ mappingGuaranteesAreExplicit =
         == RepresentationChange
         && Adapter.guaranteeForTarget "ElmToGren.Compat.Unknown.value"
         == Unsupported
+
+
+{-| Platform record-alias shapes (D71): `Parser.DeadEnd` is a record alias in
+gren-lang/parser, so its positional Elm form must lower to a record literal.
+The registry keys shapes by the **target** module, since alias lowering runs on
+the Gren-named AST.
+-}
+recordAliasShapesDecode : Bool
+recordAliasShapesDecode =
+    when MappingDecode.decodeString "aliases.json" recordAliasDocumentJson is
+        Ok document ->
+            Registry.recordAliasShapes (Registry.fromDocument document)
+                == (Dict.empty
+                        |> Dict.set "Gren.Parser.DeadEnd" [ "row", "col", "problem" ]
+                   )
+
+        Err _ ->
+            False
+
+
+malformedRecordAliasShapesRejected : Bool
+malformedRecordAliasShapesRejected =
+    isErr
+        (MappingDecode.decodeString "aliases-bad.json"
+            (String.replace "[\"row\", \"col\", \"problem\"]" "\"row col problem\""
+                recordAliasDocumentJson
+            )
+        )
+        && isErr
+            (MappingDecode.decodeString "aliases-empty.json"
+                (String.replace "[\"row\", \"col\", \"problem\"]" "[]"
+                    recordAliasDocumentJson
+                )
+            )
+        && isErr
+            (MappingDecode.decodeString "aliases-field.json"
+                (String.replace "\"row\"" "\"Row\"" recordAliasDocumentJson)
+            )
+
+
+recordAliasDocumentJson : String
+recordAliasDocumentJson =
+    """
+{
+  "schemaVersion": 1,
+  "packages": [{
+    "kind": "gren-analogue",
+    "elmPackage": "elm/parser",
+    "grenPackage": "gren-lang/parser",
+    "grenVersion": "6.2.1",
+    "platform": "common",
+    "modules": [
+      {
+        "source": "Parser",
+        "target": "Gren.Parser",
+        "values": {},
+        "types": {},
+        "recordAliases": { "DeadEnd": ["row", "col", "problem"] }
+      },
+      { "source": "Parser.Advanced", "target": "Parser.Advanced", "values": {}, "types": {} }
+    ]
+  }]
+}
+"""
 
 
 isErr result =
@@ -306,6 +372,7 @@ adapterDiscoveryWorks =
                         |> Dict.set "tail" "ElmToGren.Compat.List.tail"
                         |> Dict.set "fromList" "ElmToGren.Compat.Array.fromList"
               , types = Dict.empty
+              , recordAliases = Dict.empty
               }
             ]
             == [ ArrayAdapter, ListAdapter ]
@@ -373,6 +440,7 @@ charAdapterCatalogWiring =
                     |> Dict.set "toLocaleLower" "ElmToGren.Compat.Char.toLocaleLower"
                     |> Dict.set "toLocaleUpper" "ElmToGren.Compat.Char.toLocaleUpper"
             , types = Dict.singleton "Char" "Char"
+            , recordAliases = Dict.empty
             }
 
         bareCharMapping =
@@ -380,6 +448,7 @@ charAdapterCatalogWiring =
             , target = "Char"
             , values = Dict.empty
             , types = Dict.singleton "Char" "Char"
+            , recordAliases = Dict.empty
             }
 
         registered =
@@ -530,6 +599,7 @@ browserAdaptersCatalogWiring =
                     |> Dict.set "document" "ElmToGren.Compat.Browser.document"
                     |> Dict.set "application" "ElmToGren.Compat.Browser.application"
             , types = Dict.empty
+            , recordAliases = Dict.empty
             }
 
         htmlEventsMapping =
@@ -540,6 +610,7 @@ browserAdaptersCatalogWiring =
                     |> Dict.set "preventDefaultOn" "ElmToGren.Compat.Html.Events.preventDefaultOn"
                     |> Dict.set "stopPropagationOn" "ElmToGren.Compat.Html.Events.stopPropagationOn"
             , types = Dict.empty
+            , recordAliases = Dict.empty
             }
 
         svgEventsMapping =
@@ -549,6 +620,7 @@ browserAdaptersCatalogWiring =
                 Dict.empty
                     |> Dict.set "preventDefaultOn" "ElmToGren.Compat.Html.Events.preventDefaultOn"
             , types = Dict.empty
+            , recordAliases = Dict.empty
             }
 
         bytesMapping =
@@ -559,6 +631,7 @@ browserAdaptersCatalogWiring =
                     |> Dict.set "string" "ElmToGren.Compat.Bytes.Encode.string"
                     |> Dict.set "getStringWidth" "ElmToGren.Compat.Bytes.Encode.getStringWidth"
             , types = Dict.empty
+            , recordAliases = Dict.empty
             }
 
         attributesMapping =
@@ -566,6 +639,7 @@ browserAdaptersCatalogWiring =
             , target = "Html.Attributes"
             , values = Dict.singleton "classList" "ElmToGren.Compat.Html.Attributes.classList"
             , types = Dict.empty
+            , recordAliases = Dict.empty
             }
     in
     Adapter.moduleName BrowserAdapter

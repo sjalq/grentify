@@ -16,7 +16,10 @@ import Ast.Types exposing
     , TypeAnn(..)
     )
 import Dict exposing (Dict)
+import Mapping.Registry as Registry
+import Mapping.Types exposing (PackageMapping(..), Platform(..), Registry)
 import String
+import Transform.Evidence as Evidence
 
 
 type alias TestResult =
@@ -30,6 +33,8 @@ tests : Array TestResult
 tests =
     [ localCtorNotShadowedByImportedRecordAlias
     , importedAliasStillRewritesWhenQualified
+    , mappedPlatformAliasBecomesRecord
+    , mappedAliasHintYieldsToPackageEvidence
     ]
 
 
@@ -136,6 +141,144 @@ importedAliasStillRewritesWhenQualified =
         "qualified Monocle.Iso.Iso still becomes a record"
         ok
         ("printed:\n" ++ printed)
+
+
+{-| D71: `Parser.DeadEnd row col problem` is legal Elm (record alias applied
+positionally) but gren-lang/parser only has the record. elm/parser is mapped,
+never transpiled, so the shape comes from the registry.
+-}
+mappedPlatformAliasBecomesRecord : TestResult
+mappedPlatformAliasBecomesRecord =
+    let
+        printed =
+            Print.print
+                (RecordAlias.apply
+                    (Evidence.mappedRecordAliases parserRegistry
+                        [ deadEndUser ]
+                        Dict.empty
+                    )
+                    deadEndUser
+                )
+
+        ok =
+            String.contains "row = p.row" printed
+                && String.contains "col = p.col" printed
+                && String.contains "problem = p.problem" printed
+                && not (String.contains "Parser.DeadEnd p.row" printed)
+    in
+    outcome
+        "mapped Parser.DeadEnd is lowered to its Gren record"
+        ok
+        ("printed:\n" ++ printed)
+
+
+{-| The registry shape is a HINT (D12). A package that speaks for the same
+qualified name itself — by owning the module, or by declaring it as a real
+multi-argument constructor — keeps its own meaning.
+-}
+mappedAliasHintYieldsToPackageEvidence : TestResult
+mappedAliasHintYieldsToPackageEvidence =
+    let
+        ownsTheModule =
+            Evidence.mappedRecordAliases parserRegistry
+                [ { deadEndUser
+                    | moduleDefinition =
+                        { kind = NormalModule
+                        , moduleName = "Parser"
+                        , exposing_ = ExposeAll
+                        }
+                  }
+                ]
+                Dict.empty
+
+        ownsTheConstructor =
+            Evidence.mappedRecordAliases parserRegistry
+                [ deadEndUser ]
+                (Dict.singleton "Parser.DeadEnd" 3)
+
+        stillSeeded =
+            Evidence.mappedRecordAliases parserRegistry [ deadEndUser ] Dict.empty
+
+        ok =
+            Dict.get "Parser.DeadEnd" ownsTheModule
+                == Nothing
+                && Dict.get "Parser.DeadEnd" ownsTheConstructor
+                == Nothing
+                && Dict.get "Parser.DeadEnd" stillSeeded
+                == Just [ "row", "col", "problem" ]
+    in
+    outcome
+        "registry alias shapes lose to the package's own evidence"
+        ok
+        ("owns module: "
+            ++ Debug.toString (Dict.get "Parser.DeadEnd" ownsTheModule)
+            ++ ", owns ctor: "
+            ++ Debug.toString (Dict.get "Parser.DeadEnd" ownsTheConstructor)
+        )
+
+
+parserRegistry : Registry
+parserRegistry =
+    Registry.fromDocument
+        { schemaVersion = 1
+        , versionedPackages = []
+        , packages =
+            [ GrenAnalogue
+                { elmPackage = "elm/parser"
+                , grenPackage = "gren-lang/parser"
+                , grenVersion = "6.2.1"
+                , platform = Common
+                , modules =
+                    [ { source = "Parser"
+                      , target = "Parser"
+                      , values = Dict.empty
+                      , types = Dict.empty
+                      , recordAliases =
+                            Dict.singleton "DeadEnd" [ "row", "col", "problem" ]
+                      }
+                    ]
+                }
+            ]
+        }
+
+
+{-| `problemToDeadEnd p = Parser.DeadEnd p.row p.col p.problem`
+-}
+deadEndUser : File
+deadEndUser =
+    { schemaVersion = 1
+    , moduleDefinition =
+        { kind = NormalModule
+        , moduleName = "Parser.Extra"
+        , exposing_ = ExposeAll
+        }
+    , comments = []
+    , imports =
+        [ { moduleName = "Parser", alias = Nothing, exposing_ = Nothing } ]
+    , declarations =
+        [ DeclFunction
+            { name = "problemToDeadEnd"
+            , documentation = Nothing
+            , signature = Nothing
+            , arguments = [ PatVar "p" ]
+            , expression =
+                ExprApplication
+                    [ ExprVar { moduleName = Just "Parser", name = "DeadEnd" }
+                    , access "row"
+                    , access "col"
+                    , access "problem"
+                    ]
+            }
+        ]
+    }
+
+
+access : String -> Expr
+access field =
+    ExprAccess
+        { record = ExprVar { moduleName = Nothing, name = "p" }
+        , field = field
+        }
 
 
 outcome : String -> Bool -> String -> TestResult

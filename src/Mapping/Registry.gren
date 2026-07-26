@@ -9,6 +9,7 @@ module Mapping.Registry exposing
     , overlayDocument
     , overlayDocuments
     , packagesInOrder
+    , recordAliasShapes
     )
 
 import Array
@@ -129,6 +130,27 @@ applyVersionedMappings dependencyRanges registry =
             )
             registry
         |> rebuildModules
+
+
+{-| Every mapped record-alias shape, keyed `"TargetModule.Alias"` → field names.
+
+Keys use the **target** module because record-alias lowering runs after name
+substitution, on the Gren-named AST. These are hints only: a package that
+declares the same qualified name itself has real evidence and must win (D12).
+-}
+recordAliasShapes : Registry -> Dict String (Array String)
+recordAliasShapes registry =
+    Dict.foldl
+        (\_ module_ collected ->
+            Dict.foldl
+                (\aliasName fields inner ->
+                    Dict.set (module_.target ++ "." ++ aliasName) fields inner
+                )
+                collected
+                module_.recordAliases
+        )
+        Dict.empty
+        registry.modules
 
 
 packagesInOrder : Registry -> Array PackageMapping

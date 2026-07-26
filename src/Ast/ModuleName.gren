@@ -23,6 +23,11 @@ as the original name. Two distinct Elm modules can collapse onto one Gren name
 computes exactly the name the owning package emitted without any shared table —
 including across package boundaries. No mapping target in `mappings/` contains
 `_`, so applying it after `Ast.NameSub` can never disturb a catalog rename.
+
+**Not for import aliases.** An `as Calendar_` / D68 occupancy escape is a free
+local identifier, not a module name. Gren accepts `_` there. `Ast.Print` must
+never run `toGren` on an alias or on a reference qualifier that is an alias —
+doing so collapses `Calendar_` onto `Calendar` and yields AMBIGUOUS NAME (D82).
 -}
 
 import String

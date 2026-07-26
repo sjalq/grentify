@@ -174,9 +174,13 @@ renameIsIdempotent =
         fail "the rename is idempotent" (String.join ", " (Array.takeFirst 5 unstable))
 
 
-{-| The printer is the only place a module name becomes output text: header,
-import, alias, and the qualifier of a reference must all carry the rename, or a
-dependent module would import a name its owner never emitted.
+{-| The printer is the only place a *module name* becomes output text: header,
+import path, and an unaliased reference qualifier must all carry the rename, or
+a dependent module would import a name its owner never emitted.
+
+Import *aliases* are free identifiers, not module names (D82). `as EN_US` stays
+`as EN_US` — Gren accepts `_` there — while the imported module path and a
+reference that still carries the full home module are rewritten.
 -}
 printerRenamesEveryModulePosition : Check
 printerRenamesEveryModulePosition =
@@ -211,15 +215,21 @@ printerRenamesEveryModulePosition =
         printed =
             Print.print Dict.empty file
 
-        leftovers =
-            [ "Extended_Pictographic", "EN_US" ]
+        moduleLeftovers =
+            [ "Extended_Pictographic" ]
                 |> Array.keepIf (\name -> String.contains name printed)
+
+        okShape =
+            Array.isEmpty moduleLeftovers
+                && String.contains "module String.Graphemes.Data.ExtendedPictographic" printed
+                && String.contains "import Derberos.Date.L10n.ENUS as EN_US" printed
+                && String.contains "ENUS.config" printed
     in
-    if Array.isEmpty leftovers && String.contains "ENUS.config" printed then
-        ok "the printer renames header, import, alias and reference qualifier"
+    if okShape then
+        ok "the printer renames module header, import path, and module-name qualifiers; aliases stay raw"
 
     else
-        fail "the printer renames header, import, alias and reference qualifier" printed
+        fail "the printer renames module header, import path, and module-name qualifiers; aliases stay raw" printed
 
 
 {-| D64 rule: a refusal names the offending value. -}

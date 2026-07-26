@@ -17,6 +17,15 @@ in the transitive closure of its OWN declared Elm dependencies, intersected
 with the set vendored by this port. Never "every package planned so far".
 Every entry is derived from a declared dependency edge; membership in the
 port's identity table is a filter, never a source.
+
+LAW (exposed module names, D82): Gren forbids two packages in one dependency
+graph from exposing the same module name. Elm allows it so long as no single
+module imports both. When this package's exposed set intersects a vendored
+dependency's exposed set, the port refuses with `AMBIGUOUS_MODULE_NAME` rather
+than renaming (a rename changes the public API and is not a pure function of
+the module name alone — both packages share the name, so D72's law does not
+apply). D76 residues are NOT this: the colliding dependency must be in
+`localClosure`, i.e. reachable from a declared edge.
 -}
 
 import Ast.ModuleName as ModuleName
@@ -180,6 +189,11 @@ buildManifest options =
         (Ok Dict.empty)
         context.source.dependencies
         |> Result.andThen (hoistTransitiveLocals context)
+        |> Result.andThen
+            (\dependencies ->
+                checkExposedModuleCollisions context options.portedManifests
+                    |> Result.map (\_ -> dependencies)
+            )
         |> Result.map
             (\dependencies ->
                 { kind =
@@ -211,6 +225,73 @@ buildManifest options =
                         context.source.sourceDirectories
                 }
             )
+
+
+{-| Refuse when an exposed module of this package is also exposed by a
+vendored dependency in its local closure.
+
+Positive evidence only: both sides come from declared `exposed-modules` on
+manifests already in hand. No rename — see module header (D82).
+-}
+checkExposedModuleCollisions : Context -> Dict String Manifest -> Result Error {}
+checkExposedModuleCollisions context portedManifests =
+    let
+        ours =
+            Array.map ModuleName.toGren context.source.exposedModules
+    in
+    Dict.foldl
+        (\elmName identity result ->
+            result
+                |> Result.andThen
+                    (\_ ->
+                        when Dict.get elmName portedManifests is
+                            Nothing ->
+                                Ok {}
+
+                            Just depManifest ->
+                                let
+                                    theirs =
+                                        Array.map ModuleName.toGren depManifest.exposedModules
+
+                                    shared =
+                                        Array.keepIf (\name -> Array.member name theirs) ours
+                                in
+                                when Array.first shared is
+                                    Nothing ->
+                                        Ok {}
+
+                                    Just moduleName ->
+                                        Err
+                                            (PortError.create "AMBIGUOUS_MODULE_NAME"
+                                                (ambiguousModuleMessage context.identity
+                                                    moduleName
+                                                    identity
+                                                )
+                                            )
+                    )
+        )
+        (Ok {})
+        context.localDependencies
+
+
+ambiguousModuleMessage : Identity -> String -> Identity -> String
+ambiguousModuleMessage self moduleName dependency =
+    "Package "
+        ++ self.elmName
+        ++ " exposes the module `"
+        ++ moduleName
+        ++ "`, but its dependency "
+        ++ dependency.elmName
+        ++ " (as "
+        ++ dependency.grenName
+        ++ ") already exposes that name. "
+        ++ "Elm allows two packages to share a module name when no single "
+        ++ "module imports both; Gren forbids the collision at the package "
+        ++ "graph. Renaming would change this package's public API and is "
+        ++ "not a pure function of the module name alone (both packages use "
+        ++ "the same name), so the port refuses rather than inventing a "
+        ++ "rename. Import under a different name in the Elm source, or drop "
+        ++ "the dependency that is not needed."
 
 
 {-| The vendored packages `source` may legally see: every package reachable

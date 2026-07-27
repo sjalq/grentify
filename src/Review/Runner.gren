@@ -218,7 +218,7 @@ withCompileLock platform childProcess options =
                         { program = "bash"
                         , arguments =
                             [ "-c"
-                            , "rmdir \"$1\" 2>/dev/null || true"
+                            , "rm -f \"$1/owner\" 2>/dev/null; rmdir \"$1\" 2>/dev/null || true"
                             , "elm-to-gren-extract-unlock"
                             , lockDir
                             ]
@@ -600,7 +600,26 @@ lockHoldSeconds =
     (60 * 60) + 300
 
 
-{-| The acquire spinlock, parameterised by `lockHoldSeconds`. -}
+{-| D104: the acquire spinlock, which steals a lock whose OWNER IS GONE.
+
+Age was the only liveness signal, so the steal threshold had to exceed the
+longest legitimate hold — and D93b, raising the budget to an hour, therefore
+pushed stale recovery out to 65 minutes. A holder killed by a harness reap or
+a ^C left the lock standing for that entire window while every waiter burned
+its own budget: a clean `test:ecosystem` run lost 9 packages in a row to a
+lock whose owner had been dead for 25 minutes, all of them reported as
+`FAIL hang` against packages that are perfectly fine.
+
+The holder now records its PID (the node process that will do the work, not
+the short-lived shell that takes the lock), and a waiter steals the moment
+`kill -0` says that process is gone. Liveness answers the question age was
+only ever approximating, so the two concerns come apart: a live holder may
+hold for as long as its work legitimately takes, and a dead one is
+reclaimable immediately.
+
+The age rule stays as a backstop for a lock with no readable owner — one
+written by an older build, or by a process whose PID was reused.
+-}
 lockScript : String
 lockScript =
     let
@@ -610,8 +629,14 @@ lockScript =
         steal =
             String.fromInt lockHoldSeconds
     in
-    "lock_dir=$1; for i in $(seq 1 "
-        ++ iterations
-        ++ "); do if mkdir \"$lock_dir\" 2>/dev/null; then exit 0; fi; m=$(stat -f %m \"$lock_dir\" 2>/dev/null || stat -c %Y \"$lock_dir\" 2>/dev/null || echo 0); n=$(date +%s); if [ \"$m\" -gt 0 ] && [ $((n - m)) -gt "
-        ++ steal
-        ++ " ]; then rmdir \"$lock_dir\" 2>/dev/null; fi; sleep 0.2; done; exit 1"
+    String.join ""
+        [ "lock_dir=$1; for i in $(seq 1 "
+        , iterations
+        , "); do if mkdir \"$lock_dir\" 2>/dev/null; then echo $PPID > \"$lock_dir/owner\" 2>/dev/null; exit 0; fi; "
+        , "owner=$(cat \"$lock_dir/owner\" 2>/dev/null); "
+        , "if [ -n \"$owner\" ] && ! kill -0 \"$owner\" 2>/dev/null; then rmdir \"$lock_dir/owner\" 2>/dev/null; rm -f \"$lock_dir/owner\" 2>/dev/null; rmdir \"$lock_dir\" 2>/dev/null; continue; fi; "
+        , "m=$(stat -f %m \"$lock_dir\" 2>/dev/null || stat -c %Y \"$lock_dir\" 2>/dev/null || echo 0); n=$(date +%s); "
+        , "if [ \"$m\" -gt 0 ] && [ $((n - m)) -gt "
+        , steal
+        , " ]; then rm -f \"$lock_dir/owner\" 2>/dev/null; rmdir \"$lock_dir\" 2>/dev/null; fi; sleep 0.2; done; exit 1"
+        ]

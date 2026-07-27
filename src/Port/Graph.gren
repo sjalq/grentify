@@ -417,6 +417,7 @@ transformOne permissions options registry source =
           dependencyPinsDigest = "none"
         , logStream = Nothing
         , fileSystem = permissions.fileSystem
+        , sourceBytes = 0
         }
         |> Task.andThen
             (\extraction ->

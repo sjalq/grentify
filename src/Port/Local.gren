@@ -86,6 +86,7 @@ run options =
                                               dependencyPinsDigest = "none"
                                             , logStream = Nothing
                                             , fileSystem = options.fileSystem
+                                            , sourceBytes = 0
                                             }
                                             |> Task.andThen (ensureNoGlobalErrors >> taskFromResult)
                                             |> Task.andThen

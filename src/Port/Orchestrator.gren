@@ -571,6 +571,18 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
                 source.sourceUrl
 
         runReviewAt packageRoot =
+            -- D93: the extraction budget scales with how much source
+            -- elm-review has to parse, so measure the staged tree first.
+            Review.Runner.elmSourceBytes permissions.fileSystem
+                packageRoot
+                reviewFiles
+                |> Task.onError (\_ -> Task.succeed 0)
+                |> Task.andThen
+                    (\sourceBytes ->
+                        runReviewWith packageRoot sourceBytes
+                    )
+
+        runReviewWith packageRoot sourceBytes =
             Review.Runner.run context.platform permissions.childProcess
                 { packageRoot = packageRoot
                 , elmJson = Path.join [ packageRoot, Path.fromPosixString "elm.json" ]
@@ -584,6 +596,7 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
                 , dependencyPinsDigest = pinsDigest
                 , logStream = context.logStream
                 , fileSystem = permissions.fileSystem
+                , sourceBytes = sourceBytes
                 }
 
         -- Always stage: pin elm.json to solver versions (D82) and keep

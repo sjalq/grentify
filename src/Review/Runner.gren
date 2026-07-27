@@ -1,4 +1,4 @@
-module Review.Runner exposing (Options, loadCachedExtraction, run)
+module Review.Runner exposing (Options, elmSourceBytes, extractionBudgetMs, loadCachedExtraction, run)
 
 {-| Run elm-review extract for a package.
 
@@ -45,6 +45,9 @@ type alias Options =
     , -- Progress sink for the honest "(extract cached)" note on a cache hit.
       logStream : Maybe (Writable Bytes)
     , fileSystem : FileSystem.Permission
+    , -- D93: total bytes of Elm source elm-review is about to parse. The
+      -- extraction budget scales with it — see `extractionBudgetMs`.
+      sourceBytes : Int
     }
 
 
@@ -328,7 +331,7 @@ invokeReview platform childProcess options =
         , workingDirectory = System.File.pathToString platform options.packageRoot
         , environment = environment
         , allowedExitCodes = [ 0, 1 ]
-        , timeoutMilliseconds = 10 * 60 * 1000
+        , timeoutMilliseconds = extractionBudgetMs options.sourceBytes
         , -- D54: the whole resolved AST of the package arrives on stdout, and
           -- 64MB was not enough for generated-code packages (Chadtech/elm-vector
           -- died with ERR_CHILD_PROCESS_STDIO_MAXBUFFER, banked as a bare
@@ -508,3 +511,68 @@ shellCopyTree platform childProcess source destination =
         }
         |> Task.map (\_ -> {})
         |> Task.onError (\_ -> Task.succeed {})
+
+
+{-| D93: how long elm-review may take, as a function of how much source it
+has to read.
+
+The budget was a flat ten minutes. `SiriusStarr/elm-password-strength` ships
+`Internal/Zxcvbn/FrequencyLists.elm`, a 2.9 MB generated word list, and
+elm-review is still parsing it when the ten minutes are up; the child is
+killed and reports no exit code at all, which reached the ledger as
+`PROCESS_FAILED: elm-review exited with code null` — a timeout wearing a
+crash's clothes.
+
+A fixed cap cannot serve both a 30 KB package and a 3 MB one. Ten minutes
+stays the floor, so nothing that passes today gets a shorter budget, and
+each further megabyte buys another fifteen. The hour ceiling keeps a
+genuinely wedged run from holding a walk slot forever.
+-}
+extractionBudgetMs : Int -> Int
+extractionBudgetMs sourceBytes =
+    let
+        megabytes =
+            sourceBytes // (1024 * 1024)
+
+        minutes =
+            10 + (15 * megabytes)
+    in
+    min 60 minutes * 60 * 1000
+
+
+{-| Total bytes of Elm source under the staged source directories. -}
+elmSourceBytes : FileSystem.Permission -> Path -> Array String -> Task Error Int
+elmSourceBytes fileSystem packageRoot directories =
+    directories
+        |> Array.foldl
+            (\directory pending ->
+                pending
+                    |> Task.andThen
+                        (\runningTotal ->
+                            System.File.listFilesRecursively fileSystem
+                                (Path.join [ packageRoot, Path.fromPosixString directory ])
+                                |> Task.onError (\_ -> Task.succeed [])
+                                |> Task.andThen
+                                    (\files ->
+                                        files
+                                            |> Array.keepIf
+                                                (\file -> String.toLower file.extension == "elm")
+                                            |> Array.foldl
+                                                (\file inner ->
+                                                    inner
+                                                        |> Task.andThen
+                                                            (\subtotal ->
+                                                                FileSystem.metadata fileSystem
+                                                                    { resolveLink = True }
+                                                                    file
+                                                                    |> Task.map
+                                                                        (\meta -> subtotal + meta.byteSize)
+                                                                    |> Task.onError
+                                                                        (\_ -> Task.succeed subtotal)
+                                                            )
+                                                )
+                                                (Task.succeed runningTotal)
+                                    )
+                        )
+            )
+            (Task.succeed 0)

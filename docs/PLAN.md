@@ -2589,6 +2589,77 @@ as the evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-28 FULL SUITE RUN — every target in `test:all`, plus the ones
+  outside it, actually executed rather than assumed:
+
+    tier 0                    362 checks     pass
+    rule fixtures                            pass
+    format idempotence        82 modules     fixed point
+    add transaction                          pass
+    e2e                       4 scenarios    pass
+    ledger                                   pass
+    ast-probe                 40/40          pass
+    canary                    14/14          pass
+    ecosystem walk (top 20%)  389/411        0 working failures
+    test:ecosystem            202/202        pass
+    test:ecosystem-browser    251/252        1 failure
+    test:apps                 9/10           1 failure
+
+  `test:apps` had not been run at all this campaign and was 7/10 when first
+  executed; D101 and D102 took it to 9/10. The lesson is the same one D89's
+  classifier hole taught: a gate you do not run is not a gate.
+- 2026-07-28 D101 CLOSED — a record UPDATE's base name went through neither
+  substitution walk. `Ast.Scope.rewriteBareVars` rewrote `ExprUpdate`'s fields
+  but not its name, and `Ast.NameSub.subExpr` had no `ExprUpdate` case at all,
+  so `{ defaultOptions | sanitize = False }` (rl-king/elm-hnpwa against
+  elm-explorations/markdown) emitted a name that no longer exists. The
+  extractor hands the base back RESOLVED, so it is split before the catalog
+  lookup. Gren accepts a qualified update base, so no let-binding is needed.
+- 2026-07-28 D102 CLOSED — a mapped package's constructors had field names but
+  no ARITY. Gren's `Json.Decode.Failure` takes `{ message, value }` where
+  Elm's takes two positional arguments; patterns lowered, but `CtorLaw` never
+  learned the arity, so `JD.Failure "Bad token"` — a PARTIAL application under
+  `<<` — stayed curried and positional (dwayne/elm-conduit). Arity is the
+  field count, and the mapped shapes are already filtered to names the package
+  cannot speak about itself. Also adds the Json.Decode.Error shapes, which the
+  catalog had none of.
+- 2026-07-28 D104 CLOSED — and it invalidates a number this campaign reported.
+  `test:ecosystem` failed 42/202, every one a timeout. None were package
+  defects. D93b sized the lock's steal threshold from `lockHoldSeconds`
+  because AGE was the only liveness signal the lock had — so raising the
+  extraction budget to an hour pushed stale recovery out to 65 minutes. A
+  holder killed by a harness reap left the lock standing that entire window
+  while every waiter burned its own 120s budget and banked `FAIL hang`
+  against packages that are fine (observed: held 25 minutes with no
+  elm-review process alive).
+
+  The holder now records its PID and a waiter steals the moment `kill -0`
+  says it is gone. Liveness answers directly what age approximated, so the
+  two concerns come apart. Receipt: a dead-owner lock costs 0s to acquire
+  where the age rule alone waited 3900s. Re-run: **202/202**.
+
+### Open (2 of 663 suite packages, both attempted and reverted)
+
+- **`shared-state` (test:apps)** — Compat shims are generated PER PACKAGE, so
+  a workspace vendoring two packages that both need `ElmToGren.Compat.Http`
+  gets two copies. Gren types are nominal per package, so the two `Error`
+  types do not unify — and since both print identically, the compiler appears
+  to say a type does not match itself. Fix is to hoist the shims into one
+  shared package everything depends on. Built it; local-dependency path
+  resolution took apps 9/10 -> 4/10 (a vendored package resolves
+  `local:` against its own directory, so the spelling differs by context);
+  reverted. NOT add-specific — any multi-package output where two packages
+  exchange a shim type has it.
+- **`NoRedInk/elm-debug-controls-without-datepicker` (test:ecosystem-browser)**
+  — ships `src/Controls/ComplexChoiceTest.elm`, a stray test file importing
+  `Test`, `Expect` and `Test.Html.*`. Those come from `elm-explorations/test`,
+  which the package declares as a TEST dependency, so Elm would reject the
+  import in `src/` — proof Elm never compiles the file. It publishes because
+  nothing reaches it from `Debug.Control`. Our extractor reads every file.
+  D89's sibling: the rule Elm actually uses is reachability from
+  `exposed-modules`. Built it; the closure did not match extracted module
+  names and dropped every module, so it was reverted rather than guessed at.
+
 - 2026-07-27 TOP 20% FINAL — **389 PASS / 22 EXEMPT / 0 working failures of
   411**. Banked to `test/ecosystem/top20-run.json`. Gates: tier 0 362,
   walker self-test 46, rule fixtures, format idempotence 82 modules at fixed

@@ -2651,10 +2651,41 @@ not rediscover them:
      adapters are not visible in that count is the next thing to find out,
      and it needs instrumentation rather than another guess.
 
-All three attempts were reverted rather than half-landed: one known failure
-is worth more than four new ones. Attempt 3 cost nothing elsewhere —
-`test:apps` stayed at 9/10 throughout — which is what makes the remaining
-unknown a narrow one.
+ATTEMPT 4 got furthest and is worth reading before a fifth. Working from the
+minimal repro, the hoist was made to fire and the standalone port PASSED —
+`ohanhi/remotedata-http` emitted three packages with ONE
+`.elm-to-gren/packages/elm-to-gren_compat__1_0_0/src/ElmToGren/Compat/Http.gren`
+and verified clean. The layers it had to go through, in order:
+
+  a. HOIST CENTRALLY, at `finalPlanned`, not at the `Workspace.emit` call.
+     Every consumer of `planned.packages` must see the same set — the staging
+     pass that restores cached trees reads it too, and hoisting at the emit
+     call left that pass looking at the un-hoisted list, so its prune never
+     ran.
+  b. PRUNE THE RESTORED TREE. `replaceSrcFromEntry` copies the cached `src/`
+     over the stripped one, so the shims come back; delete
+     `<pkg>/src/ElmToGren/Compat` after the restore. Build the path one
+     segment at a time — `Path.fromPosixString "src/ElmToGren/Compat"` does
+     not resolve.
+  c. DO NOT DOC-VERIFY THE SHARED PACKAGE. `gren docs` demands a doc comment
+     on every exposed value; the generated shims carry none and should not
+     have to. It is an internal artifact, proved by compilation — every
+     dependent builds it, and each shim already compiled inside its host.
+  d. PLATFORM. The shared package cannot take the WIDEST platform of its
+     hosts: a `common` consumer may not depend on a `browser` package
+     (INCOMPATIBLE PACKAGE). Taking the narrowest instead moves the problem
+     to the dependency union — a `common` shim package carrying
+     `gren-lang/browser` fails the same way for `robinheghan/murmur3`.
+
+  Partitioning hosts by platform (one shim package per platform, deps unioned
+  within the group) was the obvious next step and took `test:apps` 9/10 ->
+  6/10. That is where attempt 4 was reverted. The remaining question is what
+  `krisajenkins/remotedata` — inferred `common` — is doing referencing
+  `ElmToGren.Compat.Http.Error` at all; if its platform inference is wrong,
+  the platform conflict is a symptom rather than the thing to design around.
+
+All four attempts were reverted rather than half-landed: one known failure is
+worth more than four new ones.
 
 - 2026-07-28 FULL SUITE RUN — every target in `test:all`, plus the ones
   outside it, actually executed rather than assumed:

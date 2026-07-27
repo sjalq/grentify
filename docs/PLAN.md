@@ -2589,6 +2589,48 @@ as the evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-27 TOP 20% FINAL — **389 PASS / 22 EXEMPT / 0 working failures of
+  411**. Banked to `test/ecosystem/top20-run.json`. Gates: tier 0 362,
+  walker self-test 46, rule fixtures, format idempotence 82 modules at fixed
+  point, add transaction, canary 14/14.
+
+  Every exemption was RE-VERIFIED this round rather than inherited:
+    * broken-upstream (5) — all five zipball URLs re-checked live, still 404.
+    * kernel:dep (7) — each confirmed to IMPORT the kernel package's modules,
+      not merely declare it. The eighth, vito/elm-ansi, did not, and is now a
+      PASS (D100).
+    * mapping-absent (5) — all five want `Test.Html.*` or `Shrink` from
+      elm-explorations/test. Blocked on the GREN ECOSYSTEM lacking an
+      HTML-testing library, not on anything about these packages: if that
+      library appears they become portable. The softest of the terminal
+      states and worth revisiting when Gren's test story grows.
+    * module-name-collision (3) and tuple-key-unrepresentable (2) — Gren
+      language rules with no sound automatic fix.
+- 2026-07-27 D100 CLOSED — a root dependency DECLARED but never IMPORTED.
+  Elm does not require a declared dependency to be used, and
+  `vito/elm-ansi@12.0.0` declares elm-explorations/benchmark while importing
+  nothing from it; that package ships kernel JS, so the port refused the
+  whole graph over an edge carrying nothing and the package was banked
+  EXEMPT(kernel:dep) for a dependency it does not use. Sound to drop: Elm
+  resolves a module name to exactly one package and forbids importing from an
+  undeclared one, so if no root module imports a module the dependency
+  EXPOSES, nothing the root emits can reference it. The solver still reaches
+  the package when another dependency genuinely needs it. Absent evidence
+  never prunes.
+
+  MAPPED dependencies are never pruned: their modules reach the output
+  through the Gren analogue and the generated `ElmToGren.Compat.*` shims,
+  which import `Platform.Sub`/`Platform.Cmd` that no root source mentions.
+  The first cut missed that and took the canary from 14/14 to 2/14.
+
+  Scope: the ROOT's edges only — a dependency's own false edges still bite,
+  because its sources are not in hand until the solve has run. Open.
+- 2026-07-27 PROCESS NOTE — the exemption audit only happened because the
+  goal check refused to accept EXEMPT as equivalent to PASS. It found one
+  wrong terminal verdict in twenty-three. §1's rule that a terminal state is
+  never revisited is what makes a wrong one so expensive, so the audit is
+  worth repeating whenever the exempt set grows.
+
 - 2026-07-27 TOP 20% CLEAN — **388 PASS / 23 EXEMPT / 0 working failures of
   411**. Every package in the top 20% of the registry by fan-in either ports
   or is terminal with a stated reason. Was 376/18/17 when the surface was

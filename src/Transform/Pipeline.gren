@@ -604,33 +604,56 @@ transformModuleViaAst registry evidence input extraction outputPath astValue =
                                 }
                                 file
             in
-            when translated.unportedListSummary is
+            when translated.unencodableKeySummary is
                 Just summary ->
                     Err <|
-                        PortError.create "AST_UNPORTED_LIST"
-                            ("Host match compiler left unported list/cons patterns in "
+                        PortError.create "UNSUPPORTED_TUPLE_KEY"
+                            ("Module "
                                 ++ extraction.moduleName
-                                ++ " ("
-                                ++ input.path
-                                ++ "): "
+                                ++ " uses a "
                                 ++ summary
-                                ++ ". Extend Ast.MatchCompile rather than range-edit fallback."
+                                ++ ". Gren compares ints, floats, chars, strings and "
+                                ++ "arrays of comparable values, and an array is "
+                                ++ "homogeneous, so this key has no Gren representation "
+                                ++ "at all — Elm accepts it only because Elm's "
+                                ++ "`comparable` admits tuples and lists directly. "
+                                ++ "This is a language-level difference, not a porting "
+                                ++ "bug, and there is no sound automatic fix: rendering "
+                                ++ "one element to String to unify the types is not "
+                                ++ "order-preserving. What you can do: fork the Elm "
+                                ++ "package and key the Dict/Set on a single comparable "
+                                ++ "value (or use an association list), then port the "
+                                ++ "fork."
                             )
 
                 Nothing ->
-                    if translated.hasUnportedMarker then
-                        Err <|
-                            PortError.create "AST_UNPORTED_LIST"
-                                ("Printer left unported list-cons markers in "
-                                    ++ extraction.moduleName
-                                    ++ "."
-                                )
+                    when translated.unportedListSummary is
+                        Just summary ->
+                            Err <|
+                                PortError.create "AST_UNPORTED_LIST"
+                                    ("Host match compiler left unported list/cons patterns in "
+                                        ++ extraction.moduleName
+                                        ++ " ("
+                                        ++ input.path
+                                        ++ "): "
+                                        ++ summary
+                                        ++ ". Extend Ast.MatchCompile rather than range-edit fallback."
+                                    )
 
-                    else
-                        finalizeTransformedModule registry input extraction
-                            outputPath translated.source [] [] []
-                            |> Result.map
-                                (withTransformPath input extraction "ast")
+                        Nothing ->
+                            if translated.hasUnportedMarker then
+                                Err <|
+                                    PortError.create "AST_UNPORTED_LIST"
+                                        ("Printer left unported list-cons markers in "
+                                            ++ extraction.moduleName
+                                            ++ "."
+                                        )
+
+                            else
+                                finalizeTransformedModule registry input extraction
+                                    outputPath translated.source [] [] []
+                                    |> Result.map
+                                        (withTransformPath input extraction "ast")
 
 withTransformPath :
     SourceFile

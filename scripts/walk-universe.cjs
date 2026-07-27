@@ -147,6 +147,22 @@ const EXEMPT_SIGNATURES = [
     pattern: /AMBIGUOUS_MODULE_NAME[^\n]*exposes the module/,
     reason: "module-name-collision",
   },
+  // D97: a Dict/Set key tuple Gren cannot represent at all. Gren compares
+  // ints, floats, chars, strings and arrays of comparable values, and an array
+  // is homogeneous, so `Set ( String, List Int )` (logicus-pl) and
+  // `Set ( ModuleName, String )` (elm-review-unused) have no encoding —
+  // rendering one element to String to unify the types is not order-preserving
+  // (`"10" < "9"`). Elm accepts both because its `comparable` admits tuples and
+  // lists directly.
+  //
+  // Terminal for the same reason as a module-name collision: a language-level
+  // difference with no sound automatic fix, and the diagnostic names the module
+  // and the container kind. Porting it would mean changing the package's data
+  // structures, which is the author's call, not the tool's.
+  {
+    pattern: /UNSUPPORTED_TUPLE_KEY[^\n]*no common Gren comparable type/,
+    reason: "tuple-key-unrepresentable",
+  },
 ];
 
 // ---------------------------------------------------------------------------

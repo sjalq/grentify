@@ -8,6 +8,7 @@ module Ast.KeyEncode.Evidence exposing
     , inlineSlot
     , isEmpty
     , kindOfRef
+    , keySlotOf
     , resolvedContainerSlot
     , resolvedKeySlot
     , returnedAliasName
@@ -120,6 +121,11 @@ isEmpty evidence =
 
 
 {-| The key-slot child annotation of a Dict/Set node, with its kind. -}
+keySlotOf : TypeAnn -> Maybe { kind : Kind, annotation : TypeAnn }
+keySlotOf annotation =
+    keySlot annotation
+
+
 keySlot : TypeAnn -> Maybe { kind : Kind, annotation : TypeAnn }
 keySlot annotation =
     when annotation is

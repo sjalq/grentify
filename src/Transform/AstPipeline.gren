@@ -50,6 +50,8 @@ type alias Output =
     , source : String
     , unportedListSummary : Maybe String
     , hasUnportedMarker : Bool
+    , -- D97: Dict/Set key tuples Gren's comparable universe cannot hold
+      unencodableKeySummary : Maybe String
     }
 
 
@@ -89,6 +91,7 @@ type Prepared
         { file : File
         , renames : Dict String String
         , constructorFields : Dict String (Array String)
+        , unencodableKeys : Array String
         }
 
 
@@ -106,6 +109,10 @@ prepare registry evidence file =
         { file = compiled
         , renames = Reserved.renameMap compiled
         , constructorFields = evidence.constructorFields
+
+        -- Read BEFORE lowering, while the tuples are still tuples.
+        , unencodableKeys =
+            KeyEncode.unencodableKeys evidence.tupleReturns.aliases file
         }
 
 
@@ -124,7 +131,7 @@ finish reservedExports (Prepared prepared) =
     prepared.file
         |> Reserved.applyWith reservedExports prepared.renames
         |> FinalizedAst
-        |> render prepared.constructorFields
+        |> render prepared.constructorFields prepared.unencodableKeys
 
 
 run : Registry -> Evidence -> File -> Output
@@ -136,6 +143,7 @@ run registry evidence file =
         |> compilePatterns evidence
         |> finalize evidence
         |> render evidence.constructorFields
+            (KeyEncode.unencodableKeys evidence.tupleReturns.aliases file)
 
 
 resolve : Evidence -> File -> ResolvedAst
@@ -178,8 +186,8 @@ finalize evidence (CompiledAst file) =
         |> FinalizedAst
 
 
-render : Dict String (Array String) -> FinalizedAst -> Output
-render constructorFields (FinalizedAst file) =
+render : Dict String (Array String) -> Array String -> FinalizedAst -> Output
+render constructorFields unencodable (FinalizedAst file) =
     let
         source =
             Print.print constructorFields file
@@ -193,4 +201,14 @@ render constructorFields (FinalizedAst file) =
         else
             Nothing
     , hasUnportedMarker = String.contains "unported-cons-pattern" source
+    , unencodableKeySummary =
+        when Array.first unencodable is
+            Just kind ->
+                Just
+                    (kind
+                        ++ " keyed by a tuple whose elements have no common Gren comparable type"
+                    )
+
+            Nothing ->
+                Nothing
     }

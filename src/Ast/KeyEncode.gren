@@ -3,6 +3,7 @@ module Ast.KeyEncode exposing
     , apply
     , collectEvidence
     , emptyEvidence
+    , unencodableKeys
     )
 
 {-| D24b/D65/D81: Elm tuples are `comparable` so they serve as Dict keys /
@@ -1362,3 +1363,177 @@ listMap =
 bareVar : String -> Expr
 bareVar name =
     ExprVar { moduleName = Nothing, name = name }
+
+
+{-| D97: Dict/Set key tuples that GREN CANNOT REPRESENT AT ALL.
+
+Gren's comparable universe is ints, floats, chars, strings, and arrays of
+comparable values — and an array is homogeneous. An Elm tuple key whose
+elements do not share one comparable type therefore has no encoding:
+
+  * `logicUSLIB/logicus-pl` — `Set ( String, List Int )`
+  * `jfmengels/elm-review-unused` — `Set ( ModuleName, String )`, where
+    elm-syntax's `ModuleName` is `List String`
+
+Both are ordinary Elm, because Elm's `comparable` admits tuples and lists
+directly. Neither can become a Gren `Set`: `Array (Array String)` cannot
+hold the `String` half, and rendering the other half to `String` is not
+order-preserving (`"10" < "9"`), which is exactly why `Codec.tupleShapes`
+refuses these shapes rather than guessing.
+
+Without this check the port emits `Set { first : String, second : Array Int }`
+and lets the Gren compiler reject it several phases later, with a message
+about records that says nothing about the real cause. Reported as an
+unsupported source feature instead — a language limitation with no sound
+automatic fix, the same category as a package-graph module collision.
+
+Only CONCRETE tuples count. A key mentioning a type variable is generic in
+Elm and stays generic in Gren, so it is not this pass's business.
+-}
+unencodableKeys : Dict String TypeAnn -> File -> Array String
+unencodableKeys aliases file =
+    Array.foldl
+        (\declaration found ->
+            Array.foldl
+                (\annotation acc -> unencodableInAnn aliases annotation acc)
+                found
+                (declarationAnnotations declaration)
+        )
+        []
+        file.declarations
+
+
+declarationAnnotations : Declaration -> Array TypeAnn
+declarationAnnotations declaration =
+    when declaration is
+        DeclFunction { signature = Just sig } ->
+            [ sig.typeAnnotation ]
+
+        DeclAlias { typeAnnotation = body } ->
+            [ body ]
+
+        DeclCustomType { constructors = constructors } ->
+            Array.foldl
+                (\constructor acc -> Array.append acc constructor.arguments)
+                []
+                constructors
+
+        _ ->
+            []
+
+
+unencodableInAnn : Dict String TypeAnn -> TypeAnn -> Array String -> Array String
+unencodableInAnn aliases annotation found =
+    let
+        self =
+            -- The key may be written inline or hidden behind a package alias
+            -- (`type alias PSymb = ( String, List Int )`); a type alias is its
+            -- body either way.
+            when
+                Evidence.keySlotOf annotation
+                    |> Maybe.map
+                        (\slot ->
+                            { kind = slot.kind
+                            , annotation = expandAlias aliases slot.annotation
+                            }
+                        )
+            is
+                Just { kind = kind, annotation = TypeTuple elements } ->
+                    if
+                        Codec.tupleShapes elements
+                            == Nothing
+                            && Array.all isConcreteAnn elements
+                    then
+                        Array.pushLast (kindName kind) found
+
+                    else
+                        found
+
+                _ ->
+                    found
+    in
+    when annotation is
+        TypeTyped { arguments = arguments } ->
+            Array.foldl (unencodableInAnn aliases) self arguments
+
+        TypeTuple elements ->
+            Array.foldl (unencodableInAnn aliases) self elements
+
+        TypeFunction { left = left, right = right } ->
+            unencodableInAnn aliases right (unencodableInAnn aliases left self)
+
+        TypeRecord fields ->
+            Array.foldl
+                (\field acc -> unencodableInAnn aliases field.typeAnnotation acc)
+                self
+                fields
+
+        TypeGenericRecord { fields = fields } ->
+            Array.foldl
+                (\field acc -> unencodableInAnn aliases field.typeAnnotation acc)
+                self
+                fields
+
+        _ ->
+            self
+
+
+{-| Expand a zero-argument package alias, bounded against cycles. -}
+expandAlias : Dict String TypeAnn -> TypeAnn -> TypeAnn
+expandAlias aliases annotation =
+    expandAliasWithin 8 aliases annotation
+
+
+expandAliasWithin : Int -> Dict String TypeAnn -> TypeAnn -> TypeAnn
+expandAliasWithin fuel aliases annotation =
+    if fuel <= 0 then
+        annotation
+
+    else
+        when annotation is
+            TypeTyped { ref = ref, arguments = [] } ->
+                when Dict.get ref.name aliases is
+                    Just body ->
+                        expandAliasWithin (fuel - 1) aliases body
+
+                    Nothing ->
+                        annotation
+
+            _ ->
+                annotation
+
+
+kindName : Kind -> String
+kindName kind =
+    when kind is
+        SetKind ->
+            "Set"
+
+        DictKind ->
+            "Dict"
+
+
+{-| No type variable anywhere: a generic key is not a concrete refusal. -}
+isConcreteAnn : TypeAnn -> Bool
+isConcreteAnn annotation =
+    when annotation is
+        TypeGeneric _ ->
+            False
+
+        TypeTyped { arguments = arguments } ->
+            Array.all isConcreteAnn arguments
+
+        TypeTuple elements ->
+            Array.all isConcreteAnn elements
+
+        TypeFunction { left = left, right = right } ->
+            isConcreteAnn left && isConcreteAnn right
+
+        TypeRecord fields ->
+            Array.all (\field -> isConcreteAnn field.typeAnnotation) fields
+
+        TypeGenericRecord _ ->
+            False
+
+        TypeUnit ->
+            True

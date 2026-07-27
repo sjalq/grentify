@@ -2589,6 +2589,59 @@ as the evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-28 SUITE STATE — one failing test across every gate:
+
+    tier 0 362 · rule fixtures · format 82 · add transaction · e2e 4
+    ledger · ast-probe 40/40 · canary 14/14
+    ecosystem walk (top 20%)  389/411   0 working failures
+    test:ecosystem            202/202
+    test:ecosystem-browser    252/252
+    test:apps                   9/10    shared-state
+
+- 2026-07-28 D105 CLOSED — src modules the Elm compiler never builds.
+  Elm compiles EXPOSED modules and their transitive imports; anything else
+  under `src/` is dead code nothing checks, and can be outright uncompilable.
+  `NoRedInk/elm-debug-controls-without-datepicker` ships
+  `src/Controls/ComplexChoiceTest.elm`, a stray test file importing `Test`,
+  `Expect` and `Test.Html.*` from a package it declares as a TEST dependency
+  — Elm rejects that import in `src/`, which is the proof it never compiles
+  the file. D89's sibling, under the reachability rule Elm actually uses.
+
+  Two traps, both now explicit in the code because the first attempt hit
+  both: match modules to source files by MODULE NAME, never by path (the
+  extractor reports a staging-directory path while source files carry
+  `src/…`, so string-matching them keeps nothing and empties the package);
+  and refuse to act unless every exposed module was found in the extraction,
+  since a reachability set that cannot see the package's own API is evidence
+  the names do not line up rather than evidence of dead code.
+
+### Open: one test — `shared-state` (test:apps)
+
+Compat shims are generated PER PACKAGE, so a workspace vendoring two
+packages that both need `ElmToGren.Compat.Http` gets two copies. Gren types
+are nominal per package, so the two `Error` types do not unify — and since
+both print identically, the compiler appears to say a type does not match
+itself. NOT `add`-specific: any multi-package output where two packages
+exchange a shim type has it.
+
+The fix is to hoist the shims into one shared package. Attempted twice; each
+attempt found a further obstacle, and both are recorded here so a third does
+not rediscover them:
+
+  1. LOCAL PATH SPELLING. `Port.Plan.localPath` already states the rule —
+     the ROOT package addresses siblings as `.elm-to-gren/packages/X`, a
+     vendored one as `../X` because it sits inside that directory. Spelling
+     it `../X` everywhere took `test:apps` 9/10 -> 4/10.
+  2. THE PORTED CACHE. A cache-restored package arrives with its adapters
+     already inside it, so a hoist over `planned.packages` cannot strip
+     them; the shared package's modules then collide with the cached copies
+     and every import of `ElmToGren.Compat.*` becomes AMBIGUOUS IMPORT
+     (9/10 -> 6/10). The cache stores per-package trees, so the layout
+     change has to reach the cache key or the restore path too.
+
+Both attempts were reverted rather than half-landed: one known failure is
+worth more than four new ones.
+
 - 2026-07-28 FULL SUITE RUN — every target in `test:all`, plus the ones
   outside it, actually executed rather than assumed:
 

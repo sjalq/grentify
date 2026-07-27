@@ -215,8 +215,43 @@ rewriteBareVars rewritePattern remaps bound expression =
             ExprAccess { access | record = continue access.record }
 
         ExprUpdate update ->
+            -- D101: the BASE of a record update is a bare name too, and it was
+            -- the one bare name this walk never rewrote. rl-king/elm-hnpwa
+            -- writes `{ defaultOptions | sanitize = False }` against
+            -- elm-explorations/markdown, whose `defaultOptions` remaps to
+            -- `ElmToGren.Compat.Markdown.defaultOptions`; the fields were
+            -- rewritten and the base was left bare, so the port emitted a
+            -- reference to a name that does not exist. Gren accepts a
+            -- qualified base, so the ordinary remap applies unchanged.
             ExprUpdate
-                { update | fields = Array.map (\field -> { field | value = continue field.value }) update.fields }
+                { update
+                    | name =
+                        if Set.member update.name bound then
+                            update.name
+
+                        else
+                            when Dict.get update.name remaps is
+                                Just target ->
+                                    qualifiedName target
+
+                                Nothing ->
+                                    update.name
+                    , fields =
+                        Array.map
+                            (\field -> { field | value = continue field.value })
+                            update.fields
+                }
 
         _ ->
             expression
+
+
+{-| Source spelling of a remapped reference. -}
+qualifiedName : NamedRef -> String
+qualifiedName ref =
+    when ref.moduleName is
+        Just moduleName ->
+            moduleName ++ "." ++ ref.name
+
+        Nothing ->
+            ref.name

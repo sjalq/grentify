@@ -732,6 +732,30 @@ subExpr registry expr =
         ExprVar ref ->
             ExprVar (subRef registry ref False)
 
+        -- D101: a record UPDATE's base name never went through substitution.
+        -- `Markdown.defaultOptions` reaches the port as the bare name
+        -- `defaultOptions` (Elm resolves it through the import), and
+        -- `{ defaultOptions | sanitize = False }` was emitted unqualified —
+        -- so rl-king/elm-hnpwa failed with `I cannot find a defaultOptions
+        -- variable`. Gren accepts a qualified base
+        -- (`{ ElmToGren.Compat.Markdown.defaultOptions | … }` compiles), so
+        -- the ordinary value substitution applies unchanged.
+        ExprUpdate { name = name, fields = fields } ->
+            ExprUpdate
+                { name =
+                    -- The extractor hands the base back RESOLVED
+                    -- ("Markdown.defaultOptions"), so split it before the
+                    -- catalog lookup — wrapping the dotted string as a bare
+                    -- name matches nothing and leaves the original module
+                    -- qualifier standing after its import is gone.
+                    subRef registry (splitQualified name) False
+                        |> refToString
+                , fields =
+                    Array.map
+                        (\field -> { field | value = subExpr registry field.value })
+                        fields
+                }
+
         ExprPrefix op ->
             if op == "::" then
                 ExprVar { moduleName = Just "Array", name = "pushFirst" }
@@ -742,6 +766,17 @@ subExpr registry expr =
         _ ->
             Walk.mapExprChildrenWithPatterns (subExpr registry)
                 (subPattern registry) expr
+
+
+{-| Render a substituted reference back to the source spelling. -}
+refToString : NamedRef -> String
+refToString ref =
+    when ref.moduleName is
+        Just moduleName ->
+            moduleName ++ "." ++ ref.name
+
+        Nothing ->
+            ref.name
 
 
 subRef : Registry -> NamedRef -> Bool -> NamedRef

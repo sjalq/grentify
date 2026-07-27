@@ -83,6 +83,9 @@ type alias Evidence =
     , -- D88: alias name -> the keyed container its BODY is
       -- (`type alias State = Dict ( Int, Int ) Cell`)
       containerAliases : Dict String Slot
+    , -- D92: package function -> the keyed container at each PARAMETER
+      -- position of its signature (`Nothing` where the parameter is not one)
+      paramSlots : Dict String (Array (Maybe Slot))
     }
 
 
@@ -94,6 +97,7 @@ empty =
     , tupleReturns = Dict.empty
     , containerReturns = Dict.empty
     , containerAliases = Dict.empty
+    , paramSlots = Dict.empty
     }
 
 
@@ -108,6 +112,7 @@ isEmpty evidence =
         && Dict.isEmpty evidence.tupleReturns
         && Dict.isEmpty evidence.containerReturns
         && Dict.isEmpty evidence.containerAliases
+        && Dict.isEmpty evidence.paramSlots
 
 
 
@@ -304,7 +309,74 @@ collect files =
             (containerReturnSlot candidates eligible containerAliases)
             files
     , containerAliases = containerAliases
+    , paramSlots = collectParamSlots candidates eligible containerAliases files
     }
+
+
+{-| D92: the keyed container each PARAMETER of a package function is.
+
+`w0rm/elm-physics` seeds nothing from `initFaces`'s own signature — the
+Set lives one call away, in
+`initFacesHelp : Set ( Int, Int, Int ) -> ...`. Passing an expression to
+that parameter is as conclusive about its type as returning it: Elm
+type-checked the call.
+
+Same poisoning discipline: one bare name package-wide or it proves
+nothing. Parameters that are not keyed containers hold `Nothing` so
+positions stay aligned with the call's arguments.
+-}
+collectParamSlots :
+    Dict String AliasInfo
+    -> Dict String AliasInfo
+    -> Dict String Slot
+    -> Array File
+    -> Dict String (Array (Maybe Slot))
+collectParamSlots tupleAliases r1Eligible containerAliases files =
+    Array.foldl
+        (\file acc ->
+            Array.foldl
+                (\declaration inner ->
+                    when declaration is
+                        DeclFunction { name = name, signature = Just sig } ->
+                            let
+                                slots =
+                                    parameterSlots tupleAliases
+                                        r1Eligible
+                                        containerAliases
+                                        sig.typeAnnotation
+                            in
+                            if Array.any (\slot -> slot /= Nothing) slots then
+                                poison name slots inner
+
+                            else
+                                inner
+
+                        _ ->
+                            inner
+                )
+                acc
+                file.declarations
+        )
+        Dict.empty
+        files
+        |> keepUnpoisoned
+
+
+parameterSlots :
+    Dict String AliasInfo
+    -> Dict String AliasInfo
+    -> Dict String Slot
+    -> TypeAnn
+    -> Array (Maybe Slot)
+parameterSlots tupleAliases r1Eligible containerAliases annotation =
+    when annotation is
+        TypeFunction { left = left, right = right } ->
+            Array.pushFirst
+                (resolvedContainerSlot tupleAliases r1Eligible containerAliases left)
+                (parameterSlots tupleAliases r1Eligible containerAliases right)
+
+        _ ->
+            []
 
 
 {-| D88: aliases whose BODY is a tuple-keyed container.

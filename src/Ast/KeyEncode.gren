@@ -578,6 +578,7 @@ type alias Env =
     , keyFields : Dict String Slot
     , containerReturns : Dict String Slot
     , tupleReturns : Dict String (Array KeyShape)
+    , paramSlots : Dict String (Array (Maybe Slot))
     }
 
 
@@ -625,6 +626,7 @@ envFromSignature evidence signature arguments =
             , keyFields = evidence.keyFields
             , containerReturns = evidence.containerReturns
             , tupleReturns = evidence.tupleReturns
+            , paramSlots = evidence.paramSlots
             }
     in
     when signature is
@@ -870,6 +872,45 @@ bodySeeds env expr seeds =
                 Nothing ->
                     seeds
 
+        -- D92: an argument handed to a package function whose signature types
+        -- that parameter as a tuple-keyed container. Elm type-checked the
+        -- call, so the argument IS that container.
+        fromParams =
+            when expr is
+                ExprApplication parts ->
+                    when Array.first parts is
+                        Just (ExprVar ref) ->
+                            when Dict.get ref.name env.paramSlots is
+                                Just slots ->
+                                    Array.indexedMap
+                                        (\index slot ->
+                                            if index + 1 < Array.length parts then
+                                                slot
+
+                                            else
+                                                Nothing
+                                        )
+                                        slots
+                                        |> Array.foldl
+                                            (\slot acc ->
+                                                when slot is
+                                                    Just found ->
+                                                        addKindSeed found acc
+
+                                                    Nothing ->
+                                                        acc
+                                            )
+                                            fromContainer
+
+                                Nothing ->
+                                    fromContainer
+
+                        _ ->
+                            fromContainer
+
+                _ ->
+                    fromContainer
+
         fromKey =
             when normalizeCall expr is
                 Just call ->
@@ -884,19 +925,19 @@ bodySeeds env expr seeds =
                                         Just shapes ->
                                             addKindSeed
                                                 { kind = kind, shapes = shapes }
-                                                fromContainer
+                                                fromParams
 
                                         Nothing ->
-                                            fromContainer
+                                            fromParams
 
                                 _ ->
-                                    fromContainer
+                                    fromParams
 
                         Nothing ->
-                            fromContainer
+                            fromParams
 
                 Nothing ->
-                    fromContainer
+                    fromParams
     in
     Walk.foldExprChildren (bodySeeds env) fromKey expr
 

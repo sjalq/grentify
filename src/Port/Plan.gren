@@ -202,6 +202,11 @@ buildManifest options =
         |> Result.andThen
             (\dependencies ->
                 checkExposedModuleCollisions context options.portedManifests
+                    |> Result.andThen
+                        (\_ ->
+                            checkPlatformModuleCollisions context
+                                options.portedManifests
+                        )
                     |> Result.map (\_ -> dependencies)
             )
         |> Result.map
@@ -531,3 +536,118 @@ fromCompilerPlatform platform =
 
         CompilerPlatform.Node ->
             Mapping.Node
+
+
+{-| D91: refuse when an exposed module of this package is a module the MAPPED
+Gren package it will sit beside already provides.
+
+`arowM/html` is a drop-in replacement for `elm/html`: it exposes `Html`,
+`Html.Attributes`, `Html.Events`, `Html.Keyed` and `Html.Lazy`, and it depends
+on `elm/virtual-dom`, which maps to `gren-lang/browser` — the very package that
+provides those five names in Gren. The port emitted a package that could not
+coexist with its own platform dependency, and the collision only surfaced as a
+`gren docs` AMBIGUOUS MODULE NAME far downstream.
+
+Same law and same refusal as `checkExposedModuleCollisions`, one step further
+out: the colliding neighbour is a mapped platform package rather than a
+vendored one, so the module names come from the mapping catalog rather than a
+manifest. Positive evidence only — a name collides only when a mapping that
+targets a REACHABLE Gren package claims it.
+-}
+checkPlatformModuleCollisions : Context -> Dict String Manifest -> Result Error {}
+checkPlatformModuleCollisions context portedManifests =
+    let
+        -- Every Elm package the graph declares: ours plus each vendored
+        -- package's own edges. A mapped package is in the Gren graph exactly
+        -- when something in that set maps to it.
+        declaredElmPackages =
+            Dict.foldl
+                (\_ manifest found ->
+                    Dict.foldl (\name _ acc -> Dict.set name {} acc)
+                        found
+                        manifest.dependencies
+                )
+                (Dict.foldl (\name _ acc -> Dict.set name {} acc)
+                    Dict.empty
+                    context.source.dependencies
+                )
+                portedManifests
+
+        reachableGrenPackages =
+            Dict.foldl
+                (\elmName _ found ->
+                    when MappingRegistry.mappingFor elmName context.registry is
+                        Just mapping ->
+                            Dict.set (Mapping.mappingGrenPackage mapping) {} found
+
+                        Nothing ->
+                            found
+                )
+                Dict.empty
+                declaredElmPackages
+
+        -- Which module names those Gren packages provide, gathered across
+        -- EVERY mapping that targets them: `Html` belongs to
+        -- gren-lang/browser through the elm/html mapping whether or not this
+        -- package depends on elm/html.
+        providedModules =
+            Array.foldl
+                (\mapping found ->
+                    if Dict.member (Mapping.mappingGrenPackage mapping) reachableGrenPackages then
+                        Array.foldl
+                            (\moduleMapping acc ->
+                                Dict.set moduleMapping.target
+                                    (Mapping.mappingGrenPackage mapping)
+                                    acc
+                            )
+                            found
+                            (Mapping.mappingModules mapping)
+
+                    else
+                        found
+                )
+                Dict.empty
+                (MappingRegistry.packagesInOrder context.registry)
+
+        collision =
+            context.source.exposedModules
+                |> Array.map ModuleName.toGren
+                |> Array.mapAndKeepJust
+                    (\name ->
+                        Dict.get name providedModules
+                            |> Maybe.map (\owner -> { name = name, owner = owner })
+                    )
+                |> Array.first
+    in
+    when collision is
+        Nothing ->
+            Ok {}
+
+        Just { name = moduleName, owner = owner } ->
+            Err
+                (PortError.create "AMBIGUOUS_MODULE_NAME"
+                    (platformModuleMessage context.identity moduleName owner)
+                )
+
+
+platformModuleMessage : Identity -> String -> String -> String
+platformModuleMessage self moduleName grenPackage =
+    "Package "
+        ++ self.elmName
+        ++ " exposes the module `"
+        ++ moduleName
+        ++ "`, but the Gren package "
+        ++ grenPackage
+        ++ " already provides that name and is in this package's dependency "
+        ++ "graph. Gren forbids two packages in one graph from exposing the "
+        ++ "same module name, even when no module imports both. "
+        ++ "This is a language-level difference, not a porting bug: "
+        ++ self.elmName
+        ++ " is an alternative implementation of a module Gren ships in its "
+        ++ "platform packages, so the two cannot coexist. "
+        ++ "Automatic rename is refused for the same reasons as any other "
+        ++ "same-name collision — it would change a public API and is not a "
+        ++ "pure function of the module name alone. "
+        ++ "What you can do: use the Gren module directly instead of porting "
+        ++ "this package, since it provides the same interface; or fork the "
+        ++ "Elm package, rename the colliding modules there, and port the fork."

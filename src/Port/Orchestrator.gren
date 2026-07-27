@@ -42,6 +42,7 @@ import Resolve.Solver as Solver exposing (Resolution)
 import Port.PortedCache as PortedCache
 import Review.DependencyPins as DependencyPins
 import Review.ExtractCache as ExtractCache
+import Review.Protocol as Protocol
 import Review.Runner
 import Stream exposing (Writable)
 import Stream.Log
@@ -807,7 +808,13 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
                 logPhase context "transform" (PackageName.toString source.manifest.name)
                     |> Task.andThen
                         (\_ ->
-                            Pipeline.transform registry depMaps inputs.extraction inputs.sourceFiles
+                            let
+                                live =
+                                    dropUnreachableModules source.manifest
+                                        includeTests
+                                        inputs
+                            in
+                            Pipeline.transform registry depMaps live.extraction live.sourceFiles
                                 |> resultTask identity
                         )
             )
@@ -3264,3 +3271,121 @@ pruneUnreachableIn fileSystem stagedRoot directory =
                         )
                         (Task.succeed {})
             )
+
+
+{-| D105: drop the src modules the Elm compiler never builds.
+
+Elm compiles a package's EXPOSED modules and whatever they transitively
+import. Anything else under `src/` is dead code no `elm make` or
+`elm publish` ever looks at — and because nothing checks it, it can be
+outright uncompilable.
+
+`NoRedInk/elm-debug-controls-without-datepicker` ships
+`src/Controls/ComplexChoiceTest.elm`, a stray test file importing `Test`,
+`Expect` and `Test.Html.*`. Those come from `elm-explorations/test`, which
+the package declares as a TEST dependency — Elm rejects that import in
+`src/`, which is the proof it never compiles the file. The package publishes
+because nothing reaches it from `Debug.Control`. Our extractor reads every
+file, so the port refused the whole package over a module Elm ignores.
+
+D89 handled the neighbouring case (a file whose declared module name cannot
+match its path). This is the same principle under the reachability rule Elm
+actually uses, computed from evidence already in hand: the extraction states
+every module's imports.
+
+Modules are matched to source files by MODULE NAME, never by path: the
+extractor reports a path into the staging directory it reviewed, while the
+source files carry `src/…` relative to the package root. Matching those
+strings against each other silently keeps nothing.
+
+Applications are left alone — their entry is not `exposed-modules` — and so
+are test modules, which are reachable by a rule of their own.
+-}
+dropUnreachableModules :
+    Manifest
+    -> Bool
+    -> { extraction : Protocol.Extraction, sourceFiles : Array Pipeline.SourceFile }
+    -> { extraction : Protocol.Extraction, sourceFiles : Array Pipeline.SourceFile }
+dropUnreachableModules manifest includeTests inputs =
+    if
+        manifest.isApplication
+            || includeTests
+            || Array.isEmpty manifest.exposedModules
+    then
+        inputs
+
+    else
+        let
+            byName =
+                Array.foldl
+                    (\one found -> Dict.set one.moduleName one found)
+                    Dict.empty
+                    inputs.extraction.modules
+
+            reachable =
+                reachableFrom byName manifest.exposedModules Dict.empty
+
+            keptModules =
+                Array.keepIf
+                    (\one -> Dict.member one.moduleName reachable)
+                    inputs.extraction.modules
+
+            extraction =
+                inputs.extraction
+        in
+        -- Refuse to act unless every exposed module was actually found: a
+        -- reachability set that cannot see the package's own API is evidence
+        -- the names do not line up, not evidence the modules are dead.
+        if
+            Array.length keptModules
+                == Array.length inputs.extraction.modules
+                || not (Array.all (\name -> Dict.member name byName) manifest.exposedModules)
+        then
+            inputs
+
+        else
+            { extraction = { extraction | modules = keptModules }
+            , sourceFiles =
+                Array.keepIf
+                    (\file ->
+                        when pathModuleName file.path is
+                            Just name ->
+                                Dict.member name reachable
+
+                            Nothing ->
+                                True
+                    )
+                    inputs.sourceFiles
+            }
+
+
+{-| Transitive closure of `pending` over the package's own import edges. -}
+reachableFrom :
+    Dict String Protocol.ModuleExtraction
+    -> Array String
+    -> Dict String {}
+    -> Dict String {}
+reachableFrom byName pending found =
+    when Array.popFirst pending is
+        Nothing ->
+            found
+
+        Just { first = name, rest = rest } ->
+            if Dict.member name found then
+                reachableFrom byName rest found
+
+            else
+                let
+                    imports =
+                        when Dict.get name byName is
+                            Just one ->
+                                Array.keepIf
+                                    (\imported -> Dict.member imported byName)
+                                    one.importedModules
+
+                            Nothing ->
+                                []
+                in
+                reachableFrom byName
+                    (Array.append rest imports)
+                    (Dict.set name {} found)

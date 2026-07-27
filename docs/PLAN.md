@@ -2589,6 +2589,73 @@ as the evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-27 TOP 20% CLEAN — **388 PASS / 23 EXEMPT / 0 working failures of
+  411**. Every package in the top 20% of the registry by fan-in either ports
+  or is terminal with a stated reason. Was 376/18/17 when the surface was
+  first expanded this morning. Banked to `test/ecosystem/top20-run.json`.
+  Gates: tier 0 362, walker self-test 46, rule fixtures, format idempotence
+  82 modules at fixed point, add transaction, canary 14/14.
+
+  Terminal breakdown: 8 kernel:dep, 5 mapping-absent, 5
+  broken-upstream:unfetchable, 3 module-name-collision, 2
+  tuple-key-unrepresentable.
+- 2026-07-27 D95 CLOSED — `Set.insert k` unsaturated. Elm folds these
+  (`List.foldl (\{ indices } -> Set.insert indices) visited coplanar`), so the
+  container arrives from the fold. The operation table is keyed on exact
+  arity and had no entry, and totality treats an operation it cannot carry as
+  grounds to drop the kind whole — so one fold disabled every key rewrite in
+  w0rm/elm-physics' `initFacesHelp` while the signature's
+  `Set ( Int, Int, Int )` still rewrote. `OpEncodeKey 1` touches argument 1
+  only, so the container's absence changes nothing.
+- 2026-07-27 D96 CLOSED — two ways a tuple stayed invisible to TupleCompare.
+  Package type aliases are now expanded when deriving a shape (bounded
+  against cycles, zero-argument only, poisoned on a duplicate bare name), and
+  a declaration's return annotation types its own TAIL expressions —
+  `fplSymbols : FormulaPL -> List PSymb` whose body is
+  `List.sort <| Set.toList <| fplSymbolsAux f` has no other evidence at all.
+  Tails only, and only where the ordinary law found nothing.
+- 2026-07-27 D97 CLOSED — Dict/Set keys Gren cannot represent. Gren's
+  comparable universe is scalars and HOMOGENEOUS arrays, so
+  `Set ( String, List Int )` (logicus-pl) and `Set ( ModuleName, String )`
+  (elm-review-unused, `ModuleName = List String`) have no encoding at all;
+  rendering one half to String to unify the types is not order-preserving
+  (`"10" < "9"`), which is why `Codec.tupleShapes` refuses them. The port used
+  to emit `Set { first : …, second : … }` and let the compiler reject it
+  phases later with a message about records. Now refused at transform time,
+  naming the module, the container kind and the user's options; keys behind an
+  alias are expanded first. Eighth terminal state:
+  EXEMPT(tuple-key-unrepresentable).
+- 2026-07-27 D98 CLOSED — the review rule was O(n^2) in edits, and THAT was
+  the megamodule wall, not elm-syntax. `keepIfDisjoint` asked
+  `List.any (editsOverlap candidate) accepted` for every candidate;
+  elm-password-strength's 94k-line frequency list is ~93,000 tuples and a
+  quarter of a million edits, so ~10^10 comparisons. The edits are already
+  sorted by start, so a non-empty candidate overlaps iff `start < maxEnd` over
+  all accepted, and an insertion iff `start < maxEnd` over accepted starting
+  STRICTLY before it (an insertion at a non-empty edit's start is retained —
+  what `compareOuterFirst` orders them for). Two running maxima, O(n), same
+  accepted set. `mergeWithCoLocatedInsertion` stops at the first different
+  start. Extraction went from never-finishing to minutes.
+
+  D93's earlier reading of this as "elm-syntax parse cost, no fix available"
+  was wrong; the 55-minute measurement was real but attributed to the wrong
+  component. D93 stands on its own (a 1 MB package gets 25 minutes rather
+  than 10) but was not what this package needed.
+- 2026-07-27 D99 CLOSED — the printer emitted a line of 1,195,944 characters
+  (the whole `Dict.fromList [ … ]` table). Gren tracks columns in 16 bits,
+  saturates at 65,535, loses its place and reports UNFINISHED RECORD against
+  a perfectly well-formed record. The width guard that wraps oversized lists
+  existed but only fired when a declaration's body WAS a list; here it is an
+  application's argument. A printer must not emit lines the compiler cannot
+  address.
+- 2026-07-27 D99b CLOSED — D95 regressed ianmackenzie/elm-triangular-mesh.
+  The rewrite walk is bottom-up, so `edgeSet |> Set.insert (canonicalize i j)`
+  encoded the key once as a partial application and again when the pipe
+  saturated; `encode (encode k)` does not typecheck. Keyed pipes are now
+  saturated BEFORE descending, so the partial application is never a node in
+  its own right. Nothing is lost — `applyOperation` already rebuilt a pipe as
+  an application.
+
 - 2026-07-27 TOP-20% VALIDATED — clean full walk on the post-D93b build:
   **386 PASS / 21 EXEMPT / 4 working failures of 411** (93.9% pass; 99.0%
   passing-or-terminal). Was 376/18/17 before this campaign. Banked to

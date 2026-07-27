@@ -32,7 +32,11 @@ const BANNER = /^--\s+([A-Z][A-Z ']*[A-Z])\s+-+\s*(.*)$/;
 
 /** Tool-side refusal codes, most specific first. */
 const TOOL_CODES =
-  /\b(PORT_TIMEOUT|OUTPUT_FAILED|GREN_VERIFY_FAILED|GREN_MANIFEST_INVALID|EXTRACT_LOCK|EXTRACT_FAILED|AST_UNPORTED_[A-Z_]+|AST_DECODE_FAILED|UNSUPPORTED_[A-Z_]+|SOURCE_INVALID|SOURCE_MANIFEST_MISMATCH|SOURCE_CLONE_FAILED|ARCHIVE_INVALID|DOWNLOAD_FAILED|PACKAGE_NOT_FOUND|PROCESS_FAILED|NO_ELM_SOURCES|REVIEW_[A-Z_]+|ADD_[A-Z_]+|CACHE_[A-Z_]+)\b/;
+  // D89: `ELM_REVIEW_REPORT_INVALID` has no word boundary before REVIEW, so
+  // `REVIEW_[A-Z_]+` never matched it and elm-ethereum's real diagnosis —
+  // elm-review returning an empty extract — reached the ledger as a bare
+  // `unclassified:no-evidence`. Match the ELM_ and EXTRACT_ families whole.
+  /\b(PORT_TIMEOUT|OUTPUT_FAILED|AMBIGUOUS_MODULE_NAME|GREN_VERIFY_FAILED|GREN_MANIFEST_INVALID|ELM_[A-Z_]+|EXTRACT_[A-Z_]+|AST_UNPORTED_[A-Z_]+|AST_DECODE_FAILED|UNSUPPORTED_[A-Z_]+|SOURCE_INVALID|SOURCE_MANIFEST_MISMATCH|SOURCE_CLONE_FAILED|ARCHIVE_INVALID|DOWNLOAD_FAILED|PACKAGE_NOT_FOUND|PROCESS_FAILED|NO_ELM_SOURCES|REVIEW_[A-Z_]+|ADD_[A-Z_]+|CACHE_[A-Z_]+)\b/;
 
 /** Diagnostics the transform prints as prose, with no code in front of them. */
 const TOOL_PROSE = [

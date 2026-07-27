@@ -654,8 +654,9 @@ bindContainerPattern evidence pattern annotation env =
     when pattern is
         PatVar name ->
             when
-                Evidence.resolvedKeySlot evidence.tupleAliases
+                Evidence.resolvedContainerSlot evidence.tupleAliases
                     evidence.aliases
+                    evidence.containerAliases
                     annotation
             is
                 Just slot ->
@@ -821,8 +822,9 @@ annotationSeeds evidence annotation seeds =
     let
         self =
             when
-                Evidence.resolvedKeySlot evidence.tupleAliases
+                Evidence.resolvedContainerSlot evidence.tupleAliases
                     evidence.aliases
+                    evidence.containerAliases
                     annotation
             is
                 Just slot ->

@@ -1,10 +1,13 @@
 module Ast.TupleCompare exposing
     ( apply
     , ElemShape(..)
+    , PackageReturns
     , comparatorFor
     , flippedComparator
     , listElementShape
+    , noPackageReturns
     , returnListShape
+    , returnTupleShape
     , shapeOfTypeAnn
     )
 
@@ -83,22 +86,40 @@ type alias Env =
     , -- function key ("Module.fn" or bare local "fn") -> element shape of
       -- the list-of-tuples it RETURNS (frequencies-class evidence)
       returns : Dict String (Array ElemShape)
+    , -- D87: same key -> shape of the BARE tuple it returns
+      -- (`Time.Date.toTuple : Date -> ( Int, Int, Int )`)
+      bareReturns : Dict String (Array ElemShape)
     }
+
+
+{-| Cross-module return-shape evidence, keyed by Elm-qualified function name
+("List.Extra.frequencies"). `lists` holds functions returning a LIST of
+tuples; `tuples` holds functions returning a bare tuple.
+-}
+type alias PackageReturns =
+    { lists : Dict String (Array ElemShape)
+    , tuples : Dict String (Array ElemShape)
+    }
+
+
+noPackageReturns : PackageReturns
+noPackageReturns =
+    { lists = Dict.empty, tuples = Dict.empty }
 
 
 {-| `packageReturns` carries cross-module return-shape evidence keyed by the
 Elm-qualified function name ("List.Extra.frequencies"); same-file functions
 are indexed here from the file's own signatures (bare and self-qualified).
 -}
-apply : Dict String (Array ElemShape) -> File -> File
+apply : PackageReturns -> File -> File
 apply packageReturns file =
     let
-        returns =
+        indexOwn shapeOf seed =
             Array.foldl
                 (\declaration acc ->
                     when declaration is
                         DeclFunction { name = name, signature = Just sig } ->
-                            when returnListShape sig.typeAnnotation is
+                            when shapeOf sig.typeAnnotation is
                                 Just shape ->
                                     acc
                                         |> Dict.set name shape
@@ -110,8 +131,13 @@ apply packageReturns file =
                         _ ->
                             acc
                 )
-                packageReturns
+                seed
                 file.declarations
+
+        returns =
+            { lists = indexOwn returnListShape packageReturns.lists
+            , tuples = indexOwn returnTupleShape packageReturns.tuples
+            }
     in
     { file
         | declarations = Array.map (applyDeclaration returns) file.declarations
@@ -129,7 +155,22 @@ returnListShape annotation =
             listElementShape annotation
 
 
-applyDeclaration : Dict String (Array ElemShape) -> Declaration -> Declaration
+{-| D87: shape of the BARE tuple at the END of a signature's spine, the
+counterpart of `returnListShape`. Evidence of the same kind and the same
+strength: the Elm source declared the return type, so a call to the
+function is a tuple, full stop.
+-}
+returnTupleShape : TypeAnn -> Maybe (Array ElemShape)
+returnTupleShape annotation =
+    when annotation is
+        TypeFunction { right = right } ->
+            returnTupleShape right
+
+        _ ->
+            shapeOfTypeAnn annotation
+
+
+applyDeclaration : PackageReturns -> Declaration -> Declaration
 applyDeclaration returns declaration =
     when declaration is
         DeclFunction fn ->
@@ -148,11 +189,15 @@ each `PatVar` whose positional type is a tuple (or list of tuples) enters
 the evidence environment. Elm forbids shadowing, so one name maps to one
 binding for the whole declaration.
 -}
-envFromSignature : Dict String (Array ElemShape) -> Maybe { name : String, typeAnnotation : TypeAnn } -> Array Pattern -> Env
+envFromSignature : PackageReturns -> Maybe { name : String, typeAnnotation : TypeAnn } -> Array Pattern -> Env
 envFromSignature returns signature arguments =
     let
         empty =
-            { tupleVars = Dict.empty, listVars = Dict.empty, returns = returns }
+            { tupleVars = Dict.empty
+            , listVars = Dict.empty
+            , returns = returns.lists
+            , bareReturns = returns.tuples
+            }
     in
     when signature is
         Nothing ->
@@ -257,6 +302,27 @@ shapeOfExpr env expr =
         ExprVar { moduleName = Nothing, name = name } ->
             Dict.get name env.tupleVars
 
+        -- D87: a saturated call to a package function whose signature returns
+        -- a bare tuple. `Time.Date.compare d1 d2 = compare (toTuple d1)
+        -- (toTuple d2)` gives the comparison no other evidence to stand on.
+        ExprApplication parts ->
+            when Array.get 0 parts is
+                Just (ExprVar ref) ->
+                    if Array.length parts >= 2 then
+                        Dict.get (refKey ref) env.bareReturns
+
+                    else
+                        Nothing
+
+                _ ->
+                    Nothing
+
+        ExprBinop { operator = "|>", left = left, right = right } ->
+            shapeOfExpr env (pipeAsApplication right left)
+
+        ExprBinop { operator = "<|", left = left, right = right } ->
+            shapeOfExpr env (pipeAsApplication left right)
+
         _ ->
             Nothing
 
@@ -336,10 +402,58 @@ projectionShape : Env -> Expr -> Maybe (Array ElemShape)
 projectionShape env expr =
     when expr is
         ExprLambda { expression = body } ->
-            shapeOfExpr env body
+            tailShapeOfExpr env body
 
         _ ->
             Nothing
+
+
+{-| D87: shape of an expression read through its TAIL positions.
+
+A sort key is rarely a bare tuple literal. `Csv.Decode`'s projection is a
+`when` over the error type whose every arm yields a triple, and Elm's own
+typing forces all arms to the same type — so if every arm is provably a
+tuple of the same shape, the expression is that tuple, with no guessing.
+
+Branches that disagree, or any branch with no tuple evidence, yield
+nothing: an unprovable arm means the whole projection stays untouched.
+-}
+tailShapeOfExpr : Env -> Expr -> Maybe (Array ElemShape)
+tailShapeOfExpr env expr =
+    when expr is
+        ExprCase { cases = cases } ->
+            agreeingShape
+                (Array.map (\arm -> tailShapeOfExpr env arm.body) cases)
+
+        ExprIf { then_ = then_, else_ = else_ } ->
+            agreeingShape
+                [ tailShapeOfExpr env then_, tailShapeOfExpr env else_ ]
+
+        ExprLet { expression = body } ->
+            tailShapeOfExpr env body
+
+        _ ->
+            shapeOfExpr env expr
+
+
+{-| The single shape every branch agrees on, or nothing. An empty branch
+set proves nothing and is refused too.
+-}
+agreeingShape : Array (Maybe (Array ElemShape)) -> Maybe (Array ElemShape)
+agreeingShape branches =
+    when Array.popFirst branches is
+        Nothing ->
+            Nothing
+
+        Just { first = Nothing } ->
+            Nothing
+
+        Just { first = Just shape, rest = rest } ->
+            if Array.all (\branch -> branch == Just shape) rest then
+                Just shape
+
+            else
+                Nothing
 
 -- REWRITE ---------------------------------------------------------------------
 
@@ -371,7 +485,11 @@ rewriteLetDecl env declaration =
             let
                 bodyEnv =
                     mergeEnv env
-                        (envFromSignature env.returns fn.signature fn.arguments)
+                        (envFromSignature
+                            { lists = env.returns, tuples = env.bareReturns }
+                            fn.signature
+                            fn.arguments
+                        )
             in
             LetFunction
                 { fn
@@ -386,12 +504,13 @@ rewriteLetDecl env declaration =
                 }
 
 
-{-| Overlay inner env bindings on outer; returns map is shared. -}
+{-| Overlay inner env bindings on outer; returns maps are shared. -}
 mergeEnv : Env -> Env -> Env
 mergeEnv outer inner =
     { tupleVars = Dict.foldl Dict.set outer.tupleVars inner.tupleVars
     , listVars = Dict.foldl Dict.set outer.listVars inner.listVars
     , returns = outer.returns
+    , bareReturns = outer.bareReturns
     }
 
 
@@ -425,6 +544,16 @@ rewriteNode env expr =
                 Nothing ->
                     expr
 
+        -- D87: the PARTIALLY APPLIED pipe, `xs |> List.sortBy f`. Only the
+        -- bare-reference form above was routed to the rewriter, so every
+        -- sortBy written in pipe style went unexamined however plain its
+        -- projection was (elm-review-mini's key is a literal tuple).
+        ExprBinop { operator = "|>", left = left, right = ExprApplication parts } ->
+            pipedPartialRewrite env parts left expr
+
+        ExprBinop { operator = "<|", left = ExprApplication parts, right = right } ->
+            pipedPartialRewrite env parts right expr
+
         ExprBinop { operator = operator, left = left, right = right } ->
             when orderBinop operator is
                 Nothing ->
@@ -441,6 +570,37 @@ rewriteNode env expr =
 
         _ ->
             expr
+
+
+{-| D87: saturate a piped partial application and offer it to the ordinary
+call rewriters. The pipe is only unwound when a rewrite actually fires —
+an untouched call keeps the author's pipe style.
+-}
+pipedPartialRewrite : Env -> Array Expr -> Expr -> Expr -> Expr
+pipedPartialRewrite env parts argument original =
+    let
+        saturatedParts =
+            Array.pushLast argument parts
+
+        saturated =
+            ExprApplication saturatedParts
+
+        keepIfRewritten rewritten =
+            if rewritten == saturated then
+                original
+
+            else
+                rewritten
+    in
+    when { fn = Array.get 0 parts, arity = Array.length saturatedParts } is
+        { fn = Just (ExprVar ref), arity = 2 } ->
+            keepIfRewritten (rewriteUnaryListCall env ref saturatedParts saturated)
+
+        { fn = Just (ExprVar ref), arity = 3 } ->
+            keepIfRewritten (rewriteBinaryCall env ref saturatedParts saturated)
+
+        _ ->
+            original
 
 
 {-| `xs |> List.sort` / `List.sort <| xs` family. The rewrite result is the
@@ -485,7 +645,31 @@ rewriteUnaryListCall env ref parts original =
             original
 
         Just listArg ->
-            when listShapeOfExpr env listArg is
+            if isListFn ref "sortBy" then
+                -- D87: `List.sortBy f` UNSATURATED. elm-csv composes it with
+                -- `>>` and never applies a list, so the saturated rewriter
+                -- below never sees it. `sortWith cmp` has the same
+                -- `List a -> List a` type as `sortBy f`, so the partial form
+                -- substitutes cleanly wherever the author used it.
+                when projectionShape env listArg is
+                    Nothing ->
+                        original
+
+                    Just shape ->
+                        ExprApplication
+                            [ listVar "sortWith"
+                            , ExprLambda
+                                { arguments = [ PatVar "d24ByL", PatVar "d24ByR" ]
+                                , expression =
+                                    applyComparator shape
+                                        0
+                                        (ExprApplication [ listArg, bareVar "d24ByL" ])
+                                        (ExprApplication [ listArg, bareVar "d24ByR" ])
+                                }
+                            ]
+
+            else
+                when listShapeOfExpr env listArg is
                 Nothing ->
                     original
 

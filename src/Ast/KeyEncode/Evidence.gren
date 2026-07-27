@@ -8,6 +8,7 @@ module Ast.KeyEncode.Evidence exposing
     , inlineSlot
     , isEmpty
     , kindOfRef
+    , resolvedContainerSlot
     , resolvedKeySlot
     , returnedAliasName
     )
@@ -79,6 +80,9 @@ type alias Evidence =
       tupleReturns : Dict String (Array KeyShape)
     , -- R3: package function -> the keyed container its signature returns
       containerReturns : Dict String Slot
+    , -- D88: alias name -> the keyed container its BODY is
+      -- (`type alias State = Dict ( Int, Int ) Cell`)
+      containerAliases : Dict String Slot
     }
 
 
@@ -89,6 +93,7 @@ empty =
     , keyFields = Dict.empty
     , tupleReturns = Dict.empty
     , containerReturns = Dict.empty
+    , containerAliases = Dict.empty
     }
 
 
@@ -102,6 +107,7 @@ isEmpty evidence =
         && Dict.isEmpty evidence.keyFields
         && Dict.isEmpty evidence.tupleReturns
         && Dict.isEmpty evidence.containerReturns
+        && Dict.isEmpty evidence.containerAliases
 
 
 
@@ -176,6 +182,36 @@ resolvedKeySlot tupleAliases r1Eligible annotation =
                     Nothing
 
 
+{-| D88: `resolvedKeySlot`, plus the case where the annotation is not a
+Dict/Set node at all but a package alias FOR one
+(`type alias State = Dict ( Int, Int ) Cell`). A type alias is its body,
+so a `State`-typed argument is that container as surely as a spelled-out
+one. Bare-name lookup, already poisoned on ambiguity.
+
+The alias DECLARATION is deliberately not resolved through here: its body
+is a real Dict/Set node and rewrites under the inline law, which is what
+makes every use of the name follow.
+-}
+resolvedContainerSlot :
+    Dict String AliasInfo
+    -> Dict String AliasInfo
+    -> Dict String Slot
+    -> TypeAnn
+    -> Maybe Slot
+resolvedContainerSlot tupleAliases r1Eligible containerAliases annotation =
+    when resolvedKeySlot tupleAliases r1Eligible annotation is
+        Just slot ->
+            Just slot
+
+        Nothing ->
+            when annotation is
+                TypeTyped { ref = ref, arguments = [] } ->
+                    Dict.get ref.name containerAliases
+
+                _ ->
+                    Nothing
+
+
 isDictRef : NamedRef -> Bool
 isDictRef ref =
     ref.name == "Dict" && (ref.moduleName == Nothing || ref.moduleName == Just "Dict")
@@ -232,6 +268,9 @@ collect files =
         destructured =
             destructuredAliasNames candidates files
 
+        containerAliases =
+            collectContainerAliases candidates eligible files
+
         eligible =
             Dict.foldl
                 (\name info acc ->
@@ -261,8 +300,62 @@ collect files =
     , keyFields = collectKeyFields candidates eligible files
     , tupleReturns = collectSignatureReturns tupleReturnShapes files
     , containerReturns =
-        collectSignatureReturns (containerReturnSlot candidates eligible) files
+        collectSignatureReturns
+            (containerReturnSlot candidates eligible containerAliases)
+            files
+    , containerAliases = containerAliases
     }
+
+
+{-| D88: aliases whose BODY is a tuple-keyed container.
+
+`indicatrix/elm-input-extra` writes `type alias State = Dict ( Int, Int )
+Cell` and then types every signature `State`, so R2's inline law never
+sees a `Dict` node and R2b's key-alias law has no tuple alias to follow.
+The alias body states the slot outright; every occurrence of the name is
+that container, because a type alias is its body.
+
+Same poisoning discipline as the tuple aliases: one bare name package-wide
+or the name is dropped.
+-}
+collectContainerAliases :
+    Dict String AliasInfo
+    -> Dict String AliasInfo
+    -> Array File
+    -> Dict String Slot
+collectContainerAliases tupleAliases r1Eligible files =
+    Array.foldl
+        (\file acc ->
+            Array.foldl
+                (\declaration inner ->
+                    when declaration is
+                        DeclAlias { name = name, generics = [], typeAnnotation = body } ->
+                            when resolvedKeySlot tupleAliases r1Eligible body is
+                                Just slot ->
+                                    Dict.update name
+                                        (\existing ->
+                                            when existing is
+                                                Nothing ->
+                                                    Just (Just slot)
+
+                                                Just _ ->
+                                                    -- duplicate name: poison
+                                                    Just Nothing
+                                        )
+                                        inner
+
+                                Nothing ->
+                                    inner
+
+                        _ ->
+                            inner
+                )
+                acc
+                file.declarations
+        )
+        Dict.empty
+        files
+        |> keepUnpoisoned
 
 
 {-| Aliases whose body is a tuple of encodable elements. Name collisions
@@ -847,7 +940,11 @@ tupleReturnShapes annotation =
 containerReturnSlot :
     Dict String AliasInfo
     -> Dict String AliasInfo
+    -> Dict String Slot
     -> TypeAnn
     -> Maybe Slot
-containerReturnSlot tupleAliases r1Eligible annotation =
-    resolvedKeySlot tupleAliases r1Eligible annotation
+containerReturnSlot tupleAliases r1Eligible containerAliases annotation =
+    -- D88: a function may return the container by its alias name
+    -- (`calcGrid : List String -> List String -> State`), which is exactly
+    -- as conclusive as returning the spelled-out Dict.
+    resolvedContainerSlot tupleAliases r1Eligible containerAliases annotation

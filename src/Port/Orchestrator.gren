@@ -603,6 +603,10 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
                             temporary
                             |> Task.andThen
                                 (\_ ->
+                                    pruneUnreachableModules permissions.fileSystem temporary
+                                )
+                            |> Task.andThen
+                                (\_ ->
                                     pinStagedElmJson permissions.fileSystem pins temporary
                                 )
                             |> Task.andThen (\_ -> runReviewAt temporary)
@@ -976,10 +980,17 @@ readSources permission packageSource includeTests =
                                         System.File.readText permission filename
                                             |> Task.map
                                                 (\contents ->
-                                                    Array.pushLast
-                                                        { path = relative
-                                                        , source = contents
-                                                        }
+                                                    -- D89: the pipeline must see exactly the
+                                                    -- files elm-review extracted, so the same
+                                                    -- reachability rule applies here.
+                                                    if isReachableModule relative contents then
+                                                        Array.pushLast
+                                                            { path = relative
+                                                            , source = contents
+                                                            }
+                                                            sources
+
+                                                    else
                                                         sources
                                                 )
                                     )
@@ -2943,3 +2954,150 @@ uniqueAppendModules base extra =
         )
         base
         extra
+
+
+{-| D89: the module name a file at `relative` would have to declare.
+
+Elm resolves a module name to exactly one path under a source directory,
+so `src/Eth/Sentry/Event.elm` can only ever be `Eth.Sentry.Event`.
+-}
+pathModuleName : String -> Maybe String
+pathModuleName relative =
+    let
+        segments =
+            String.split "/" relative
+    in
+    when Array.popFirst segments is
+        Just { first = root, rest = rest } ->
+            if (root == "src" || root == "tests") && not (Array.isEmpty rest) then
+                let
+                    joined =
+                        String.join "." rest
+                in
+                if String.endsWith ".elm" joined then
+                    Just (String.dropLast 4 joined)
+
+                else
+                    Nothing
+
+            else
+                Nothing
+
+        Nothing ->
+            Nothing
+
+
+{-| The module name a source file declares, if it declares one. -}
+declaredModuleName : String -> Maybe String
+declaredModuleName source =
+    String.lines source
+        |> Array.mapAndKeepJust
+            (\line ->
+                let
+                    trimmed =
+                        String.trimLeft line
+
+                    afterKeyword =
+                        if String.startsWith "port module " trimmed then
+                            Just (String.dropFirst 12 trimmed)
+
+                        else if String.startsWith "effect module " trimmed then
+                            Just (String.dropFirst 14 trimmed)
+
+                        else if String.startsWith "module " trimmed then
+                            Just (String.dropFirst 7 trimmed)
+
+                        else
+                            Nothing
+                in
+                afterKeyword
+                    |> Maybe.andThen
+                        (\rest -> Array.first (String.words rest))
+            )
+        |> Array.first
+
+
+{-| D89: is this file one the Elm compiler could ever load?
+
+`cmditch/elm-ethereum` ships `src/Eth/Sentry/OldEventWS.elm` declaring
+`module Eth.Sentry.Event`, duplicating the real `Eth/Sentry/Event.elm`.
+Elm publishes and compiles the package fine — it only ever loads a module
+by resolving its name to the matching path, so the stale file is dead
+code. elm-review reads every `.elm` file under the source directories
+instead, finds two modules with one name, and refuses the whole project
+with "Incorrect project" and an empty extract — which reached us only as
+an unclassified exit-1.
+
+A file whose declared name disagrees with its path is unreachable by
+construction, so dropping it cannot change what the package means. Files
+that declare nothing recognisable are kept: absent evidence is not
+evidence of deadness.
+-}
+isReachableModule : String -> String -> Bool
+isReachableModule relative source =
+    when { path = pathModuleName relative, declared = declaredModuleName source } is
+        { path = Just expected, declared = Just actual } ->
+            expected == actual
+
+        _ ->
+            True
+
+
+{-| D89: delete the staged files elm-review would choke on (see
+`isReachableModule`). Only the staged copy is touched — the shared
+registry tree is never written to.
+-}
+pruneUnreachableModules : FileSystem.Permission -> Path -> Task Error {}
+pruneUnreachableModules fileSystem stagedRoot =
+    [ "src", "tests" ]
+        |> Array.foldl
+            (\directory pending ->
+                pending
+                    |> Task.andThen
+                        (\_ ->
+                            pruneUnreachableIn fileSystem stagedRoot
+                                (Path.join [ stagedRoot, Path.fromPosixString directory ])
+                        )
+            )
+            (Task.succeed {})
+
+
+pruneUnreachableIn : FileSystem.Permission -> Path -> Path -> Task Error {}
+pruneUnreachableIn fileSystem stagedRoot directory =
+    System.File.listFilesRecursively fileSystem directory
+        |> Task.onError (\_ -> Task.succeed [])
+        |> Task.andThen
+            (\allFiles ->
+                allFiles
+                    |> Array.keepIf (\file -> String.toLower file.extension == "elm")
+                    |> Array.foldl
+                        (\file pending ->
+                            pending
+                                |> Task.andThen
+                                    (\_ ->
+                                        when relativeSourcePath stagedRoot file is
+                                            Err _ ->
+                                                Task.succeed {}
+
+                                            Ok relative ->
+                                                System.File.readText fileSystem file
+                                                    |> Task.onError (\_ -> Task.succeed "")
+                                                    |> Task.andThen
+                                                        (\contents ->
+                                                            if
+                                                                String.isEmpty contents
+                                                                    || isReachableModule relative contents
+                                                            then
+                                                                Task.succeed {}
+
+                                                            else
+                                                                FileSystem.remove fileSystem
+                                                                    { recursive = False }
+                                                                    file
+                                                                    |> Task.map (\_ -> {})
+                                                                    |> Task.onError (\_ -> Task.succeed {})
+                                                        )
+                                    )
+                        )
+                        (Task.succeed {})
+            )

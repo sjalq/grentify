@@ -9,7 +9,7 @@ Elm's lexicographic tuple ordering (the behavior D24 lost).
 
 import Array exposing ( Array )
 import Ast.Eval as Eval exposing ( Outcome(..), Value(..) )
-import Ast.TupleCompare as TupleCompare exposing ( ElemShape(..) )
+import Ast.TupleCompare as TupleCompare exposing ( ElemShape(..), noPackageReturns )
 import Ast.Types exposing
     ( Declaration(..)
     , Expr(..)
@@ -43,6 +43,11 @@ tests =
     , rewritesSortWithFlippedCompareOnCons
     , sortWithCustomComparatorUntouched
     , flippedComparatorOrdersLikeFlipCompare
+    , rewritesCompareOnBareTupleReturn
+    , rewritesSortByWhoseArmsAllYieldTuples
+    , noRewriteWhenOneArmIsUnproven
+    , rewritesUnsaturatedSortBy
+    , rewritesPipedPartialSortBy
     ]
 
 
@@ -131,7 +136,7 @@ rewritesAnnotatedSort =
                 [ PatVar "pairs" ]
                 (listSort pairsVar)
     in
-    when subjectBody (TupleCompare.apply Dict.empty file) is
+    when subjectBody (TupleCompare.apply TupleCompare.noPackageReturns file) is
         Just (ExprApplication [ ExprVar { moduleName = Just "List", name = "sortWith" }, ExprLambda _, ExprVar { name = "pairs" } ]) ->
             ok "rewritesAnnotatedSort"
 
@@ -149,7 +154,7 @@ noRewriteWithoutEvidence =
         file =
             fileWith Nothing [ PatVar "xs" ] body
     in
-    when subjectBody (TupleCompare.apply Dict.empty file) is
+    when subjectBody (TupleCompare.apply TupleCompare.noPackageReturns file) is
         Just (ExprApplication [ ExprVar { name = "sort" }, ExprVar { name = "xs" } ]) ->
             ok "noRewriteWithoutEvidence"
 
@@ -181,7 +186,7 @@ rewritesSortByProjection =
                     ]
                 )
     in
-    when subjectBody (TupleCompare.apply Dict.empty file) is
+    when subjectBody (TupleCompare.apply TupleCompare.noPackageReturns file) is
         Just (ExprApplication [ ExprVar { name = "sortWith" }, ExprLambda _, ExprVar { name = "xs" } ]) ->
             ok "rewritesSortByProjection"
 
@@ -216,7 +221,7 @@ rewritesOrderBinop =
                     }
                 )
     in
-    when subjectBody (TupleCompare.apply Dict.empty file) is
+    when subjectBody (TupleCompare.apply TupleCompare.noPackageReturns file) is
         Just (ExprBinop { operator = "==", left = ExprApplication _, right = ExprVar { name = "LT" } }) ->
             ok "rewritesOrderBinop"
 
@@ -230,7 +235,9 @@ rewritesPipedSortViaReturnShape : Check
 rewritesPipedSortViaReturnShape =
     let
         index =
-            Dict.set "Helpers.freq" [ Prim, Prim ] Dict.empty
+            { noPackageReturns
+                | lists = Dict.set "Helpers.freq" [ Prim, Prim ] Dict.empty
+            }
 
         body =
             ExprBinop
@@ -289,7 +296,7 @@ rewritesSortWithFlippedCompareOnCons =
                     ]
                 )
     in
-    when subjectBody (TupleCompare.apply Dict.empty file) is
+    when subjectBody (TupleCompare.apply TupleCompare.noPackageReturns file) is
         Just
             (ExprApplication
                 [ ExprVar { name = "sortWith" }
@@ -341,7 +348,7 @@ sortWithCustomComparatorUntouched =
                     ]
                 )
     in
-    when subjectBody (TupleCompare.apply Dict.empty file) is
+    when subjectBody (TupleCompare.apply TupleCompare.noPackageReturns file) is
         Just (ExprApplication [ _, ExprLambda { expression = ExprApplication [ _, ExprAccess _, _ ] }, _ ]) ->
             ok "sortWithCustomComparatorUntouched"
 
@@ -440,3 +447,165 @@ comparatorNestedTuple =
     evalToOrder "comparatorNestedTuple"
         (compareWith nestedShape (value "a") (value "b"))
         "LT"
+
+
+-- D87 -------------------------------------------------------------------------
+
+
+{-| `compare (toTuple a) (toTuple b)` where the only evidence is that the
+package function `toTuple` is annotated to return a bare tuple.
+-}
+rewritesCompareOnBareTupleReturn : Check
+rewritesCompareOnBareTupleReturn =
+    let
+        index =
+            { noPackageReturns
+                | tuples = Dict.set "Time.Date.toTuple" [ Prim, Prim, Prim ] Dict.empty
+            }
+
+        call name =
+            ExprApplication
+                [ ExprVar { moduleName = Just "Time.Date", name = "toTuple" }
+                , ExprVar { moduleName = Nothing, name = name }
+                ]
+
+        file =
+            fileWith Nothing
+                [ PatVar "d1", PatVar "d2" ]
+                (ExprApplication
+                    [ ExprVar { moduleName = Just "Basics", name = "compare" }
+                    , call "d1"
+                    , call "d2"
+                    ]
+                )
+    in
+    when subjectBody (TupleCompare.apply index file) is
+        Just (ExprApplication [ ExprLambda _, ExprApplication _, ExprApplication _ ]) ->
+            ok "rewritesCompareOnBareTupleReturn"
+
+        other ->
+            fail "rewritesCompareOnBareTupleReturn" ("got: " ++ Debug.toString other)
+
+
+caseProjection : Array Expr -> Expr
+caseProjection arms =
+    ExprLambda
+        { arguments = [ PatVar "err" ]
+        , expression =
+            ExprCase
+                { expression = ExprVar { moduleName = Nothing, name = "err" }
+                , cases =
+                    Array.indexedMap
+                        (\index body -> { pattern = PatVar ("a" ++ String.fromInt index), body = body })
+                        arms
+                }
+        }
+
+
+{-| elm-csv: a sortBy key whose every `when` arm is a tuple of one shape. -}
+rewritesSortByWhoseArmsAllYieldTuples : Check
+rewritesSortByWhoseArmsAllYieldTuples =
+    let
+        file =
+            fileWith Nothing
+                [ PatVar "xs" ]
+                (ExprApplication
+                    [ ExprVar { moduleName = Just "List", name = "sortBy" }
+                    , caseProjection
+                        [ ExprTuple [ ExprInt 1, ExprString "" ]
+                        , ExprTuple [ ExprInt 2, ExprString "b" ]
+                        ]
+                    , ExprVar { moduleName = Nothing, name = "xs" }
+                    ]
+                )
+    in
+    when subjectBody (TupleCompare.apply noPackageReturns file) is
+        Just (ExprApplication [ ExprVar { name = "sortWith" }, ExprLambda _, ExprVar { name = "xs" } ]) ->
+            ok "rewritesSortByWhoseArmsAllYieldTuples"
+
+        other ->
+            fail "rewritesSortByWhoseArmsAllYieldTuples" ("got: " ++ Debug.toString other)
+
+
+{-| One arm with no tuple evidence refuses the whole projection. -}
+noRewriteWhenOneArmIsUnproven : Check
+noRewriteWhenOneArmIsUnproven =
+    let
+        file =
+            fileWith Nothing
+                [ PatVar "xs" ]
+                (ExprApplication
+                    [ ExprVar { moduleName = Just "List", name = "sortBy" }
+                    , caseProjection
+                        [ ExprTuple [ ExprInt 1, ExprString "" ]
+                        , ExprVar { moduleName = Nothing, name = "unknown" }
+                        ]
+                    , ExprVar { moduleName = Nothing, name = "xs" }
+                    ]
+                )
+    in
+    when subjectBody (TupleCompare.apply noPackageReturns file) is
+        Just (ExprApplication [ ExprVar { name = "sortBy" }, ExprLambda _, ExprVar { name = "xs" } ]) ->
+            ok "noRewriteWhenOneArmIsUnproven"
+
+        other ->
+            fail "noRewriteWhenOneArmIsUnproven" ("got: " ++ Debug.toString other)
+
+
+tupleKeyLambda : Expr
+tupleKeyLambda =
+    ExprLambda
+        { arguments = [ PatVar "r" ]
+        , expression =
+            ExprTuple
+                [ ExprAccess { record = ExprVar { moduleName = Nothing, name = "r" }, field = "a" }
+                , ExprAccess { record = ExprVar { moduleName = Nothing, name = "r" }, field = "b" }
+                ]
+        }
+
+
+{-| `List.sortBy f` with no list applied (elm-csv composes it with `>>`). -}
+rewritesUnsaturatedSortBy : Check
+rewritesUnsaturatedSortBy =
+    let
+        file =
+            fileWith Nothing
+                []
+                (ExprApplication
+                    [ ExprVar { moduleName = Just "List", name = "sortBy" }
+                    , tupleKeyLambda
+                    ]
+                )
+    in
+    when subjectBody (TupleCompare.apply noPackageReturns file) is
+        Just (ExprApplication [ ExprVar { name = "sortWith" }, ExprLambda _ ]) ->
+            ok "rewritesUnsaturatedSortBy"
+
+        other ->
+            fail "rewritesUnsaturatedSortBy" ("got: " ++ Debug.toString other)
+
+
+{-| `xs |> List.sortBy f` — the piped partial application. -}
+rewritesPipedPartialSortBy : Check
+rewritesPipedPartialSortBy =
+    let
+        file =
+            fileWith Nothing
+                [ PatVar "xs" ]
+                (ExprBinop
+                    { operator = "|>"
+                    , left = ExprVar { moduleName = Nothing, name = "xs" }
+                    , right =
+                        ExprApplication
+                            [ ExprVar { moduleName = Just "List", name = "sortBy" }
+                            , tupleKeyLambda
+                            ]
+                    }
+                )
+    in
+    when subjectBody (TupleCompare.apply noPackageReturns file) is
+        Just (ExprApplication [ ExprVar { name = "sortWith" }, ExprLambda _, ExprVar { name = "xs" } ]) ->
+            ok "rewritesPipedPartialSortBy"
+
+        other ->
+            fail "rewritesPipedPartialSortBy" ("got: " ++ Debug.toString other)

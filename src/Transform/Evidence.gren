@@ -26,7 +26,7 @@ import Ast.MatchCompile as MatchCompile
 import Ast.NameSub as NameSub
 import Ast.RecordAlias as RecordAlias
 import Ast.TupleCompare as TupleCompare
-import Ast.Types exposing (Declaration(..), File)
+import Ast.Types exposing (Declaration(..), File, TypeAnn)
 import Dict exposing (Dict)
 import Mapping.Registry as Registry
 import Mapping.Types exposing (Registry)
@@ -45,7 +45,7 @@ type alias DependencyEvidence =
 
 
 type alias PackageEvidence =
-    { tupleReturns : Dict String (Array TupleCompare.ElemShape)
+    { tupleReturns : TupleCompare.PackageReturns
     , constructorHomes : CtorHome.Homes
     , keyEvidence : KeyEncode.Evidence
     , recordAliases : Dict String (Array String)
@@ -243,20 +243,25 @@ decodeFiles modules =
         modules
 
 
-collectTupleReturns :
-    Array File
-    -> Dict String (Array TupleCompare.ElemShape)
+collectTupleReturns : Array File -> TupleCompare.PackageReturns
 collectTupleReturns files =
+    { lists = collectReturnShapes TupleCompare.returnListShape files
+    , tuples = collectReturnShapes TupleCompare.returnTupleShape files
+    }
+
+
+collectReturnShapes :
+    (TypeAnn -> Maybe (Array TupleCompare.ElemShape))
+    -> Array File
+    -> Dict String (Array TupleCompare.ElemShape)
+collectReturnShapes shapeOf files =
     Array.foldl
         (\file found ->
             Array.foldl
                 (\declaration current ->
                     when declaration is
                         DeclFunction { name = name, signature = Just signature } ->
-                            when
-                                TupleCompare.returnListShape
-                                    signature.typeAnnotation
-                            is
+                            when shapeOf signature.typeAnnotation is
                                 Just shape ->
                                     Dict.set
                                         (file.moduleDefinition.moduleName

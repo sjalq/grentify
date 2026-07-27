@@ -13,6 +13,7 @@ const {
   collapse,
   joinCtorPayloads,
   joinSplitDefinitionHeaders,
+  joinTypeHeaders,
 } = require("../../tools/gren-format/collapse-record-patterns.cjs");
 
 let failed = 0;
@@ -515,6 +516,59 @@ check("D82 joinSplitDefinitionHeaders still joins same-indent multi-Cons header"
     ),
     "same-indent header pieces must still join:\n" + out,
   );
+});
+
+check("D86 joinSplitDefinitionHeaders closes a bracket left open by a deeper wrap", () => {
+  // jonathanfishbein1/linear-algebra Matrix.nullSpace: gren-format wraps the
+  // nested destructuring pattern onto three lines, the last one deeper than
+  // the binding column. Stopping there left `(Field.Field …` unclosed.
+  const src = [
+    "    let",
+    "        (Field.Field",
+    "        (CommutativeDivisionRing.CommutativeDivisionRing",
+    "            commutativeDivisionRing)) =",
+    "            innerProductSpace.vectorSpace.field",
+    "",
+  ].join("\n");
+  const out = joinSplitDefinitionHeaders(src);
+  assert.ok(
+    out.includes(
+      "        (Field.Field (CommutativeDivisionRing.CommutativeDivisionRing commutativeDivisionRing)) =",
+    ),
+    "pattern must rejoin onto one balanced line:\n" + out,
+  );
+  assert.ok(
+    out.includes("            innerProductSpace.vectorSpace.field"),
+    "binding body must survive:\n" + out,
+  );
+});
+
+check("D86 joinSplitDefinitionHeaders leaves a deeper body line alone", () => {
+  // The relaxation is scoped to unbalanced headers: once the brackets close,
+  // a deeper next line is the body and must not be swallowed.
+  const src = ["    (Matrix rows) =", "        Array.length rows", ""].join("\n");
+  assert.strictEqual(joinSplitDefinitionHeaders(src), src);
+});
+
+check("D86 joinTypeHeaders rejoins a type alias whose `=` was parked alone", () => {
+  // linsyking/messenger-core Messenger.GeneralModel: every type variable fits,
+  // only the `=` wraps, so TYPE_VAR_LINE matched nothing and the header stayed
+  // broken into two top-level declarations.
+  const src = [
+    "type alias UnrolledAbstractGeneralModel envro env event tar msg ren bdata sommsg",
+    "=",
+    "    { baseData : bdata",
+    "    }",
+    "",
+  ].join("\n");
+  const out = joinTypeHeaders(src);
+  assert.ok(
+    out.startsWith(
+      "type alias UnrolledAbstractGeneralModel envro env event tar msg ren bdata sommsg =\n",
+    ),
+    "`=` must rejoin the header line:\n" + out,
+  );
+  assert.ok(out.includes("    { baseData : bdata"), "body must survive:\n" + out);
 });
 
 // --- W6.5: transform is a fixed point (format-post-pass idempotence) ---------

@@ -199,6 +199,17 @@ function joinTypeHeaders(source) {
     let j = i + 1;
     while (j < lines.length) {
       const next = lines[j];
+      // D86: when every type variable still fits but the `=` does not,
+      // gren-format parks the `=` alone on the next line — messenger-core's
+      // `type alias UnrolledAbstractGeneralModel envro env event tar msg ren
+      // bdata sommsg` wraps exactly this way. TYPE_VAR_LINE needs at least one
+      // variable, so that line matched nothing and the header stayed broken.
+      // A lone `=` is never anything but a wrapped header, at any indent.
+      if (next.trim() === "=") {
+        joined = joined.replace(/\s*$/, "") + " =";
+        j += 1;
+        break;
+      }
       // Stop at blank lines, comments, or indented body.
       if (next.trim() === "" || next.startsWith(" ") || next.startsWith("\t")) {
         break;
@@ -718,11 +729,21 @@ function joinSplitDefinitionHeaders(source) {
       const nextTrim = next.trim();
       // Blank, comment, keyword body, shallower, or DEEPER: not a format wrap.
       // Format's split lands at the binding column (same indent); deeper is body.
+      //
+      // D86: unless the header so far has an unclosed bracket. A definition
+      // header cannot end mid-bracket, so whatever follows still belongs to
+      // it however it is indented. gren-format wraps deeply nested
+      // destructuring patterns this way — linear-algebra's
+      // `(Field.Field (CommutativeDivisionRing.CommutativeDivisionRing x)) =`
+      // lands as two lines at the binding column and a third one deeper — and
+      // stopping at the deeper line left the paren open and the file
+      // unparseable.
+      const stillOpen = bracketDepth(joined) > 0;
       if (
         nextTrim === "" ||
         next.includes("--") ||
         next.includes("{-") ||
-        nextIndent !== indent ||
+        (stillOpen ? nextIndent < indent : nextIndent !== indent) ||
         HEADER_STOP_KEYWORD.test(nextTrim)
       ) {
         break;

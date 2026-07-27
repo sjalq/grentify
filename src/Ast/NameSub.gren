@@ -557,7 +557,16 @@ subExposedItem : Registry -> Maybe String -> ExposedItem -> Maybe ExposedItem
 subExposedItem registry sourceModule item =
     when item is
         ExposeInfix name ->
-            Just (ExposeInfix (subSymbolName registry sourceModule name False))
+            -- D85: `subExpr` rewrites every `::` — binop and prefix alike —
+            -- into `Array.pushFirst`, so no reference to the operator itself
+            -- survives. Gren's Array does not define it, and `import List
+            -- exposing ((::))` becomes `import Array exposing ((::))`, which
+            -- the compiler rejects outright. Drop the now-dead item.
+            if name == "::" then
+                Nothing
+
+            else
+                Just (ExposeInfix (subSymbolName registry sourceModule name False))
 
         ExposeFunction name ->
             let

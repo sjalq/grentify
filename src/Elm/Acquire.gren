@@ -372,7 +372,7 @@ acquireRegistry platform permissions options name requestedVersion =
                             readPackageAt permissions.fileSystem root
                                 |> Task.andThen
                                     (\loaded ->
-                                        validateIdentity name resolved.version loaded.manifest
+                                        validateArchiveVersion resolved.version loaded.manifest
                                             |> Task.map
                                                 (\_ ->
                                                     { manifest = resolved.manifest
@@ -1207,6 +1207,36 @@ validateIdentity expectedName expectedVersion manifest =
         Task.fail <|
             PortError.create "SOURCE_INVALID"
                 "Downloaded Elm package identity does not match the requested coordinate."
+
+    else
+        Task.succeed manifest
+
+
+{-| D84: the elm.json INSIDE a published archive names the GitHub repository as
+it stood when the version was published, and repositories get renamed and
+transferred. `calions-app/env@1.0.0` ships `FabienHenon/env`, and
+`andreasewering/elm-protoc-utils@1.1.1` ships `anmolitor/elm-protoc-utils`;
+both install cleanly under Elm.
+
+Identity is already settled before this runs: `acquireArchive` verifies the
+archive against `endpoint.hash` from package.elm-lang.org, so these bytes ARE
+what the registry published for the requested coordinate. Re-deriving identity
+from the repository name inside them only rejects packages Elm accepts. The
+version still has to agree — a coordinate pointing at the wrong tag is a real
+packaging fault, not a rename.
+
+-}
+validateArchiveVersion : Version -> Manifest -> Task Error Manifest
+validateArchiveVersion expectedVersion manifest =
+    if Semver.compare manifest.version expectedVersion /= EQ then
+        Task.fail <|
+            PortError.create "SOURCE_INVALID"
+                ("Archive for the requested coordinate declares version "
+                    ++ Semver.versionToString manifest.version
+                    ++ ", not "
+                    ++ Semver.versionToString expectedVersion
+                    ++ "."
+                )
 
     else
         Task.succeed manifest

@@ -34,7 +34,7 @@ import Mapping.Types exposing (Registry)
 
 
 type alias Evidence =
-    { tupleReturns : Dict String (Array TupleCompare.ElemShape)
+    { tupleReturns : TupleCompare.PackageReturns
     , constructorHomes : CtorHome.Homes
     , keyEvidence : KeyEncode.Evidence
     , recordAliases : Dict String (Array String)

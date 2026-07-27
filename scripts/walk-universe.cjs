@@ -130,6 +130,23 @@ const EXEMPT_SIGNATURES = [
       /(DOWNLOAD_FAILED[^\n]*\b(404|410)\b)|SOURCE_CLONE_FAILED|couldn't find a compatible version|NO_ELM_SOURCES/,
     reason: "broken-upstream:unfetchable",
   },
+  // D90: two packages in one Gren dependency graph may not expose the same
+  // module name. Elm permits it while no single module imports both, so
+  // gampleman/elm-visualization exposes `Force` and so does its own dependency
+  // ianmackenzie/elm-units. `Port/Plan.gren` states at length why no sound
+  // automatic rename exists — it would not be a pure function of the module
+  // name, and any (package, module) scheme rewrites the package's public API.
+  //
+  // The refusal is therefore CORRECT output, and it names both packages, which
+  // is the evidence §1 asks for. Banking it as a working failure counted a
+  // right answer as a defect and put a permanent language rule on the drain
+  // queue. Packages that fail only because they depend on such a package
+  // (jxxcarlson/elm-stat -> elm-visualization) carry the same message and are
+  // terminal for the same reason.
+  {
+    pattern: /AMBIGUOUS_MODULE_NAME[^\n]*exposes the module/,
+    reason: "module-name-collision",
+  },
 ];
 
 // ---------------------------------------------------------------------------

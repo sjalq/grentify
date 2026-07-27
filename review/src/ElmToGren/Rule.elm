@@ -1813,12 +1813,80 @@ addDiagnostic diagnostic context =
     { context | diagnostics = diagnostic :: context.diagnostics }
 
 
+{-| D98: keep the outermost non-overlapping edits, in O(n) rather than O(n^2).
+
+`keepIfDisjoint` used to ask `List.any (editsOverlap candidate) accepted`,
+scanning every edit accepted so far for every candidate.
+`SiriusStarr/elm-password-strength` ships a 94k-line frequency list —
+roughly 93,000 tuple literals, so a quarter of a million edits — and that
+scan is ~10^10 comparisons. elm-review was still inside it when the
+extraction budget expired at 55 minutes; D83 fixed the same module shape
+blowing the stack, and this is the cost that was left behind it.
+
+The edits are already sorted by start (outer-first), so every accepted edit
+starts at or before the candidate. That makes the whole scan unnecessary:
+
+  * a non-empty candidate overlaps something iff `start < maxEnd` over ALL
+    accepted — the other half of `editsOverlap` is implied, because an
+    accepted edit starts no later than this one starts, which is before this
+    one ends;
+  * an insertion (start == end) overlaps something iff `start < maxEnd` over
+    accepted that start STRICTLY BEFORE it. An insertion sitting exactly at
+    a non-empty edit's start is retained, which is what `compareOuterFirst`
+    orders the two for, and a max taken over all accepted would wrongly
+    reject it.
+
+Two running maxima give both tests in constant time. Same accepted set as
+the scan produced, same order.
+-}
 selectNonOverlapping : List SourceEdit -> List SourceEdit
 selectNonOverlapping edits =
     edits
         |> List.sortWith compareOuterFirst
-        |> List.foldl keepIfDisjoint []
+        |> List.foldl keepIfDisjoint emptySelection
+        |> .accepted
         |> List.reverse
+
+
+type alias Selection =
+    { accepted : List SourceEdit
+    , -- Greatest end over every accepted edit.
+      maxEndAll : Maybe Location
+    , -- Greatest end over accepted edits starting strictly before `startBucket`.
+      maxEndBefore : Maybe Location
+    , -- The start position the two maxima are current for.
+      startBucket : Maybe Location
+    }
+
+
+emptySelection : Selection
+emptySelection =
+    { accepted = [], maxEndAll = Nothing, maxEndBefore = Nothing, startBucket = Nothing }
+
+
+{-| True when `point` lies strictly inside something the bound reaches. -}
+reaches : Location -> Maybe Location -> Bool
+reaches point bound =
+    case bound of
+        Nothing ->
+            False
+
+        Just end ->
+            locationBefore point end
+
+
+laterLocation : Location -> Maybe Location -> Maybe Location
+laterLocation candidate current =
+    case current of
+        Nothing ->
+            Just candidate
+
+        Just existing ->
+            if locationBefore existing candidate then
+                Just candidate
+
+            else
+                current
 
 
 compareOuterFirst : SourceEdit -> SourceEdit -> Order
@@ -1833,25 +1901,56 @@ compareOuterFirst left right =
             order
 
 
-keepIfDisjoint : SourceEdit -> List SourceEdit -> List SourceEdit
-keepIfDisjoint candidate accepted =
+keepIfDisjoint : SourceEdit -> Selection -> Selection
+keepIfDisjoint candidate selection =
+    let
+        -- Sorted by start, so on reaching a new start every edge accepted so
+        -- far starts strictly before it.
+        state : Selection
+        state =
+            if selection.startBucket == Just candidate.range.start then
+                selection
+
+            else
+                { selection
+                    | maxEndBefore = selection.maxEndAll
+                    , startBucket = Just candidate.range.start
+                }
+
+        overlaps : Bool
+        overlaps =
+            if isInsertion candidate then
+                reaches candidate.range.start state.maxEndBefore
+
+            else
+                reaches candidate.range.start state.maxEndAll
+
+        keep : Selection
+        keep =
+            { state
+                | accepted = candidate :: state.accepted
+                , maxEndAll = laterLocation candidate.range.end state.maxEndAll
+            }
+    in
     if isInsertion candidate then
-        case mergeWithCoLocatedInsertion candidate accepted of
+        case mergeWithCoLocatedInsertion candidate state.accepted of
             Just merged ->
-                merged
+                -- The merged edit keeps the co-located insertion's range, so
+                -- neither maximum moves.
+                { state | accepted = merged }
 
             Nothing ->
-                if List.any (editsOverlap candidate) accepted then
-                    accepted
+                if overlaps then
+                    state
 
                 else
-                    candidate :: accepted
+                    keep
 
-    else if List.any (editsOverlap candidate) accepted then
-        accepted
+    else if overlaps then
+        state
 
     else
-        candidate :: accepted
+        keep
 
 
 isInsertion : SourceEdit -> Bool
@@ -1861,42 +1960,38 @@ isInsertion edit =
 
 {-| Merge `candidate` into the first co-located insertion in `accepted`.
 
-Uses `List.foldl` (a while-loop even under elm `--debug`) rather than a
-hand-rolled recursive walk. NamedCharacterReferences-scale modules emit
-thousands of tuple-expression insertions; the previous non-tail recursion
-stack-overflowed the review app under D26's forced `--debug` (D83).
+D83: NamedCharacterReferences-scale modules emit thousands of
+tuple-expression insertions, and an unbounded non-tail recursion here
+stack-overflowed the review app under D26's forced `--debug`. The walk below
+recurses only over the run of edits sharing one start, which is a handful.
+
+D98: `accepted` is built head-first from a start-sorted stream, so its
+head holds the LATEST start and every edit sharing a start is one
+uninterrupted run at the front. A co-located insertion can only be in that
+run, so the search stops at the first different start instead of walking the
+whole list — which on the frequency-list module is a quarter of a million
+entries per candidate.
 -}
 mergeWithCoLocatedInsertion : SourceEdit -> List SourceEdit -> Maybe (List SourceEdit)
 mergeWithCoLocatedInsertion candidate accepted =
-    let
-        step :
-            SourceEdit
-            -> ( List SourceEdit, Maybe SourceEdit, List SourceEdit )
-            -> ( List SourceEdit, Maybe SourceEdit, List SourceEdit )
-        step current ( beforeAcc, found, afterAcc ) =
-            case found of
-                Just _ ->
-                    ( beforeAcc, found, current :: afterAcc )
+    mergeCoLocatedHelp candidate accepted []
 
-                Nothing ->
-                    if isInsertion current && current.range.start == candidate.range.start then
-                        ( beforeAcc, Just current, afterAcc )
 
-                    else
-                        ( current :: beforeAcc, Nothing, afterAcc )
-
-        ( beforeRev, matched, afterRev ) =
-            List.foldl step ( [], Nothing, [] ) accepted
-    in
-    case matched of
-        Nothing ->
+mergeCoLocatedHelp : SourceEdit -> List SourceEdit -> List SourceEdit -> Maybe (List SourceEdit)
+mergeCoLocatedHelp candidate remaining passedRev =
+    case remaining of
+        [] ->
             Nothing
 
-        Just current ->
-            Just
-                (List.reverse beforeRev
-                    ++ (mergeInsertions candidate current :: List.reverse afterRev)
-                )
+        current :: rest ->
+            if current.range.start /= candidate.range.start then
+                Nothing
+
+            else if isInsertion current then
+                Just (List.reverse passedRev ++ (mergeInsertions candidate current :: rest))
+
+            else
+                mergeCoLocatedHelp candidate rest (current :: passedRev)
 
 
 mergeInsertions : SourceEdit -> SourceEdit -> SourceEdit

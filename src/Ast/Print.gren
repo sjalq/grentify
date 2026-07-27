@@ -929,9 +929,27 @@ printExpr ctx prec expr =
                     ++ " }"
 
         ExprList items ->
-            "["
-                ++ String.join ", " (Array.map (printEmbeddedExpr ctx) items)
-                ++ "]"
+            let
+                inline =
+                    "["
+                        ++ String.join ", " (Array.map (printEmbeddedExpr ctx) items)
+                        ++ "]"
+            in
+            -- D99: the same width guard the declaration-body case has used all
+            -- along, extended to a list ANYWHERE in an expression.
+            -- `SiriusStarr/elm-password-strength` writes its 30,000-entry
+            -- frequency table as `Dict.fromList [ ... ]` — an application, not
+            -- a bare list — so the body rule never saw it and the printer
+            -- emitted one line of 1,195,944 characters. Gren's parser tracks
+            -- columns in 16 bits: it saturates at 65,535 and loses its place,
+            -- reporting UNFINISHED RECORD against a record that is perfectly
+            -- well formed. A printer must not emit lines the compiler cannot
+            -- address.
+            if Array.length items > 1 && String.count inline > maxInlineListWidth then
+                printMultilineList ctx items
+
+            else
+                inline
 
         ExprAccess { record = record, field = field } ->
             printExpr ctx 1 record ++ "." ++ field

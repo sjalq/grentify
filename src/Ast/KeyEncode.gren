@@ -497,6 +497,30 @@ setOperation name args =
         { name = "filter", args = 2 } ->
             Just (OpDecodeCallback { index = 1, arity = 1 })
 
+        -- D95: the same three calls with the SET argument omitted. Elm code
+        -- folds them (`List.foldl (\{ indices } -> Set.insert indices) visited
+        -- coplanar`), so the container arrives from the fold, not the call.
+        -- Totality treats an operation it cannot carry as grounds to drop the
+        -- kind whole, so one partially applied `Set.insert` disabled every key
+        -- rewrite in w0rm/elm-physics' `initFacesHelp` — while the signature's
+        -- `Set ( Int, Int, Int )` still rewrote, leaving the two halves
+        -- disagreeing.
+        --
+        -- `OpEncodeKey 1` only ever touches argument 1, so the container's
+        -- absence changes nothing: `Set.insert (encode k)` has exactly the type
+        -- `Set.insert k` had. Saturated arity for all three is 2, so arity 1 is
+        -- unambiguously the omitted-container form, and `encodeProvenCall`
+        -- (which reads the LAST argument as the container) already refuses
+        -- anything with fewer than two arguments.
+        { name = "insert", args = 1 } ->
+            Just (OpEncodeKey 1)
+
+        { name = "remove", args = 1 } ->
+            Just (OpEncodeKey 1)
+
+        { name = "member", args = 1 } ->
+            Just (OpEncodeKey 1)
+
         _ ->
             Nothing
 

@@ -2589,6 +2589,30 @@ as the evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-27 TOP-20% VALIDATED — clean full walk on the post-D93b build:
+  **386 PASS / 21 EXEMPT / 4 working failures of 411** (93.9% pass; 99.0%
+  passing-or-terminal). Was 376/18/17 before this campaign. Banked to
+  `test/ecosystem/top20-run.json`. Gates at this commit: tier 0 362 checks,
+  walker self-test 46, rule fixtures, format idempotence 82 modules at fixed
+  point, add transaction, canary 14/14.
+- 2026-07-27 D93b CLOSED — the extraction lock outlived by the work it
+  protects. The lock's spin count, steal threshold and acquire timeout were
+  all sized against the old flat 600s budget; D93 raised the budget to as
+  much as an hour and left them at 660s, so one 2.9 MB package holding the
+  lock starved everything queued behind it (`abradley2/edn-parser`,
+  `arowM/elm-html-extra-internal` both banked EXTRACT_LOCK with nothing wrong
+  with either — both PASS on re-run). All three now derive from
+  `lockHoldSeconds`.
+- 2026-07-27 D94 OPEN — elm-review does not finish on a megamodule.
+  `SiriusStarr/elm-password-strength` ships a 2.9 MB generated word list and
+  elm-review was still parsing it when D93's scaled budget expired at
+  **55.1 minutes** — measured, not inferred. D93 was still the right fix (a
+  1 MB package now gets 25 minutes instead of 10) but it does not rescue this
+  one: the wall is elm-syntax's parse cost on a single enormous module, in
+  the same family as D83. Not exempted — this is our pipeline's limit, not a
+  property of the package, and calling it terminal would be dishonest. A real
+  fix means not handing the megamodule to elm-review at all.
+
 - 2026-07-27 SURFACE EXPANDED — the tested set is now the top 20% of the
   registry by reverse-dependency fan-in: 411 packages carrying 96.8% of all
   community import edges (`test/ecosystem/packages-top20.json`), up from the

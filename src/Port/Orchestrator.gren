@@ -153,6 +153,16 @@ run context permissions cliOptions =
                             Acquire.parseInput context.platform context.workingDirectory context.homeDirectory cliOptions.input
                                 |> resultTask identity
                                 |> Task.andThen (Acquire.acquire context.platform permissions acquireOptions)
+                                -- D100: drop declared-but-unimported root
+                                -- edges BEFORE anything reads the manifest, so
+                                -- the solver, the plan and the emitted
+                                -- gren.json all agree on one dependency set.
+                                |> Task.andThen
+                                    (\acquired ->
+                                        pruneFalseRootEdges permissions acquireOptions registry acquired
+                                            |> Task.map
+                                                (\pruned -> { acquired | manifest = pruned })
+                                    )
                                 |> Task.andThen
                                     (\rootSource ->
                                         let
@@ -212,6 +222,146 @@ run context permissions cliOptions =
 
 resolveGraph : Permissions -> Acquire.Options -> Registry -> Acquire.PackageSource -> Task Error Resolution
 resolveGraph permissions acquireOptions registry rootSource =
+    resolveFrom permissions acquireOptions registry rootSource.manifest
+
+
+{-| D100: drop a dependency the root DECLARES but no root module IMPORTS.
+
+Elm does not require a declared dependency to be used, and
+`vito/elm-ansi@12.0.0` declares `elm-explorations/benchmark` while importing
+nothing from it. That package ships `src/Elm/Kernel/Benchmark.js`, so the port
+refused the whole graph over an edge carrying nothing, and elm-ansi was banked
+EXEMPT(kernel:dep) for a dependency it does not use.
+
+Sound because Elm resolves a module name to exactly one package and forbids
+importing from a package you did not declare: if no root module imports a
+module this dependency EXPOSES, nothing the root emits can reference it.
+Pruning the root's edge does not remove the package when another dependency
+genuinely needs it — the solver still reaches it through that package's own
+requirements.
+
+Absent evidence never prunes: an unreadable manifest, or a constraint no
+published version satisfies, keeps the edge so the solver reports it properly.
+
+Scope: the ROOT's edges only. A dependency's own false edges still bite,
+because its sources are not in hand until the solve has already run.
+-}
+pruneFalseRootEdges : Permissions -> Acquire.Options -> Registry -> Acquire.PackageSource -> Task Error Manifest
+pruneFalseRootEdges permissions acquireOptions registry rootSource =
+    let
+        manifest =
+            rootSource.manifest
+
+        -- A MAPPED dependency is never pruned. Its modules reach the output
+        -- through the Gren analogue and through the `ElmToGren.Compat.*` shims
+        -- the tool generates, which import names (`Platform.Sub`,
+        -- `Platform.Cmd`) no root source ever mentions. Dropping elm/core
+        -- because a package only imports `Bitwise` took the canary from 14/14
+        -- to 2/14.
+        isMappedDependency name =
+            MappingRegistry.mappingFor name registry /= Nothing
+    in
+    if Dict.isEmpty manifest.dependencies then
+        Task.succeed manifest
+
+    else
+        rootImportedModules permissions.fileSystem rootSource
+            |> Task.andThen
+                (\imported ->
+                    Dict.foldl
+                        (\key dependency pending ->
+                            pending
+                                |> Task.andThen
+                                    (\kept ->
+                                        if isMappedDependency key then
+                                            Task.succeed (Dict.set key dependency kept)
+
+                                        else
+                                            dependencyIsImported permissions acquireOptions imported dependency
+                                                |> Task.map
+                                                    (\used ->
+                                                        if used then
+                                                            Dict.set key dependency kept
+
+                                                        else
+                                                            kept
+                                                    )
+                                    )
+                        )
+                        (Task.succeed Dict.empty)
+                        manifest.dependencies
+                )
+            |> Task.map (\kept -> { manifest | dependencies = kept })
+
+
+{-| Every module name the root's own sources import. -}
+rootImportedModules : FileSystem.Permission -> Acquire.PackageSource -> Task Error (Dict String {})
+rootImportedModules fileSystem rootSource =
+    rootSource.sourceFiles
+        |> Array.foldl
+            (\file pending ->
+                pending
+                    |> Task.andThen
+                        (\found ->
+                            System.File.readText fileSystem file
+                                |> Task.onError (\_ -> Task.succeed "")
+                                |> Task.map
+                                    (\contents ->
+                                        Array.foldl (\name acc -> Dict.set name {} acc)
+                                            found
+                                            (importedModuleNames contents)
+                                    )
+                        )
+            )
+            (Task.succeed Dict.empty)
+
+
+importedModuleNames : String -> Array String
+importedModuleNames source =
+    String.lines source
+        |> Array.mapAndKeepJust
+            (\line ->
+                let
+                    trimmed =
+                        String.trimLeft line
+                in
+                if String.startsWith "import " trimmed then
+                    Array.first (String.words (String.dropFirst 7 trimmed))
+
+                else
+                    Nothing
+            )
+
+
+{-| True when the root imports at least one module this dependency exposes. -}
+dependencyIsImported : Permissions -> Acquire.Options -> Dict String {} -> Elm.Manifest.Dependency -> Task Error Bool
+dependencyIsImported permissions acquireOptions imported dependency =
+    Acquire.loadVersions permissions acquireOptions dependency.name
+        |> Task.andThen
+            (\versions ->
+                when
+                    versions
+                        |> Array.keepIf (Semver.satisfies dependency.constraint)
+                        |> Array.sortWith Semver.compare
+                        |> Array.last
+                is
+                    Nothing ->
+                        Task.succeed True
+
+                    Just version ->
+                        Acquire.loadManifest permissions acquireOptions dependency.name version
+                            |> Task.map
+                                (\depManifest ->
+                                    Array.any
+                                        (\name -> Dict.member name imported)
+                                        depManifest.exposedModules
+                                )
+            )
+        |> Task.onError (\_ -> Task.succeed True)
+
+
+resolveFrom : Permissions -> Acquire.Options -> Registry -> Manifest -> Task Error Resolution
+resolveFrom permissions acquireOptions registry rootManifest =
     let
         isMapped name =
             when MappingRegistry.mappingFor (PackageName.toString name) registry is
@@ -226,7 +376,7 @@ resolveGraph permissions acquireOptions registry rootSource =
     in
     -- Mapped dependencies are omitted from the solver graph. When every direct
     -- root dependency is already mapped, no registry index is required.
-    if hasUnmappedDependencies registry rootSource.manifest then
+    if hasUnmappedDependencies registry rootManifest then
         -- Load /all-packages once for the whole search. Calling loadVersions
         -- per candidate package re-fetched the mutable index on every probe and
         -- could observe inconsistent snapshots mid-solve.
@@ -237,11 +387,11 @@ resolveGraph permissions acquireOptions registry rootSource =
                         { versionsFor = versionsFor elmRegistry
                         , manifestFor = Acquire.loadManifest permissions acquireOptions
                         }
-                        rootSource.manifest
+                        rootManifest
                 )
 
     else
-        Solver.solveWith solverOptions Dict.empty rootSource.manifest
+        Solver.solveWith solverOptions Dict.empty rootManifest
             |> Result.mapError
                 (Solver.errorToString
                     >> PortError.create "DEPENDENCY_CONFLICT"

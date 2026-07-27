@@ -2589,6 +2589,118 @@ as the evidence base for the next fix campaign.
 
 ## STATUS
 
+- 2026-07-27 SURFACE EXPANDED — the tested set is now the top 20% of the
+  registry by reverse-dependency fan-in: 411 packages carrying 96.8% of all
+  community import edges (`test/ecosystem/packages-top20.json`), up from the
+  232-package core set. First run: 376 PASS / 18 EXEMPT / 17 working failures.
+  The 179 newly added packages are the lower-fan-in tail and supplied every
+  defect below. Walk note: extraction is serialized by the D30 machine-wide
+  lock, so a cold walk extracts one package at a time whatever `-j` says;
+  running four shards over clonefile copies of the cache (`--cache
+  .test-cache/walk-shards/sN`) gives four concurrent extractions and is the
+  difference between a stalled run and a finished one.
+- 2026-07-27 D84 CLOSED — archive identity rejected on a renamed repository.
+  The elm.json INSIDE a published archive names the GitHub repo as it stood at
+  publish time, and repos get renamed: `calions-app/env@1.0.0` ships
+  `FabienHenon/env`, `andreasewering/elm-protoc-utils@1.1.1` ships
+  `anmolitor/elm-protoc-utils`. Both install cleanly under Elm. Identity was
+  already settled — `acquireArchive` verifies the bytes against
+  `endpoint.hash` from package.elm-lang.org — so re-deriving it from the
+  archive only rejected packages Elm accepts. Version still checked.
+- 2026-07-27 D85 CLOSED — `import List exposing ((::))` became
+  `import Array exposing ((::))`, which Gren rejects. `subExpr` already
+  rewrites every `::` to `Array.pushFirst`, binop and prefix alike, so the
+  exposing item is dead by then. Dropped. hedgehogface/dict-any-set-any.
+- 2026-07-27 D86 CLOSED — two ways gren-format emits unparseable Gren.
+  (a) A nested destructuring pattern wraps onto a line DEEPER than the binding
+  column and `joinSplitDefinitionHeaders` stopped there with the paren still
+  open (linear-algebra `Matrix.nullSpace`); a header cannot end mid-bracket, so
+  an unbalanced join now keeps reading. (b) An over-long `type alias` header
+  parks a bare `=` on its own line, which `TYPE_VAR_LINE` needs at least one
+  variable to match (messenger-core `Messenger.GeneralModel`); a lone `=` is
+  only ever a wrapped header. Both under regression test; format idempotence
+  still 82 modules at fixed point.
+- 2026-07-27 D87 CLOSED — three TupleCompare evidence gaps.
+  (a) A package function annotated to return a BARE tuple, the counterpart of
+  the existing list-of-tuples index (`Time.Date.compare` on `toTuple`).
+  (b) A projection whose every `when` arm yields a tuple of one shape — Elm's
+  typing forces the arms to agree, so all-arms-proven is proof (elm-csv).
+  (c) sortBy in pipe (`xs |> List.sortBy f`) or unsaturated (`List.sortBy f`
+  composed with `>>`) form, which was never routed to the rewriter at all.
+  isaacseymour/deprecated-time, BrianHicks/elm-csv, lue-bird/elm-review-mini.
+- 2026-07-27 D88 CLOSED — a tuple-keyed container behind a type alias.
+  `type alias State = Dict ( Int, Int ) Cell`: R2 wants a spelled-out Dict node
+  and R2b wants a tuple alias, so neither law saw it. A type alias is its body.
+  The alias DECLARATION still rewrites under the inline law, which is what
+  makes every use of the name follow. indicatrix/elm-input-extra.
+- 2026-07-27 D89 CLOSED — a file the Elm compiler can never load stopped the
+  extract. cmditch/elm-ethereum ships `src/Eth/Sentry/OldEventWS.elm`
+  declaring `module Eth.Sentry.Event`, duplicating the real file. Elm resolves
+  a module name to exactly one path and never reads it; elm-review reads every
+  `.elm` under the source directories, finds two modules with one name, and
+  refuses the project with `extracts: {}`. Staged files whose declared name
+  cannot match their path are pruned, and `readSources` applies the same rule
+  so the pipeline sees exactly what was extracted. The signature classifier
+  missed `ELM_REVIEW_*` on a word boundary, which is why this arrived as
+  `unclassified:no-evidence` — the ELM_/EXTRACT_ families now match whole.
+- 2026-07-27 D90 CLOSED — AMBIGUOUS_MODULE_NAME is correct output, not a
+  defect. `Port/Plan.gren` states why no sound rename exists; banking the
+  refusal as a working failure counted a right answer as a bug and put a
+  permanent language rule on the drain queue. Seventh terminal state:
+  EXEMPT(module-name-collision). gampleman/elm-visualization and, through it,
+  jxxcarlson/elm-stat.
+- 2026-07-27 D91 CLOSED — collision with a MAPPED platform package. arowM/html
+  is a drop-in replacement for elm/html: it exposes Html, Html.Attributes,
+  Html.Events, Html.Keyed and Html.Lazy and depends on elm/virtual-dom, which
+  maps to gren-lang/browser — the package that provides those five names. The
+  port emitted something that could not coexist with its own platform
+  dependency and only found out at `gren docs`. Same law as the vendored
+  check one step out, with names from the mapping catalog; refusal names the
+  Gren module the user should use instead.
+- 2026-07-27 D92 CLOSED — key evidence one call away. elm-physics seeds
+  nothing from `initFaces`, whose Set lives in
+  `initFacesHelp : Set ( Int, Int, Int ) -> ...`. Passing an expression to a
+  parameter is as conclusive as returning it: Elm type-checked the call.
+  Parameter-position slots indexed with the same poisoning discipline as the
+  return-position index. elm-physics drops 7 problems to 3 but does NOT pass —
+  see the open item below.
+- 2026-07-27 D93 CLOSED — a timeout wearing a crash's clothes. The elm-review
+  budget was a flat ten minutes; SiriusStarr/elm-password-strength ships a
+  2.9 MB generated word list and is still being parsed when it expires, so the
+  killed child reported no exit code and the ledger recorded
+  `PROCESS_FAILED: elm-review exited with code null`. The budget now scales
+  with source bytes: ten minutes floor, fifteen more per megabyte, one hour
+  ceiling.
+
+### Open after this campaign (3 of 411, all needing NEW capability)
+
+Not defects in the passes as written — each needs a feature the transform does
+not have, and each was left rather than rushed:
+
+- **w0rm/elm-physics** — the key escapes into a record. `{ indices :
+  ( Int, Int, Int ), normal : Vec3 }` records flow between `initFaces` and
+  `initFacesHelp`; D92 seeds the Set and Dict worlds correctly but the record
+  FIELD keeps the tuple, so the encoding is half-applied (a clean type error,
+  never a silent miscompile). Needs the key encoding to follow a tuple through
+  a record field, including decoding it back at the destructuring sites — and
+  needs the totality rule to notice keys escaping through records, which today
+  it does not.
+- **jfmengels/elm-review-unused** — `Set ( ModuleName, String )` where
+  elm-syntax's `ModuleName = List String`. The codec refuses correctly: it
+  encodes a tuple into an array of ONE comparable representation, and no
+  scalar renders a list totally. A sound encoding does exist —
+  `[ moduleName, [ name ] ] : Array (Array String)` is injective and
+  order-preserving — but it needs a nested-array key representation AND
+  cross-package alias expansion, since `ModuleName` is declared in a
+  dependency.
+- **logicUSLIB/logicus-pl** — `type alias PSymb = ( String, List Int )`,
+  `type alias Interpretation = List PSymb`, and
+  `List.sort <| List.map List.sort <| ...`. Needs three things together:
+  package-local alias expansion in shape derivation, tail-position evidence
+  from the declaration's return annotation (the only conclusive evidence
+  present), and an array-shaped comparator so a list OF lists of tuples can be
+  ordered lexicographically.
+
 - 2026-07-26 D83 CLOSED — extractor stack-overflow on megamodule tuple edits.
   Trigger: `Html.Parser.NamedCharacterReferences` (~2124 tuple pairs → ~6375
   edits). Cause: our `mergeWithCoLocatedInsertion` non-tail recursion under

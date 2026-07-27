@@ -1108,8 +1108,77 @@ wraps a call (`List.map decode (Set.toList s)`) is never revisited.
 -}
 rewriteExpr : Context -> Int -> Expr -> Expr
 rewriteExpr context generation expr =
-    Walk.mapExprChildren (rewriteExpr context (generation + 1)) expr
-        |> rewriteNode context generation
+    when keyedPipeParts context expr is
+        Just parts ->
+            -- D99b: saturate the pipe BEFORE descending.
+            --
+            -- The walk is bottom-up, so in `edgeSet |> Set.insert (canonicalize
+            -- i j)` the partial application `Set.insert k` was rewritten as a
+            -- call in its own right — D95 made arity 1 an encode site — and
+            -- then the pipe normalized to the saturated call and encoded the
+            -- same key a second time. `encode (encode k)` type-errors, and
+            -- ianmackenzie/elm-triangular-mesh regressed on exactly that.
+            --
+            -- Saturating first means the partial application is never a node
+            -- the rewriter sees; only its arguments are visited. Nothing is
+            -- lost by doing it here: `applyOperation` already rebuilds a pipe
+            -- as an application.
+            ExprApplication
+                (Array.indexedMap
+                    (\index part ->
+                        if index == 0 then
+                            part
+
+                        else
+                            rewriteExpr context (generation + 1) part
+                    )
+                    parts
+                )
+                |> rewriteNode context generation
+
+        Nothing ->
+            Walk.mapExprChildren (rewriteExpr context (generation + 1)) expr
+                |> rewriteNode context generation
+
+
+{-| The saturated parts of a PIPE that feeds a Set/Dict operation this pass
+knows how to carry. Nothing for anything else, including a pipe into a
+container call the table has no entry for.
+-}
+keyedPipeParts : Context -> Expr -> Maybe (Array Expr)
+keyedPipeParts context expr =
+    let
+        isPipe =
+            when expr is
+                ExprBinop { operator = "|>" } ->
+                    True
+
+                ExprBinop { operator = "<|" } ->
+                    True
+
+                _ ->
+                    False
+    in
+    if not isPipe then
+        Nothing
+
+    else
+        when normalizeCall expr is
+            Just call ->
+                when Evidence.kindOfRef call.ref is
+                    Just kind ->
+                        when operationFor kind call.ref.name (argCount call) is
+                            Just _ ->
+                                Just call.parts
+
+                            Nothing ->
+                                Nothing
+
+                    Nothing ->
+                        Nothing
+
+            Nothing ->
+                Nothing
 
 
 rewriteNode : Context -> Int -> Expr -> Expr

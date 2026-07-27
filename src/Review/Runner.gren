@@ -197,17 +197,19 @@ withCompileLock platform childProcess options =
                         { program = "bash"
                         , arguments =
                             [ "-c"
-                            , -- Steal locks older than 660s: a killed holder (harness
-                              -- reaping, ^C) never runs release, and a live one is bounded
-                              -- by the 600s extraction timeout plus release overhead.
-                              "lock_dir=$1; for i in $(seq 1 3000); do if mkdir \"$lock_dir\" 2>/dev/null; then exit 0; fi; m=$(stat -f %m \"$lock_dir\" 2>/dev/null || stat -c %Y \"$lock_dir\" 2>/dev/null || echo 0); n=$(date +%s); if [ \"$m\" -gt 0 ] && [ $((n - m)) -gt 660 ]; then rmdir \"$lock_dir\" 2>/dev/null; fi; sleep 0.2; done; exit 1"
+                            , -- D93b: every constant here is derived from
+                              -- `lockHoldSeconds` so the lock can never again be
+                              -- shorter than the work it protects. A killed holder
+                              -- (harness reaping, ^C) never runs release, so a lock
+                              -- older than the longest legitimate hold is stolen.
+                              lockScript
                             , "elm-to-gren-extract-lock"
                             , lockDir
                             ]
                         , workingDirectory = "."
                         , environment = Dict.empty
                         , allowedExitCodes = [ 0 ]
-                        , timeoutMilliseconds = 660 * 1000
+                        , timeoutMilliseconds = lockHoldSeconds * 1000
                         , maximumOutputBytes = 4096
                         }
 
@@ -576,3 +578,40 @@ elmSourceBytes fileSystem packageRoot directories =
                         )
             )
             (Task.succeed 0)
+
+
+{-| D93b: how long a worker may hold, or wait for, the extraction lock.
+
+The lock's three constants — spin count, steal threshold, and the acquire
+process's own timeout — were all derived from a flat 600s extraction budget.
+D93 made that budget scale to as much as an hour and left these behind, so
+one 2.9 MB package holding the lock for 55 minutes starved every worker
+queued behind it: `abradley2/edn-parser` and
+`arowM/elm-html-extra-internal` both banked `EXTRACT_LOCK: Timed out
+waiting for the extraction lock` in a walk where nothing was actually wrong
+with them.
+
+They are now all derived from this one number, which is the largest budget
+`extractionBudgetMs` can hand out plus room for release, so the lock can
+never again be shorter than the work it protects.
+-}
+lockHoldSeconds : Int
+lockHoldSeconds =
+    (60 * 60) + 300
+
+
+{-| The acquire spinlock, parameterised by `lockHoldSeconds`. -}
+lockScript : String
+lockScript =
+    let
+        iterations =
+            String.fromInt (lockHoldSeconds * 5)
+
+        steal =
+            String.fromInt lockHoldSeconds
+    in
+    "lock_dir=$1; for i in $(seq 1 "
+        ++ iterations
+        ++ "); do if mkdir \"$lock_dir\" 2>/dev/null; then exit 0; fi; m=$(stat -f %m \"$lock_dir\" 2>/dev/null || stat -c %Y \"$lock_dir\" 2>/dev/null || echo 0); n=$(date +%s); if [ \"$m\" -gt 0 ] && [ $((n - m)) -gt "
+        ++ steal
+        ++ " ]; then rmdir \"$lock_dir\" 2>/dev/null; fi; sleep 0.2; done; exit 1"

@@ -89,6 +89,8 @@ type alias Env =
     , -- D87: same key -> shape of the BARE tuple it returns
       -- (`Time.Date.toTuple : Date -> ( Int, Int, Int )`)
       bareReturns : Dict String (Array ElemShape)
+    , -- D96: package type aliases, for seeing a tuple through its alias
+      aliases : Dict String TypeAnn
     }
 
 
@@ -99,12 +101,16 @@ tuples; `tuples` holds functions returning a bare tuple.
 type alias PackageReturns =
     { lists : Dict String (Array ElemShape)
     , tuples : Dict String (Array ElemShape)
+    , -- D96: package type aliases by bare name, so a tuple hiding behind an
+      -- alias is still a tuple. Ambiguous names are dropped before they get
+      -- here — see `Transform.Evidence.collectTupleAliases`.
+      aliases : Dict String TypeAnn
     }
 
 
 noPackageReturns : PackageReturns
 noPackageReturns =
-    { lists = Dict.empty, tuples = Dict.empty }
+    { lists = Dict.empty, tuples = Dict.empty, aliases = Dict.empty }
 
 
 {-| `packageReturns` carries cross-module return-shape evidence keyed by the
@@ -134,9 +140,13 @@ apply packageReturns file =
                 seed
                 file.declarations
 
+        resolve =
+            resolveAlias packageReturns.aliases
+
         returns =
-            { lists = indexOwn returnListShape packageReturns.lists
-            , tuples = indexOwn returnTupleShape packageReturns.tuples
+            { lists = indexOwn (returnListShapeVia resolve) packageReturns.lists
+            , tuples = indexOwn (returnTupleShapeVia resolve) packageReturns.tuples
+            , aliases = packageReturns.aliases
             }
     in
     { file
@@ -144,15 +154,48 @@ apply packageReturns file =
     }
 
 
+{-| D96: expand a package type alias by bare name, bounded so an alias
+cycle cannot loop. Elm rejects cyclic aliases, but this pass reads whatever
+the extractor hands it and must terminate on anything.
+-}
+resolveAlias : Dict String TypeAnn -> TypeAnn -> TypeAnn
+resolveAlias aliases annotation =
+    resolveAliasWithin 8 aliases annotation
+
+
+resolveAliasWithin : Int -> Dict String TypeAnn -> TypeAnn -> TypeAnn
+resolveAliasWithin fuel aliases annotation =
+    if fuel <= 0 then
+        annotation
+
+    else
+        when annotation is
+            TypeTyped { ref = ref, arguments = [] } ->
+                when Dict.get ref.name aliases is
+                    Just body ->
+                        resolveAliasWithin (fuel - 1) aliases body
+
+                    Nothing ->
+                        annotation
+
+            _ ->
+                annotation
+
+
 {-| Element shape of the list-of-tuples at the END of a signature's spine. -}
 returnListShape : TypeAnn -> Maybe (Array ElemShape)
 returnListShape annotation =
+    returnListShapeVia identity annotation
+
+
+returnListShapeVia : (TypeAnn -> TypeAnn) -> TypeAnn -> Maybe (Array ElemShape)
+returnListShapeVia resolve annotation =
     when annotation is
         TypeFunction { right = right } ->
-            returnListShape right
+            returnListShapeVia resolve right
 
         _ ->
-            listElementShape annotation
+            listElementShapeVia resolve annotation
 
 
 {-| D87: shape of the BARE tuple at the END of a signature's spine, the
@@ -162,12 +205,17 @@ function is a tuple, full stop.
 -}
 returnTupleShape : TypeAnn -> Maybe (Array ElemShape)
 returnTupleShape annotation =
+    returnTupleShapeVia identity annotation
+
+
+returnTupleShapeVia : (TypeAnn -> TypeAnn) -> TypeAnn -> Maybe (Array ElemShape)
+returnTupleShapeVia resolve annotation =
     when annotation is
         TypeFunction { right = right } ->
-            returnTupleShape right
+            returnTupleShapeVia resolve right
 
         _ ->
-            shapeOfTypeAnn annotation
+            shapeOfTypeAnnVia resolve annotation
 
 
 applyDeclaration : PackageReturns -> Declaration -> Declaration
@@ -177,11 +225,110 @@ applyDeclaration returns declaration =
             let
                 env =
                     envFromSignature returns fn.signature fn.arguments
+
+                -- D96: the declaration's own return annotation types its TAIL
+                -- expressions. `fplSymbols : FormulaPL -> List PSymb` whose
+                -- body is `List.sort <| Set.toList <| fplSymbolsAux f` has no
+                -- other evidence anywhere: the argument of the sort is a
+                -- stdlib call the pass cannot type. Applied to tails only, so
+                -- a `List.sort` buried in a sub-expression is untouched.
+                tailShape =
+                    when fn.signature is
+                        Just sig ->
+                            returnListShapeVia (resolveAlias env.aliases)
+                                sig.typeAnnotation
+
+                        Nothing ->
+                            Nothing
             in
-            DeclFunction { fn | expression = rewrite env fn.expression }
+            DeclFunction
+                { fn
+                    | expression =
+                        rewrite env (rewriteTails env tailShape fn.expression)
+                }
 
         _ ->
             declaration
+
+
+{-| D96: rewrite the list-sorting calls that SIT IN TAIL POSITION of a body
+whose return type is a known list-of-tuples.
+
+Only the tail is touched, and only when the ordinary evidence law found
+nothing — a rewrite the normal rules already make is left to them, so this
+adds cases and never changes existing ones.
+-}
+rewriteTails : Env -> Maybe (Array ElemShape) -> Expr -> Expr
+rewriteTails env tailShape expr =
+    when tailShape is
+        Nothing ->
+            expr
+
+        Just shape ->
+            rewriteTailWith env shape expr
+
+
+rewriteTailWith : Env -> Array ElemShape -> Expr -> Expr
+rewriteTailWith env shape expr =
+    when expr is
+        ExprCase details ->
+            ExprCase
+                { details
+                    | cases =
+                        Array.map
+                            (\arm -> { arm | body = rewriteTailWith env shape arm.body })
+                            details.cases
+                }
+
+        ExprIf details ->
+            ExprIf
+                { details
+                    | then_ = rewriteTailWith env shape details.then_
+                    , else_ = rewriteTailWith env shape details.else_
+                }
+
+        ExprLet details ->
+            ExprLet
+                { details | expression = rewriteTailWith env shape details.expression }
+
+        _ ->
+            sortInTail env shape expr
+
+
+{-| The tail itself: `List.sort xs`, `xs |> List.sort`, `List.sort <| xs`. -}
+sortInTail : Env -> Array ElemShape -> Expr -> Expr
+sortInTail env shape expr =
+    let
+        sortWithShape listArg =
+            ExprApplication [ listVar "sortWith", comparatorFor shape 0, listArg ]
+
+        unproven listArg =
+            listShapeOfExpr env listArg == Nothing
+    in
+    when expr is
+        ExprApplication [ ExprVar ref, listArg ] ->
+            if isListFn ref "sort" && unproven listArg then
+                sortWithShape listArg
+
+            else
+                expr
+
+        ExprBinop { operator = "|>", left = left, right = ExprVar ref } ->
+            if isListFn ref "sort" && unproven left then
+                sortWithShape left
+
+            else
+                expr
+
+        ExprBinop { operator = "<|", left = ExprVar ref, right = right } ->
+            if isListFn ref "sort" && unproven right then
+                sortWithShape right
+
+            else
+                expr
+
+        _ ->
+            expr
 
 
 {-| Unify the signature's function-type spine with the argument patterns:
@@ -197,6 +344,7 @@ envFromSignature returns signature arguments =
             , listVars = Dict.empty
             , returns = returns.lists
             , bareReturns = returns.tuples
+            , aliases = returns.aliases
             }
     in
     when signature is
@@ -222,14 +370,18 @@ envFromSignature returns signature arguments =
 
 bindPattern : Pattern -> TypeAnn -> Env -> Env
 bindPattern pattern annotation env =
+    let
+        resolve =
+            resolveAlias env.aliases
+    in
     when pattern is
         PatVar name ->
-            when shapeOfTypeAnn annotation is
+            when shapeOfTypeAnnVia resolve annotation is
                 Just shape ->
                     { env | tupleVars = Dict.set name shape env.tupleVars }
 
                 Nothing ->
-                    when listElementShape annotation is
+                    when listElementShapeVia resolve annotation is
                         Just shape ->
                             { env | listVars = Dict.set name shape env.listVars }
 
@@ -242,12 +394,17 @@ bindPattern pattern annotation env =
 
 shapeOfTypeAnn : TypeAnn -> Maybe (Array ElemShape)
 shapeOfTypeAnn annotation =
-    when annotation is
+    shapeOfTypeAnnVia identity annotation
+
+
+shapeOfTypeAnnVia : (TypeAnn -> TypeAnn) -> TypeAnn -> Maybe (Array ElemShape)
+shapeOfTypeAnnVia resolve annotation =
+    when resolve annotation is
         TypeTuple elements ->
             Just
                 (Array.map
                     (\element ->
-                        when shapeOfTypeAnn element is
+                        when shapeOfTypeAnnVia resolve element is
                             Just nested ->
                                 Nested nested
 
@@ -263,12 +420,17 @@ shapeOfTypeAnn annotation =
 
 listElementShape : TypeAnn -> Maybe (Array ElemShape)
 listElementShape annotation =
-    when annotation is
+    listElementShapeVia identity annotation
+
+
+listElementShapeVia : (TypeAnn -> TypeAnn) -> TypeAnn -> Maybe (Array ElemShape)
+listElementShapeVia resolve annotation =
+    when resolve annotation is
         TypeTyped { ref = ref, arguments = arguments } ->
             if ref.name == "List" && (ref.moduleName == Nothing || ref.moduleName == Just "List") then
                 when Array.get 0 arguments is
                     Just element ->
-                        shapeOfTypeAnn element
+                        shapeOfTypeAnnVia resolve element
 
                     Nothing ->
                         Nothing
@@ -486,7 +648,10 @@ rewriteLetDecl env declaration =
                 bodyEnv =
                     mergeEnv env
                         (envFromSignature
-                            { lists = env.returns, tuples = env.bareReturns }
+                            { lists = env.returns
+                            , tuples = env.bareReturns
+                            , aliases = env.aliases
+                            }
                             fn.signature
                             fn.arguments
                         )
@@ -511,6 +676,7 @@ mergeEnv outer inner =
     , listVars = Dict.foldl Dict.set outer.listVars inner.listVars
     , returns = outer.returns
     , bareReturns = outer.bareReturns
+    , aliases = outer.aliases
     }
 
 

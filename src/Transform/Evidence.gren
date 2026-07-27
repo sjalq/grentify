@@ -247,7 +247,61 @@ collectTupleReturns : Array File -> TupleCompare.PackageReturns
 collectTupleReturns files =
     { lists = collectReturnShapes TupleCompare.returnListShape files
     , tuples = collectReturnShapes TupleCompare.returnTupleShape files
+    , aliases = collectTupleAliases files
     }
+
+
+{-| D96: package type aliases by BARE name, for seeing a tuple through its
+alias.
+
+`logicUSLIB/logicus-pl` declares `type alias PSymb = ( String, List Int )`
+and then types everything `PSymb`, so `List.sort` over a `List PSymb` had
+no tuple in sight and was left to fail against Gren's `comparable`.
+
+Only zero-argument aliases are indexed: a parameterised alias needs its
+arguments substituted, which is a different job. Bare-name matching demands
+the name mean one thing package-wide, so a duplicate poisons the entry
+rather than picking a winner — the same discipline `Ast.KeyEncode.Evidence`
+uses for its alias indexes.
+-}
+collectTupleAliases : Array File -> Dict String TypeAnn
+collectTupleAliases files =
+    Array.foldl
+        (\file found ->
+            Array.foldl
+                (\declaration current ->
+                    when declaration is
+                        DeclAlias { name = name, generics = [], typeAnnotation = body } ->
+                            Dict.update name
+                                (\existing ->
+                                    when existing is
+                                        Nothing ->
+                                            Just (Just body)
+
+                                        Just _ ->
+                                            -- duplicate bare name: poison
+                                            Just Nothing
+                                )
+                                current
+
+                        _ ->
+                            current
+                )
+                found
+                file.declarations
+        )
+        Dict.empty
+        files
+        |> Dict.foldl
+            (\name entry acc ->
+                when entry is
+                    Just body ->
+                        Dict.set name body acc
+
+                    Nothing ->
+                        acc
+            )
+            Dict.empty
 
 
 collectReturnShapes :

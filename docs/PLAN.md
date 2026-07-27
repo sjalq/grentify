@@ -2639,8 +2639,22 @@ not rediscover them:
      (9/10 -> 6/10). The cache stores per-package trees, so the layout
      change has to reach the cache key or the restore path too.
 
-Both attempts were reverted rather than half-landed: one known failure is
-worth more than four new ones.
+  3. THE HOIST DOES NOT ENGAGE on a root+dependency workspace at all.
+     Porting `ohanhi/remotedata-http` alone reproduces the whole defect
+     without any app: the root lands at the workspace root (`src/`,
+     `gren.json`) with its own `src/ElmToGren/Compat/Http.gren`, and
+     `krisajenkins/remotedata` under `.elm-to-gren/packages/` with a second
+     copy. That is the minimal repro to work from — no 10-app suite needed.
+     With the hoist applied centrally to `planned.packages` and the
+     cache-restore path pruned, no `elm-to-gren/compat` package appeared in
+     the output, so `hosts` counted fewer than two. Why the root package's
+     adapters are not visible in that count is the next thing to find out,
+     and it needs instrumentation rather than another guess.
+
+All three attempts were reverted rather than half-landed: one known failure
+is worth more than four new ones. Attempt 3 cost nothing elsewhere —
+`test:apps` stayed at 9/10 throughout — which is what makes the remaining
+unknown a narrow one.
 
 - 2026-07-28 FULL SUITE RUN — every target in `test:all`, plus the ones
   outside it, actually executed rather than assumed:

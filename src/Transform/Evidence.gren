@@ -130,13 +130,31 @@ collect registry dependencies modules =
             CtorHome.merge dependencies.constructorHomes ownConstructorHomes
                 |> CtorHome.protectRecordAliases recordAliases
 
+        -- D102: a MAPPED package's constructors need an ARITY, not only field
+        -- names. `Json.Decode.Failure` is `Failure String Value` in Elm and
+        -- `Failure { message, value }` in Gren; the registry stated the field
+        -- names, so patterns lowered, but `CtorLaw` never learned it takes two
+        -- arguments and left `JD.Failure "Bad token"` — a PARTIAL application
+        -- composed with `<<` — curried and positional. dwayne/elm-conduit
+        -- fails on exactly that. Arity is the field count, and the shapes are
+        -- already filtered to names this package cannot speak about itself, so
+        -- nothing it owns is overridden.
+        mappedConstructorArities =
+            Dict.foldl
+                (\name fields found -> Dict.set name (Array.length fields) found)
+                Dict.empty
+                constructorFields
+
+        arities =
+            Dict.foldl Dict.set mappedConstructorArities constructorArities
+
         prepEvidence =
             { tupleReturns = collectTupleReturns resolvedFiles
             , constructorHomes = constructorHomes
             , keyEvidence = KeyEncode.collectEvidence resolvedFiles
             , recordAliases = recordAliases
             , constructorFields = constructorFields
-            , constructorArities = constructorArities
+            , constructorArities = arities
             , soleConstructors = soleConstructors
 
             -- Not read by `prepare`; the table it would hold is what the
@@ -178,7 +196,7 @@ collect registry dependencies modules =
     , keyEvidence = prepEvidence.keyEvidence
     , recordAliases = recordAliases
     , constructorFields = constructorFields
-    , constructorArities = constructorArities
+    , constructorArities = arities
     , soleConstructors = soleConstructors
     , reservedExports = reservedExports
     , prepared = prepared

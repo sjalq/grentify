@@ -218,7 +218,9 @@
             "toLocaleLower": "ElmToGren.Compat.Char.toLocaleLower",
             "toLocaleUpper": "ElmToGren.Compat.Char.toLocaleUpper"
           },
-          "types": { "Char": "Char" },
+          "types": {
+            "Char": "Char"
+          },
           "propertyRows": {
             "toLower": "charToLowerMatchesElm",
             "toUpper": "charToUpperMatchesElm",
@@ -226,17 +228,48 @@
             "toLocaleUpper": "charToLocaleUpperMatchesElm"
           }
         },
-        { "source": "Bitwise", "target": "Bitwise", "values": {}, "types": {} },
-        { "source": "Debug", "target": "Debug", "values": {}, "types": {} },
+        {
+          "source": "Bitwise",
+          "target": "Bitwise",
+          "values": {},
+          "types": {}
+        },
+        {
+          "source": "Debug",
+          "target": "Debug",
+          "values": {},
+          "types": {}
+        },
         {
           "source": "Platform",
           "target": "Platform",
-          "values": { "worker": "ElmToGren.Compat.Platform.worker" },
+          "values": {
+            "worker": "ElmToGren.Compat.Platform.worker"
+          },
           "types": {}
         },
-        { "source": "Platform.Cmd", "target": "Platform.Cmd", "values": {}, "types": { "Cmd": "Cmd" } },
-        { "source": "Platform.Sub", "target": "Platform.Sub", "values": {}, "types": { "Sub": "Sub" } },
-        { "source": "Process", "target": "Process", "values": {}, "types": {} }
+        {
+          "source": "Platform.Cmd",
+          "target": "Platform.Cmd",
+          "values": {},
+          "types": {
+            "Cmd": "Cmd"
+          }
+        },
+        {
+          "source": "Platform.Sub",
+          "target": "Platform.Sub",
+          "values": {},
+          "types": {
+            "Sub": "Sub"
+          }
+        },
+        {
+          "source": "Process",
+          "target": "Process",
+          "values": {},
+          "types": {}
+        }
       ]
     },
     {
@@ -253,7 +286,25 @@
             "list": "array",
             "keyValuePairs": "ElmToGren.Compat.Json.Decode.keyValuePairs"
           },
-          "types": { "Decoder": "Decoder", "Value": "Value", "Error": "Error" }
+          "types": {
+            "Decoder": "Decoder",
+            "Value": "Value",
+            "Error": "Error"
+          },
+          "constructorFields": {
+            "Field": [
+              "name",
+              "error"
+            ],
+            "Index": [
+              "index",
+              "error"
+            ],
+            "Failure": [
+              "message",
+              "value"
+            ]
+          }
         },
         {
           "source": "Json.Encode",
@@ -262,7 +313,9 @@
             "list": "array",
             "object": "ElmToGren.Compat.Json.Encode.object"
           },
-          "types": { "Value": "Value" }
+          "types": {
+            "Value": "Value"
+          }
         }
       ]
     },
@@ -273,7 +326,12 @@
       "grenVersion": "7.4.2",
       "platform": "common",
       "modules": [
-        { "source": "Time", "target": "Time", "values": {}, "types": {} }
+        {
+          "source": "Time",
+          "target": "Time",
+          "values": {},
+          "types": {}
+        }
       ]
     },
     {
@@ -293,7 +351,10 @@
             "map4": "ElmToGren.Compat.Random.map4",
             "map5": "ElmToGren.Compat.Random.map5"
           },
-          "types": { "Generator": "Generator", "Seed": "Seed" }
+          "types": {
+            "Generator": "Generator",
+            "Seed": "Seed"
+          }
         }
       ]
     },
@@ -304,7 +365,17 @@
       "grenVersion": "7.4.2",
       "platform": "common",
       "modules": [
-        { "source": "Bytes", "target": "Bytes", "values": { "width": "length" }, "types": { "Bytes": "Bytes", "Endianness": "Endianness" } },
+        {
+          "source": "Bytes",
+          "target": "Bytes",
+          "values": {
+            "width": "length"
+          },
+          "types": {
+            "Bytes": "Bytes",
+            "Endianness": "Endianness"
+          }
+        },
         {
           "source": "Bytes.Encode",
           "target": "Bytes.Encode",
@@ -312,9 +383,16 @@
             "string": "ElmToGren.Compat.Bytes.Encode.string",
             "getStringWidth": "ElmToGren.Compat.Bytes.Encode.getStringWidth"
           },
-          "types": { "Encoder": "Encoder" }
+          "types": {
+            "Encoder": "Encoder"
+          }
         },
-        { "source": "Bytes.Decode", "target": "Bytes.Decode", "values": {}, "types": {} }
+        {
+          "source": "Bytes.Decode",
+          "target": "Bytes.Decode",
+          "values": {},
+          "types": {}
+        }
       ]
     },
     {
@@ -324,7 +402,12 @@
       "grenVersion": "7.4.2",
       "platform": "common",
       "modules": [
-        { "source": "Regex", "target": "String.Regex", "values": {}, "types": {} }
+        {
+          "source": "Regex",
+          "target": "String.Regex",
+          "values": {},
+          "types": {}
+        }
       ]
     },
     {
@@ -347,9 +430,24 @@
             "UrlRequest": "UrlRequest"
           }
         },
-        { "source": "Browser.Dom", "target": "Browser.Dom", "values": {}, "types": {} },
-        { "source": "Browser.Events", "target": "Browser.Events", "values": {}, "types": {} },
-        { "source": "Browser.Navigation", "target": "Browser.Navigation", "values": {}, "types": {} }
+        {
+          "source": "Browser.Dom",
+          "target": "Browser.Dom",
+          "values": {},
+          "types": {}
+        },
+        {
+          "source": "Browser.Events",
+          "target": "Browser.Events",
+          "values": {},
+          "types": {}
+        },
+        {
+          "source": "Browser.Navigation",
+          "target": "Browser.Navigation",
+          "values": {},
+          "types": {}
+        }
       ]
     },
     {
@@ -359,7 +457,15 @@
       "grenVersion": "6.0.2",
       "platform": "browser",
       "modules": [
-        { "source": "Html", "target": "Html", "values": {}, "types": { "Html": "Html", "Attribute": "Attribute" } },
+        {
+          "source": "Html",
+          "target": "Html",
+          "values": {},
+          "types": {
+            "Html": "Html",
+            "Attribute": "Attribute"
+          }
+        },
         {
           "source": "Html.Attributes",
           "target": "Html.Attributes",
@@ -388,7 +494,12 @@
           },
           "types": {}
         },
-        { "source": "Html.Lazy", "target": "Html.Lazy", "values": {}, "types": {} }
+        {
+          "source": "Html.Lazy",
+          "target": "Html.Lazy",
+          "values": {},
+          "types": {}
+        }
       ]
     },
     {
@@ -398,8 +509,21 @@
       "grenVersion": "6.0.2",
       "platform": "browser",
       "modules": [
-        { "source": "Svg", "target": "Svg", "values": {}, "types": { "Svg": "Svg", "Attribute": "Attribute" } },
-        { "source": "Svg.Attributes", "target": "Svg.Attributes", "values": {}, "types": {} },
+        {
+          "source": "Svg",
+          "target": "Svg",
+          "values": {},
+          "types": {
+            "Svg": "Svg",
+            "Attribute": "Attribute"
+          }
+        },
+        {
+          "source": "Svg.Attributes",
+          "target": "Svg.Attributes",
+          "values": {},
+          "types": {}
+        },
         {
           "source": "Svg.Events",
           "target": "Svg.Events",
@@ -418,7 +542,12 @@
           },
           "types": {}
         },
-        { "source": "Svg.Lazy", "target": "Svg.Lazy", "values": {}, "types": {} }
+        {
+          "source": "Svg.Lazy",
+          "target": "Svg.Lazy",
+          "values": {},
+          "types": {}
+        }
       ]
     },
     {
@@ -475,8 +604,14 @@
           "values": {},
           "types": {},
           "constructorFields": {
-            "BadStatus_": ["metadata", "body"],
-            "GoodStatus_": ["metadata", "body"]
+            "BadStatus_": [
+              "metadata",
+              "body"
+            ],
+            "GoodStatus_": [
+              "metadata",
+              "body"
+            ]
           }
         }
       ]
@@ -488,9 +623,24 @@
       "grenVersion": "6.0.2",
       "platform": "browser",
       "modules": [
-        { "source": "File", "target": "File", "values": {}, "types": {} },
-        { "source": "File.Select", "target": "File.Select", "values": {}, "types": {} },
-        { "source": "File.Download", "target": "File.Download", "values": {}, "types": {} }
+        {
+          "source": "File",
+          "target": "File",
+          "values": {},
+          "types": {}
+        },
+        {
+          "source": "File.Select",
+          "target": "File.Select",
+          "values": {},
+          "types": {}
+        },
+        {
+          "source": "File.Download",
+          "target": "File.Download",
+          "values": {},
+          "types": {}
+        }
       ]
     },
     {
@@ -500,10 +650,30 @@
       "grenVersion": "6.0.0",
       "platform": "common",
       "modules": [
-        { "source": "Url", "target": "Url", "values": {}, "types": {} },
-        { "source": "Url.Builder", "target": "Url.Builder", "values": {}, "types": {} },
-        { "source": "Url.Parser", "target": "Url.Parser", "values": {}, "types": {} },
-        { "source": "Url.Parser.Query", "target": "Url.Parser.Query", "values": {}, "types": {} }
+        {
+          "source": "Url",
+          "target": "Url",
+          "values": {},
+          "types": {}
+        },
+        {
+          "source": "Url.Builder",
+          "target": "Url.Builder",
+          "values": {},
+          "types": {}
+        },
+        {
+          "source": "Url.Parser",
+          "target": "Url.Parser",
+          "values": {},
+          "types": {}
+        },
+        {
+          "source": "Url.Parser.Query",
+          "target": "Url.Parser.Query",
+          "values": {},
+          "types": {}
+        }
       ]
     },
     {
@@ -519,7 +689,11 @@
           "values": {},
           "types": {},
           "recordAliases": {
-            "DeadEnd": ["row", "col", "problem"]
+            "DeadEnd": [
+              "row",
+              "col",
+              "problem"
+            ]
           }
         },
         {
@@ -528,10 +702,18 @@
           "values": {},
           "types": {},
           "recordAliases": {
-            "DeadEnd": ["row", "col", "problem", "contextStack"]
+            "DeadEnd": [
+              "row",
+              "col",
+              "problem",
+              "contextStack"
+            ]
           },
           "constructorFields": {
-            "Token": ["str", "expecting"]
+            "Token": [
+              "str",
+              "expecting"
+            ]
           }
         }
       ]
@@ -543,8 +725,20 @@
       "grenVersion": "5.0.0",
       "platform": "common",
       "modules": [
-        { "source": "Test", "target": "Test", "values": {}, "types": { "Test": "Test" } },
-        { "source": "Test.Runner", "target": "Test.Runner", "values": {}, "types": {} },
+        {
+          "source": "Test",
+          "target": "Test",
+          "values": {},
+          "types": {
+            "Test": "Test"
+          }
+        },
+        {
+          "source": "Test.Runner",
+          "target": "Test.Runner",
+          "values": {},
+          "types": {}
+        },
         {
           "source": "Test.Runner.Failure",
           "target": "Test.Runner.Failure",
@@ -552,15 +746,39 @@
             "EmptyList": "EmptyArray",
             "ListDiff": "ArrayDiff"
           },
-          "types": { "Reason": "Reason", "InvalidReason": "InvalidReason" },
+          "types": {
+            "Reason": "Reason",
+            "InvalidReason": "InvalidReason"
+          },
           "constructorFields": {
-            "Equality": ["expected", "actual"],
-            "Comparison": ["expected", "actual"],
-            "ListDiff": ["expected", "actual"]
+            "Equality": [
+              "expected",
+              "actual"
+            ],
+            "Comparison": [
+              "expected",
+              "actual"
+            ],
+            "ListDiff": [
+              "expected",
+              "actual"
+            ]
           }
         },
-        { "source": "Test.Runner.String", "target": "Test.Runner.String", "values": {}, "types": {} },
-        { "source": "Test.Distribution", "target": "Test.Distribution", "values": {}, "types": { "ExpectedDistribution": "ExpectedDistribution" } },
+        {
+          "source": "Test.Runner.String",
+          "target": "Test.Runner.String",
+          "values": {},
+          "types": {}
+        },
+        {
+          "source": "Test.Distribution",
+          "target": "Test.Distribution",
+          "values": {},
+          "types": {
+            "ExpectedDistribution": "ExpectedDistribution"
+          }
+        },
         {
           "source": "Expect",
           "target": "Expect",
@@ -569,7 +787,10 @@
             "true": "ElmToGren.Compat.Expect.true",
             "false": "ElmToGren.Compat.Expect.false"
           },
-          "types": { "Expectation": "Expectation", "FloatingPointTolerance": "FloatingPointTolerance" }
+          "types": {
+            "Expectation": "Expectation",
+            "FloatingPointTolerance": "FloatingPointTolerance"
+          }
         },
         {
           "source": "Fuzz",
@@ -580,7 +801,9 @@
             "listOfLengthBetween": "arrayOfLengthBetween",
             "shuffledList": "shuffledArray"
           },
-          "types": { "Fuzzer": "Fuzzer" }
+          "types": {
+            "Fuzzer": "Fuzzer"
+          }
         }
       ],
       "absentModules": {
@@ -601,7 +824,9 @@
           "source": "Color",
           "target": "Color",
           "values": {},
-          "types": { "Color": "Color" }
+          "types": {
+            "Color": "Color"
+          }
         }
       ]
     }
@@ -640,7 +865,10 @@
               "Response": "ElmToGren.Compat.Http.Response"
             },
             "constructorFields": {
-              "BadPayload": ["message", "response"]
+              "BadPayload": [
+                "message",
+                "response"
+              ]
             }
           }
         ]

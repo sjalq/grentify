@@ -2684,8 +2684,31 @@ and verified clean. The layers it had to go through, in order:
   `ElmToGren.Compat.Http.Error` at all; if its platform inference is wrong,
   the platform conflict is a symptom rather than the thing to design around.
 
-All four attempts were reverted rather than half-landed: one known failure is
-worth more than four new ones.
+ATTEMPT 5 partitioned hosts by platform (one shim package per platform, deps
+unioned within the group), which is the right shape — `elm/http` maps to
+`gren-lang/browser` with platform `browser` in the catalog, so a package
+depending on it IS browser and the earlier single-package platform conflicts
+were self-inflicted. Two further layers surfaced:
+
+  e. THE ROOT PROJECT MUST DECLARE IT TOO. Gren refuses a vendored package's
+     local dependency outright: "Dependencies are normally not allowed to
+     define local dependencies themselves unless they happen to point to the
+     same local dependency as the root project." The `add` path writes the
+     app's gren.json separately from the package manifests, so the shim
+     package has to be added there as well.
+  f. …AND MATCHING THE DECLARATION IS NOT ENOUGH. With the app declaring
+     `local:.elm-to-gren/packages/elm-to-gren_compat__1_0_0` and the vendored
+     package declaring `../elm-to-gren_compat__1_0_0` — the spelling
+     `Port.Plan.localPath` mandates, and the same directory once resolved —
+     Gren still calls it an incompatible source. Whether it compares raw
+     strings or canonicalises against a different base is the next thing to
+     establish, and it wants reading the Gren compiler rather than another
+     guess.
+
+All five attempts were reverted rather than half-landed: one known failure is
+worth more than four new ones. What each bought is the list above — the fix is
+not conceptually hard, it is six specific rules deep, and five of them are now
+written down.
 
 - 2026-07-28 FULL SUITE RUN — every target in `test:all`, plus the ones
   outside it, actually executed rather than assumed:

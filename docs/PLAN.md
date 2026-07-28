@@ -2705,10 +2705,18 @@ were self-inflicted. Two further layers surfaced:
      establish, and it wants reading the Gren compiler rather than another
      guess.
 
-All five attempts were reverted rather than half-landed: one known failure is
-worth more than four new ones. What each bought is the list above — the fix is
-not conceptually hard, it is six specific rules deep, and five of them are now
-written down.
+ATTEMPT 6 tested one hypothesis about (f): that Gren resolves a local path
+relative to the ROOT PROJECT, so every declaration must spell it identically
+(`.elm-to-gren/packages/X` everywhere). DISPROVED — `test:apps` fell to 5/10,
+worse than the `../X` spelling, so `Port.Plan.localPath`'s rule is right and
+the incompatibility is something else. Recorded so a seventh attempt does not
+spend a cycle on it.
+
+All six attempts were reverted rather than half-landed: one known failure is
+worth more than four new ones. What they bought is the list above — the fix is
+not conceptually hard, it is six specific rules deep, five are solved, and the
+sixth now has one option eliminated. The next step is reading how the Gren
+compiler compares local-dependency sources, not another guess.
 
 - 2026-07-28 FULL SUITE RUN — every target in `test:all`, plus the ones
   outside it, actually executed rather than assumed:

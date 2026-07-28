@@ -39,6 +39,7 @@ import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Json.Decode as Decode
 import Json.Encode as Encode
+import Mapping.Types exposing (GeneratedModule)
 import Math
 import Node
 import Port.Error as PortError
@@ -420,6 +421,14 @@ resolution-specific), never `elm-stuff` / `.gren` build litter. Writes to a
 unique sibling temp directory then renames it into place (adopt-the-winner on
 conflict). I/O failures are swallowed: the cache is an optimization, not a
 correctness dependency.
+
+D106: `restore` carries the modules `Port.CompatShim` lifted out of this
+package into a shared shim. They are no longer in `sourcePackageDir`, but the
+package's own sources still import them, so an entry written without them can
+never be restored — a later hit yields MODULE NOT FOUND for a module the tool
+itself removed, and the damage outlives the run that caused it. The entry is
+the package's STANDALONE port; the hoist is a property of the workspace, not
+of the package, so it must not reach the cache.
 -}
 store :
     Node.Platform
@@ -431,8 +440,9 @@ store :
     -> String
     -> String
     -> Exports
+    -> Array GeneratedModule
     -> Task x {}
-store platform childProcess permission entry sourcePackageDir toolVersion digest platformName exports =
+store platform childProcess permission entry sourcePackageDir toolVersion digest platformName exports restore =
     freshUuid
         |> Task.andThen
             (\maybeUuid ->
@@ -543,6 +553,10 @@ store platform childProcess permission entry sourcePackageDir toolVersion digest
                                 )
                             |> Task.andThen
                                 (\_ ->
+                                    writeRestoredModules permission tempPath restore
+                                )
+                            |> Task.andThen
+                                (\_ ->
                                     System.File.writeText permission
                                         (Path.join [ tempPath, Path.fromPosixString "manifest.json" ])
                                         manifestText
@@ -555,6 +569,41 @@ store platform childProcess permission entry sourcePackageDir toolVersion digest
                             |> Task.onError (\_ -> removeIfExists permission tempPath)
             )
         |> Task.onError (\_ -> Task.succeed {})
+
+
+{-| D106: put the hoisted-out modules back into the entry being written, so
+the entry is a standalone port of its package. Paths are the generated
+`relativePath`, which already starts at `src/`.
+-}
+writeRestoredModules : FileSystem.Permission -> Path -> Array GeneratedModule -> Task x {}
+writeRestoredModules permission tempPath modules =
+    Array.foldl
+        (\generated pending ->
+            pending
+                |> Task.andThen
+                    (\_ ->
+                        System.File.writeText permission
+                            (Path.join
+                                [ tempPath
+                                , Path.fromPosixString (entryRelativePath generated.relativePath)
+                                ]
+                            )
+                            generated.source
+                            |> Task.map (\_ -> {})
+                    )
+        )
+        (Task.succeed {})
+        modules
+        |> Task.onError (\_ -> Task.succeed {})
+
+
+entryRelativePath : String -> String
+entryRelativePath relativePath =
+    if String.startsWith "src/" relativePath then
+        relativePath
+
+    else
+        "src/" ++ relativePath
 
 
 {-| Best-effort native recursive copy of the transform surface (src/ + LICENSE*)

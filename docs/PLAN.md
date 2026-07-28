@@ -2589,7 +2589,85 @@ as the evidence base for the next fix campaign.
 
 ## STATUS
 
-- 2026-07-28 SUITE STATE — one failing test across every gate:
+- 2026-07-28 D106 CLOSED — `shared-state`, and the eleven attempts that
+  missed it. Two problems were stacked, and the top one was mine.
+
+  FIRST, THE CACHE WAS POISONED. Four entries in `.test-cache/apps` carried
+  sources importing `ElmToGren.Compat.*` modules the entry did not contain:
+  `ohanhi/remotedata-http` (Http), `rtfeldman/elm-css` (six),
+  `rtfeldman/elm-hex` (List), `ryannhg/date-format` (Basics, List). Attempts
+  10 and 11 stripped adapters into a shim package and then banked the
+  STRIPPED tree; reverting the code left the entries behind. Their mtimes
+  (01:48–03:03) sit inside those attempts; every healthy entry predates them.
+
+  That retracts layer (k). "The shim's contents depend on ported-cache state"
+  was an artifact of my own poisoning, not a property of the cache:
+  `materializeDraftFromCache` reads EVERY `.gren` under the entry, so a
+  healthy entry surfaces its adapters and the union is cache-independent.
+  Attempt 10 was measuring damage attempt 10 had just done — a self-poisoning
+  loop, which is why it looked non-deterministic and why one more attempt
+  never converged. `scripts/temp/audit-ported-cache.cjs` is what found it and
+  is the check to run before believing any cache-shaped diagnosis again.
+
+  SECOND, THE REAL DEFECT IS ONE ADAPTER, NOT TWENTY-SIX.
+  `ElmToGren.Compat.Http` is the only adapter that declares CUSTOM types
+  (`Error`, `Expect`, `Request`). Every other adapter is functions and type
+  ALIASES, and Gren compares aliases structurally — duplicating those across
+  packages is harmless and always was. All eleven attempts generalised to the
+  whole adapter set and drowned in platform partitioning, dependency
+  dragging, and shim-membership rules that only exist for adapters that never
+  needed sharing. Attempt 11's 4/10 is that generalisation at its worst.
+
+  The fix, `Port.CompatShim`, hoists exactly the adapters that declare a
+  nominal type, one shim package each:
+
+    * The set is READ OFF the generated source (`Adapter.declaresNominalType`),
+      not listed by hand, so a custom type added to any adapter is shared from
+      that moment instead of silently reintroducing the defect.
+    * One shim package PER adapter, not one for all of them. Each then carries
+      exactly its own platform and dependencies, and no adapter can be exposed
+      by two shim packages — attempt 10's layer (j) stops existing.
+    * The adapter is stripped from every carrier, and declared by every
+      importer plus the reverse closure over `local:` edges (layer (i)'s law:
+      each vendored package verifies standalone as its own root).
+    * `PortedCache.store` takes the stripped modules BACK, so an entry stays a
+      STANDALONE port of its package. This is the part every attempt missed
+      and the part that makes the result cache-independent: the hoist is a
+      property of the workspace, never of the package.
+    * `replaceSrcFromEntry` removes them again on restore, or the package ends
+      up with both its own copy and the shim's (AMBIGUOUS IMPORT).
+    * A restored entry that imports a Compat module it does not carry is a
+      soft-miss and re-ports, so poisoning of this class self-heals instead of
+      failing every future run.
+
+  The shim's module is EXPOSED, so `gren docs` requires documentation — hence
+  the doc comments now on the Http adapter source and on no other.
+
+  Evidence for the property that killed attempts 1–11: cold run passes, fully
+  warm run against the cache the cold run wrote passes, and the cache audits
+  0 poisoned of 32. `test:apps` 10/10.
+
+- 2026-07-28 SUITE STATE — every gate green, no failing test:
+
+    gren make (check) · tier 0 374 · rule fixtures · format 82
+    add transaction · e2e 4 · ledger · ast-probe 40/40 · canary 14/14
+    ecosystem walk (top 20%)  389 PASS / 22 EXEMPT / 0 working failures
+    test:ecosystem            202/202
+    test:ecosystem-browser    252/252
+    test:apps                  10/10
+
+  Tier 0 is 374 (was 362): D106 added twelve checks over `Port.CompatShim`.
+  The walk matches its banked 389/22/0 exactly.
+
+  One note on how the walk was read. The first pass reported 388/22/1, the
+  one being a 360s TIMEOUT on `folkertdev/one-true-path-experiment@6.0.1`
+  — which ports in 22s run alone. That is `-j4` contention, the same class
+  as the 42 bogus timeouts D93 chased, not a verdict about the package. It
+  was re-run as a full clean walk rather than argued away from the single-
+  package retry, because a walk with a working-failure is a failed walk and
+  a one-package re-run is not the gate.
+
+- 2026-07-28 SUITE STATE — superseded by D106; kept as the before-picture:
 
     tier 0 362 · rule fixtures · format 82 · add transaction · e2e 4
     ledger · ast-probe 40/40 · canary 14/14
@@ -2615,7 +2693,18 @@ as the evidence base for the next fix campaign.
   since a reachability set that cannot see the package's own API is evidence
   the names do not line up rather than evidence of dead code.
 
-### Open: one test — `shared-state` (test:apps)
+### CLOSED by D106 — was: one test, `shared-state` (test:apps)
+
+Kept in full below, because the eleven attempts recorded here are the most
+expensive thing in this file and the reason they failed is worth reading.
+
+Two corrections to everything that follows. First, the defect is ONE
+adapter: `Compat.Http` is the only one declaring a custom type, and every
+rule below about partitioning the adapter set exists only because each
+attempt hoisted all twenty-six. Second, the "cache-state dependence" of
+layers (h) and (k) was self-inflicted — attempts 10 and 11 banked STRIPPED
+package trees, so each was measuring damage it had just done. See the D106
+entry under STATUS.
 
 Compat shims are generated PER PACKAGE, so a workspace vendoring two
 packages that both need `ElmToGren.Compat.Http` gets two copies. Gren types

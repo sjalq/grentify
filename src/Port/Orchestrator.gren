@@ -35,6 +35,7 @@ import Mapping.Types as Mapping exposing (MappingKind(..), Registry)
 import Math
 import Node
 import Port.AddTransaction as AddTransaction
+import Port.CompatShim as CompatShim
 import Port.Error as PortError exposing (Error)
 import Port.Plan as Plan
 import Resolve.Online
@@ -121,6 +122,11 @@ type alias Planned =
       portedCacheHits : Dict String Path
     , -- elmName -> pending store after successful gren verification.
       portedCachePending : Dict String PortedCache.Pending
+    , -- D106: elmName -> modules `Port.CompatShim` lifted out of the package
+      -- into a shared shim. The staged tree no longer has them, so the ported
+      -- cache is handed them separately: an entry that imports a module it
+      -- does not carry can never be restored.
+      shimStripped : Dict String (Array Mapping.GeneratedModule)
     }
 
 
@@ -202,18 +208,36 @@ run context permissions cliOptions =
                                                                     -- Feature 2: exposed-module names must track the
                                                                     -- Elm. prefix applied to the module sources, or
                                                                     -- `gren docs` cannot find the exposed modules.
-                                                                    finalPlanned =
+                                                                    namespaced =
                                                                         if cliOptions.namespaceModules then
                                                                             { planned | packages = Array.map namespaceExposedModules planned.packages }
 
                                                                         else
                                                                             planned
                                                                 in
-                                                                if cliOptions.vendor then
-                                                                    finalizeAdd context permissions cliOptions output assets resolution finalPlanned
+                                                                -- D106: after namespacing, because the shim declares
+                                                                -- the adapter module name and adapters are never
+                                                                -- prefixed; before emit, because it rewrites both the
+                                                                -- module set and the manifests.
+                                                                CompatShim.apply registryForRoot
+                                                                    (PackageName.toString resolution.root)
+                                                                    namespaced.packages
+                                                                    |> resultTask identity
+                                                                    |> Task.andThen
+                                                                        (\hoisted ->
+                                                                            let
+                                                                                finalPlanned =
+                                                                                    { namespaced
+                                                                                        | packages = hoisted.packages
+                                                                                        , shimStripped = hoisted.stripped
+                                                                                    }
+                                                                            in
+                                                                            if cliOptions.vendor then
+                                                                                finalizeAdd context permissions cliOptions output assets resolution finalPlanned
 
-                                                                else
-                                                                    finalize context permissions cliOptions output overlays assets registryForRoot resolution finalPlanned
+                                                                            else
+                                                                                finalize context permissions cliOptions output overlays assets registryForRoot resolution finalPlanned
+                                                                        )
                                                             )
                                                 )
                                     )
@@ -958,9 +982,17 @@ logPortedCached context coordinate =
 VERIFIED bytes. The entry passed gren verification exactly as stored;
 byte-for-byte copy is the only faithful way to serve it (the module-record
 route re-printed and corrupted).
+
+D106: the entry is the package's STANDALONE port and therefore carries its own
+compatibility adapters, which is what makes it restorable anywhere. A workspace
+that hoisted one of those adapters into a shared shim removed it from the
+package's module set, so the restore has to remove it again — otherwise the
+package ends up with both its own copy and the shim's, and Gren rejects the
+import as AMBIGUOUS. `stripped` is exactly what `Port.CompatShim` took out of
+this package.
 -}
-replaceSrcFromEntry : Context -> Permissions -> Path -> Path -> Task Error {}
-replaceSrcFromEntry context permissions cachePath packageDir =
+replaceSrcFromEntry : Context -> Permissions -> Array Mapping.GeneratedModule -> Path -> Path -> Task Error {}
+replaceSrcFromEntry context permissions stripped cachePath packageDir =
     let
         entrySrc =
             Path.join [ cachePath, Path.fromPosixString "src" ]
@@ -995,6 +1027,33 @@ replaceSrcFromEntry context permissions cachePath packageDir =
                                 )
                         )
             )
+        |> Task.andThen
+            (\_ -> removeHoistedModules permissions.fileSystem packageDir stripped)
+
+
+removeHoistedModules : FileSystem.Permission -> Path -> Array Mapping.GeneratedModule -> Task Error {}
+removeHoistedModules fileSystem packageDir modules =
+    Array.foldl
+        (\generated pending ->
+            pending
+                |> Task.andThen
+                    (\_ ->
+                        removePath fileSystem
+                            (Path.join
+                                [ packageDir
+                                , Path.fromPosixString
+                                    (if String.startsWith "src/" generated.relativePath then
+                                        generated.relativePath
+
+                                     else
+                                        "src/" ++ generated.relativePath
+                                    )
+                                ]
+                            )
+                    )
+        )
+        (Task.succeed {})
+        modules
 
 
 {-| Rebuild a Draft from a previously verified ported src/ tree so planning and
@@ -1033,6 +1092,20 @@ materializeDraftFromCache permission source cachePath expectedDigest =
                                             if Array.isEmpty modules then
                                                 Task.fail (PortError.create "PORTED_CACHE_INVALID" "Cached ported entry has no .gren modules.")
 
+                                            else if not (Array.isEmpty (danglingCompatImports modules)) then
+                                                -- D106: an entry whose sources import a compatibility
+                                                -- adapter the entry does not carry cannot be restored.
+                                                -- The caller soft-misses on this and re-ports, which
+                                                -- also repairs the entry — the alternative is a hard
+                                                -- MODULE NOT FOUND on every future run.
+                                                Task.fail
+                                                    (PortError.create "PORTED_CACHE_INVALID"
+                                                        ("Cached ported entry is missing the compatibility modules it imports: "
+                                                            ++ String.join ", " (danglingCompatImports modules)
+                                                            ++ "."
+                                                        )
+                                                    )
+
                                             else
                                                 Task.succeed
                                                     { source = source
@@ -1046,6 +1119,31 @@ materializeDraftFromCache permission source cachePath expectedDigest =
                                                       depExports = Pipeline.emptyDepMaps
                                                     }
                                         )
+            )
+
+
+{-| D106: compatibility adapters a restored module set imports but does not
+contain. Always empty for an entry written by a tool that carries D106's
+`store` restore; non-empty only for entries banked by a build that stripped
+adapters into a shared shim and forgot to put them back.
+-}
+danglingCompatImports : Array Mapping.GeneratedModule -> Array String
+danglingCompatImports modules =
+    let
+        carried =
+            Array.foldl
+                (\generated found -> Dict.set generated.moduleName {} found)
+                Dict.empty
+                modules
+    in
+    Adapter.all
+        |> Array.map Adapter.moduleName
+        |> Array.keepIf
+            (\adapterModule ->
+                not (Dict.member adapterModule carried)
+                    && Array.any
+                        (\generated -> CompatShim.importsModule adapterModule generated.source)
+                        modules
             )
 
 
@@ -1213,6 +1311,7 @@ planPackages cliOptions registry resolution drafts =
                 , diagnostics = []
                 , portedCacheHits = Dict.empty
                 , portedCachePending = Dict.empty
+                , shimStripped = Dict.empty
                 }
             )
 
@@ -1321,6 +1420,7 @@ planOne cliOptions registry resolution drafts name state =
 
                                                     Nothing ->
                                                         state.portedCachePending
+                                            , shimStripped = state.shimStripped
                                             }
                                         )
                     )
@@ -1506,7 +1606,12 @@ prepareStaging context permissions assets rootIdentity planned staging =
                         (\_ ->
                             when Dict.get package.sourcePackage planned.portedCacheHits is
                                 Just cachePath ->
-                                    replaceSrcFromEntry context permissions cachePath
+                                    replaceSrcFromEntry context
+                                        permissions
+                                        (Dict.get package.sourcePackage planned.shimStripped
+                                            |> Maybe.withDefault []
+                                        )
+                                        cachePath
                                         (packageDirectory rootIdentity planned staging package)
 
                                 Nothing ->
@@ -1597,6 +1702,9 @@ prepareOnePackage context permissions assets rootIdentity planned staging packag
                                     pending.digest
                                     platformName
                                     pending.exports
+                                    (Dict.get elmName planned.shimStripped
+                                        |> Maybe.withDefault []
+                                    )
                     )
 
 
@@ -2538,7 +2646,13 @@ writeVendored context permissions assets packagesRoot planned packages =
                                                         when Dict.get elmName planned.portedCacheHits is
                                                             Just cachePath ->
                                                                 -- Hit: serve the entry's verified bytes (D48).
-                                                                replaceSrcFromEntry context permissions cachePath directory
+                                                                replaceSrcFromEntry context
+                                                                    permissions
+                                                                    (Dict.get elmName planned.shimStripped
+                                                                        |> Maybe.withDefault []
+                                                                    )
+                                                                    cachePath
+                                                                    directory
 
                                                             Nothing ->
                                                                 maybeFormatPackage context.platform
@@ -2593,6 +2707,9 @@ writeVendored context permissions assets packagesRoot planned packages =
                                                                                         storePending.digest
                                                                                         platformName
                                                                                         storePending.exports
+                                                                                        (Dict.get elmName planned.shimStripped
+                                                                                            |> Maybe.withDefault []
+                                                                                        )
                                                                         )
                                                     )
                                         )

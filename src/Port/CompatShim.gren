@@ -1,0 +1,446 @@
+module Port.CompatShim exposing
+    ( Outcome
+    , Package
+    , apply
+    , importsModule
+    , shimPackageName
+    )
+
+{-| D106: hoist the compatibility adapters that declare NOMINAL types into one
+shared local package, so every ported package speaks about the same type.
+
+Adapters are generated per package. For an adapter that only defines functions
+and type ALIASES that is harmless — Gren compares aliases structurally, so two
+copies of `ElmToGren.Compat.List.sum` are interchangeable. An adapter that
+declares a CUSTOM type is different: each copy is a distinct nominal type, and
+a value built by one package cannot cross into another.
+
+`ElmToGren.Compat.Http` is the only adapter that does this today (`Error`,
+`Expect`, `Request`). It broke the `shared-state` application:
+`krisajenkins/remotedata` exposes `WebData a = RemoteData Http.Error a` and
+`ohanhi/remotedata-http` consumes it, so `gren` rejected the call with a TYPE
+MISMATCH that printed the SAME type on both sides — two `Compat.Http.Error`,
+one per package.
+
+The set is read off the generated source rather than listed by hand, so a
+custom type added to any adapter is shared automatically instead of quietly
+reintroducing the defect.
+
+Three rules make the hoist survive contact with the rest of the pipeline:
+
+1.  The adapter is REMOVED from every package that carried it. Leaving the
+    copy in place while also depending on the shim is an AMBIGUOUS IMPORT:
+    Gren forbids two packages in one graph exposing the same module name.
+
+2.  Every package that can REACH a declarer must declare the shim too. Each
+    vendored package is verified standalone and is therefore the root of its
+    own compilation, and Gren refuses a dependency's local dependency the root
+    does not also declare (the same law `Plan.hoistTransitiveLocals` serves for
+    Elm-derived edges — the shim is not in the Elm graph, so it needs its own
+    closure).
+
+3.  What was stripped is handed back to the ported cache (see
+    `Port.PortedCache.store`), so a cached entry stays STANDALONE. Storing the
+    stripped tree writes an entry whose sources import a module the entry does
+    not carry; restoring it later fails with MODULE NOT FOUND and the failure
+    outlives the run that caused it. This is not hypothetical — it is what
+    poisoned four entries during the attempts that preceded this one, and it
+    is what made the hoist look cache-state dependent when it is not.
+
+-}
+
+import Array
+import Compiler.Platform as CompilerPlatform
+import Dict exposing (Dict)
+import Elm.Semver as Semver
+import Emit.Manifest exposing (Dependency(..), ExposedModules(..), SpecKind(..))
+import Emit.Package as PackageEmit
+import Emit.Workspace
+import FileSystem.Path as Path
+import Mapping.Adapter as Adapter
+import Mapping.Registry as MappingRegistry
+import Mapping.Types as Mapping exposing (AdapterId, GeneratedModule, PackageMapping(..), Registry)
+import Maybe exposing (Maybe(..))
+import Port.Error as PortError exposing (Error)
+import Result exposing (Result(..))
+
+
+type alias Package =
+    PackageEmit.Package
+
+
+{-| The rewritten package set, plus the modules taken out of each package keyed
+by its Elm coordinate. The ported cache needs the second half to keep writing
+self-sufficient entries.
+-}
+type alias Outcome =
+    { packages : Array Package
+    , stripped : Dict String (Array GeneratedModule)
+    }
+
+
+{-| Gren package name for the shim carrying one adapter. One package per
+adapter rather than one shared package for all of them: each then has exactly
+the platform and dependencies its own adapter needs, and no adapter can end up
+exposed by two shim packages at once.
+-}
+shimPackageName : AdapterId -> String
+shimPackageName adapterId =
+    "elm-to-gren/compat-" ++ String.toLower (Mapping.adapterIdName adapterId)
+
+
+shimVersion : String
+shimVersion =
+    "1.0.0"
+
+
+apply : Registry -> String -> Array Package -> Result Error Outcome
+apply registry rootElmName packages =
+    Array.foldl
+        (\adapterId accumulated ->
+            accumulated
+                |> Result.andThen (hoistOne registry rootElmName adapterId)
+        )
+        (Ok { packages = packages, stripped = Dict.empty })
+        Adapter.shared
+
+
+hoistOne : Registry -> String -> AdapterId -> Outcome -> Result Error Outcome
+hoistOne registry rootElmName adapterId state =
+    let
+        adapterModule =
+            Adapter.moduleName adapterId
+
+        needers =
+            state.packages
+                |> Array.keepIf (\package -> packageImports adapterModule package)
+                |> Array.map (\package -> package.manifest.name)
+    in
+    if Array.isEmpty needers then
+        Ok state
+
+    else
+        let
+            grenName =
+                shimPackageName adapterId
+
+            declarers =
+                declaringClosure state.packages needers
+
+            stripped =
+                Array.foldl
+                    (\package found ->
+                        let
+                            carried =
+                                Array.keepIf
+                                    (\generated -> generated.moduleName == adapterModule)
+                                    package.modules
+                        in
+                        if Array.isEmpty carried then
+                            found
+
+                        else
+                            Dict.update package.sourcePackage
+                                (\existing ->
+                                    Just (Array.append (Maybe.withDefault [] existing) carried)
+                                )
+                                found
+                    )
+                    state.stripped
+                    state.packages
+        in
+        shimSpec registry adapterId grenName
+            |> Result.andThen
+                (\spec ->
+                    state.packages
+                        |> Array.map
+                            (\package ->
+                                rewritePackage rootElmName adapterModule grenName declarers package
+                            )
+                        |> combine
+                        |> Result.map
+                            (\rewritten ->
+                                { packages =
+                                    Array.pushLast
+                                        { sourcePackage = grenName
+                                        , sourceRoot = Path.empty
+                                        , manifest = spec
+                                        , modules = [ Adapter.generateOne adapterId ]
+                                        }
+                                        rewritten
+                                , stripped = stripped
+                                }
+                            )
+                )
+
+
+{-| Strip the adapter, then declare the shim if this package is in the closure.
+-}
+rewritePackage : String -> String -> String -> Dict String {} -> Package -> Result Error Package
+rewritePackage rootElmName adapterModule grenName declarers package =
+    let
+        withoutAdapter =
+            Array.keepIf
+                (\generated -> generated.moduleName /= adapterModule)
+                package.modules
+
+        manifest =
+            package.manifest
+    in
+    if not (Dict.member manifest.name declarers) then
+        Ok { package | modules = withoutAdapter }
+
+    else
+        let
+            directory =
+                Emit.Workspace.packageDirectoryName
+                    { name = grenName, version = shimVersion }
+
+            path =
+                if package.sourcePackage == rootElmName then
+                    ".elm-to-gren/packages/" ++ directory
+
+                else
+                    "../" ++ directory
+        in
+        Ok
+            { package
+                | modules = withoutAdapter
+                , manifest =
+                    { manifest
+                        | dependencies =
+                            Dict.set grenName (LocalPath path) manifest.dependencies
+                    }
+            }
+
+
+{-| Packages that must name the shim in their own gren.json: the ones that
+import it, plus every package that reaches one of those through a `local:`
+edge. Keys are Gren package names, which is what a manifest's dependency dict
+is keyed by.
+-}
+declaringClosure : Array Package -> Array String -> Dict String {}
+declaringClosure packages seeds =
+    let
+        initial =
+            Array.foldl (\name found -> Dict.set name {} found) Dict.empty seeds
+    in
+    growClosure packages initial (Array.length packages)
+
+
+growClosure : Array Package -> Dict String {} -> Int -> Dict String {}
+growClosure packages found fuel =
+    if fuel <= 0 then
+        found
+
+    else
+        let
+            grown =
+                Array.foldl
+                    (\package current ->
+                        if Dict.member package.manifest.name current then
+                            current
+
+                        else if Array.any (\name -> Dict.member name current) (localDependencyNames package) then
+                            Dict.set package.manifest.name {} current
+
+                        else
+                            current
+                    )
+                    found
+                    packages
+        in
+        if Dict.count grown == Dict.count found then
+            found
+
+        else
+            growClosure packages grown (fuel - 1)
+
+
+localDependencyNames : Package -> Array String
+localDependencyNames package =
+    package.manifest.dependencies
+        |> Dict.foldl
+            (\name requirement found ->
+                when requirement is
+                    LocalPath _ ->
+                        Array.pushLast name found
+
+                    VersionRange _ ->
+                        found
+            )
+            []
+
+
+packageImports : String -> Package -> Bool
+packageImports adapterModule package =
+    Array.any
+        (\generated ->
+            generated.moduleName
+                /= adapterModule
+                && importsModule adapterModule generated.source
+        )
+        package.modules
+
+
+{-| True when `source` has an `import <adapterModule>` line. The trailing check
+keeps `ElmToGren.Compat.Http` from matching a hypothetical
+`ElmToGren.Compat.Http.Extra`, which would be a different module.
+-}
+importsModule : String -> String -> Bool
+importsModule adapterModule source =
+    source
+        |> String.lines
+        |> Array.any
+            (\line ->
+                let
+                    trimmed =
+                        String.trimLeft line
+
+                    prefix =
+                        "import " ++ adapterModule
+                in
+                String.startsWith prefix trimmed
+                    && (when String.popFirst (String.dropFirst (String.count prefix) trimmed) is
+                            Nothing ->
+                                True
+
+                            Just { first = next } ->
+                                not (Char.isAlphaNum next) && next /= '.' && next /= '_'
+                       )
+            )
+
+
+{-| The shim's manifest. Platform and dependency ranges come from the same
+mapping registry every other package is planned against, so the shim cannot
+drift from what its consumers were compiled with.
+-}
+shimSpec : Registry -> AdapterId -> String -> Result Error Emit.Manifest.Spec
+shimSpec registry adapterId grenName =
+    Adapter.elmRequirements adapterId
+        |> Array.foldl
+            (\elmPackage accumulated ->
+                accumulated
+                    |> Result.andThen
+                        (\state ->
+                            when MappingRegistry.mappingFor elmPackage registry is
+                                Just (GrenAnalogue details) ->
+                                    addRequirement details state
+
+                                Just (Absorbed details) ->
+                                    addRequirement details state
+
+                                _ ->
+                                    Err
+                                        (PortError.create "INTERNAL_ERROR"
+                                            ("The compatibility shim for "
+                                                ++ Mapping.adapterIdName adapterId
+                                                ++ " needs "
+                                                ++ elmPackage
+                                                ++ ", which the mapping registry does not map to a Gren package."
+                                            )
+                                        )
+                        )
+            )
+            (Ok { dependencies = Dict.empty, platform = Mapping.Common })
+        |> Result.map
+            (\state ->
+                { kind = PackageKind
+                , platform = toCompilerPlatform state.platform
+                , name = grenName
+                , summary = "Compatibility adapters generated by elm-to-gren."
+                , -- The adapter source is the tool's own, not the ported
+                  -- package's, so the shim carries the tool's license.
+                  license = "MIT"
+                , version = shimVersion
+                , exposedModules = ExposedArray [ Adapter.moduleName adapterId ]
+                , grenVersion = "0.6.0 <= v < 0.7.0"
+                , dependencies = state.dependencies
+                , sourceDirectories = [ "src" ]
+                }
+            )
+
+
+addRequirement :
+    Mapping.PackageDetails
+    -> { dependencies : Dict String Dependency, platform : Mapping.Platform }
+    -> Result Error { dependencies : Dict String Dependency, platform : Mapping.Platform }
+addRequirement details state =
+    mappedRange details.grenVersion
+        |> Result.andThen
+            (\range ->
+                combinePlatforms state.platform details.platform
+                    |> Result.map
+                        (\platform ->
+                            { dependencies =
+                                Dict.set details.grenPackage (VersionRange range) state.dependencies
+                            , platform = platform
+                            }
+                        )
+            )
+
+
+combinePlatforms : Mapping.Platform -> Mapping.Platform -> Result Error Mapping.Platform
+combinePlatforms left right =
+    when { left = left, right = right } is
+        { left = Mapping.Common } ->
+            Ok right
+
+        { right = Mapping.Common } ->
+            Ok left
+
+        _ ->
+            if left == right then
+                Ok left
+
+            else
+                Err
+                    (PortError.create "PLATFORM_CONFLICT"
+                        ("A compatibility shim cannot be both "
+                            ++ Mapping.platformName left
+                            ++ " and "
+                            ++ Mapping.platformName right
+                            ++ "."
+                        )
+                    )
+
+
+mappedRange : String -> Result Error String
+mappedRange source =
+    Semver.parseVersion source
+        |> Result.map
+            (\version ->
+                source
+                    ++ " <= v < "
+                    ++ String.fromInt (version.major + 1)
+                    ++ ".0.0"
+            )
+        |> Result.mapError
+            (Semver.errorToString
+                >> PortError.create "INVALID_MAPPING"
+            )
+
+
+toCompilerPlatform : Mapping.Platform -> CompilerPlatform.Platform
+toCompilerPlatform platform =
+    when platform is
+        Mapping.Common ->
+            CompilerPlatform.Common
+
+        Mapping.Browser ->
+            CompilerPlatform.Browser
+
+        Mapping.Node ->
+            CompilerPlatform.Node
+
+
+combine : Array (Result Error value) -> Result Error (Array value)
+combine results =
+    Array.foldl
+        (\result combined ->
+            combined
+                |> Result.andThen
+                    (\values -> Result.map (\value -> Array.pushLast value values) result)
+        )
+        (Ok [])
+        results

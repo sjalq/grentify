@@ -1,0 +1,441 @@
+module Port.CompatShimTest exposing (tests)
+
+{-| D106: the compatibility adapters that declare NOMINAL types are hoisted
+into one shared package; the rest stay per package.
+
+Law under test (`Port.CompatShim.apply`):
+
+    planned packages + mapping registry
+        -> one shim package per shared adapter,
+           no local copy of that adapter anywhere,
+           a `local:` declaration on every package that imports it or can
+           reach an importer,
+           and a record of exactly what was removed from each package.
+
+The last clause is not decoration. The removed modules are what
+`Port.PortedCache.store` puts back so a cached entry stays a STANDALONE port
+of its package. An entry banked without them imports a module it does not
+carry and can never be restored — the failure that made this defect look
+cache-state dependent for eleven attempts.
+
+Both directions are checked, because a hoist that is too WIDE is as broken as
+one that is too narrow: a package with no path to an importer must not be
+handed a dependency it cannot use, and on a platform-bound shim it could not
+even compile.
+
+-}
+
+import Array exposing (Array)
+import Dict exposing (Dict)
+import Emit.Manifest exposing (Dependency(..), ExposedModules(..), Spec, SpecKind(..))
+import FileSystem.Path as Path
+import Compiler.Platform as CompilerPlatform
+import Mapping.Adapter as Adapter
+import Mapping.Registry as MappingRegistry
+import Mapping.Types as Mapping exposing (PackageMapping(..), Registry)
+import Port.CompatShim as CompatShim
+import Port.Error as PortError
+import Result exposing (Result(..))
+
+
+type alias Check =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array Check
+tests =
+    [ onlyNominalAdaptersAreShared
+    , httpIsSharedAndListIsNot
+    , importScanRejectsALongerModuleName
+    , nobodyImportsMeansNoShim
+    , oneShimPackageForTwoCarriers
+    , noPackageKeepsALocalCopy
+    , everyImporterDeclaresTheShim
+    , reachingAnImporterDeclaresTheShim
+    , unrelatedPackageDoesNotDeclareTheShim
+    , strippedRecordsWhatWasRemoved
+    , rootUsesTheWorkspaceRelativePath
+    , shimCarriesTheMappedPlatformAndDependencies
+    ]
+
+
+
+-- FIXTURE ---------------------------------------------------------------
+-- The `shared-state` shape: two packages exchange a Compat.Http value
+-- (`krisajenkins/remotedata` builds `WebData`, `ohanhi/remotedata-http`
+-- consumes it), a third reaches one of them through a local edge, and a
+-- fourth is unrelated.
+
+
+adapterModule : String
+adapterModule =
+    Adapter.moduleName Mapping.HttpAdapter
+
+
+registry : Registry
+registry =
+    MappingRegistry.fromDocument
+        { schemaVersion = 1
+        , packages =
+            [ Absorbed (mapped "elm/core" "gren-lang/core" "7.4.2" Mapping.Common)
+            , Absorbed (mapped "elm/json" "gren-lang/core" "7.4.2" Mapping.Common)
+            , Absorbed (mapped "elm/http" "gren-lang/browser" "6.0.2" Mapping.Browser)
+            ]
+        , versionedPackages = []
+        }
+
+
+mapped : String -> String -> String -> Mapping.Platform -> Mapping.PackageDetails
+mapped elmPackage grenPackage grenVersion platform =
+    { elmPackage = elmPackage
+    , grenPackage = grenPackage
+    , grenVersion = grenVersion
+    , platform = platform
+    , modules = []
+    , absentModules = Dict.empty
+    }
+
+
+{-| A package with the adapter generated into it, as the cold transform path
+leaves it: the adapter module plus a source that imports it.
+-}
+carrier : String -> String -> Dict String Dependency -> CompatShim.Package
+carrier elmName grenName dependencies =
+    { sourcePackage = elmName
+    , sourceRoot = Path.empty
+    , manifest = spec grenName dependencies
+    , modules =
+        [ { moduleName = "Consumer"
+          , relativePath = "src/Consumer.gren"
+          , source = "module Consumer exposing (..)\n\nimport " ++ adapterModule ++ "\n"
+          }
+        , Adapter.generateOne Mapping.HttpAdapter
+        ]
+    }
+
+
+plain : String -> String -> Dict String Dependency -> CompatShim.Package
+plain elmName grenName dependencies =
+    { sourcePackage = elmName
+    , sourceRoot = Path.empty
+    , manifest = spec grenName dependencies
+    , modules =
+        [ { moduleName = "Plain"
+          , relativePath = "src/Plain.gren"
+          , source = "module Plain exposing (..)\n"
+          }
+        ]
+    }
+
+
+spec : String -> Dict String Dependency -> Spec
+spec grenName dependencies =
+    { kind = PackageKind
+    , platform = CompilerPlatform.Browser
+    , name = grenName
+    , summary = "fixture"
+    , license = "MIT"
+    , version = "1.0.0"
+    , exposedModules = ExposedArray [ "Consumer" ]
+    , grenVersion = "0.6.0 <= v < 0.7.0"
+    , dependencies = dependencies
+    , sourceDirectories = [ "src" ]
+    }
+
+
+rootElmName : String
+rootElmName =
+    "app/local"
+
+
+{-| remotedata and remotedata-http both carry the adapter; the app reaches
+remotedata-http through a local edge but never imports the adapter itself;
+elm-hex is unrelated.
+-}
+fixture : Array CompatShim.Package
+fixture =
+    [ carrier "krisajenkins/remotedata" "krisajenkins/remotedata" Dict.empty
+    , carrier "ohanhi/remotedata-http"
+        "ohanhi/remotedata-http"
+        (Dict.singleton "krisajenkins/remotedata" (LocalPath "../krisajenkins_remotedata__1_0_0"))
+    , plain rootElmName
+        "app/local"
+        (Dict.singleton "ohanhi/remotedata-http" (LocalPath ".elm-to-gren/packages/ohanhi_remotedata-http__1_0_0"))
+    , plain "rtfeldman/elm-hex" "rtfeldman/elm-hex" Dict.empty
+    ]
+
+
+applied : Result PortError.Error CompatShim.Outcome
+applied =
+    CompatShim.apply registry rootElmName fixture
+
+
+shimName : String
+shimName =
+    CompatShim.shimPackageName Mapping.HttpAdapter
+
+
+
+-- CHECKS ----------------------------------------------------------------
+
+
+onlyNominalAdaptersAreShared : Check
+onlyNominalAdaptersAreShared =
+    let
+        expected =
+            Array.keepIf Adapter.declaresNominalType Adapter.all
+    in
+    check "shared is exactly the adapters that declare a custom type"
+        (Adapter.shared == expected)
+        ("shared = "
+            ++ String.join ", " (Array.map Mapping.adapterIdName Adapter.shared)
+        )
+
+
+httpIsSharedAndListIsNot : Check
+httpIsSharedAndListIsNot =
+    check "Http declares a nominal type; List does not"
+        (Adapter.declaresNominalType Mapping.HttpAdapter
+            && not (Adapter.declaresNominalType Mapping.ListAdapter)
+        )
+        "Http has `type Error`; List is functions only"
+
+
+importScanRejectsALongerModuleName : Check
+importScanRejectsALongerModuleName =
+    check "an import of a longer module name is not a match"
+        (CompatShim.importsModule adapterModule ("import " ++ adapterModule ++ "\n")
+            && CompatShim.importsModule adapterModule ("import " ++ adapterModule ++ " exposing (Error(..))\n")
+            && not (CompatShim.importsModule adapterModule ("import " ++ adapterModule ++ ".Extra\n"))
+        )
+        "prefix match alone would claim Compat.Http.Extra"
+
+
+nobodyImportsMeansNoShim : Check
+nobodyImportsMeansNoShim =
+    let
+        untouched =
+            [ plain "rtfeldman/elm-hex" "rtfeldman/elm-hex" Dict.empty ]
+    in
+    when CompatShim.apply registry rootElmName untouched is
+        Err error ->
+            failed "no importer means no shim" (PortError.message error)
+
+        Ok outcome ->
+            check "no importer means no shim"
+                (Array.length outcome.packages == 1 && Dict.isEmpty outcome.stripped)
+                (String.fromInt (Array.length outcome.packages) ++ " packages out")
+
+
+oneShimPackageForTwoCarriers : Check
+oneShimPackageForTwoCarriers =
+    withOutcome "two carriers produce exactly one shim package"
+        (\outcome ->
+            let
+                shims =
+                    Array.keepIf (\package -> package.manifest.name == shimName) outcome.packages
+            in
+            { passed =
+                Array.length shims
+                    == 1
+                    && Array.length outcome.packages
+                    == Array.length fixture
+                    + 1
+            , details = String.fromInt (Array.length shims) ++ " shim package(s)"
+            }
+        )
+
+
+noPackageKeepsALocalCopy : Check
+noPackageKeepsALocalCopy =
+    withOutcome "no ported package keeps its own copy of the adapter"
+        (\outcome ->
+            let
+                stragglers =
+                    outcome.packages
+                        |> Array.keepIf (\package -> package.manifest.name /= shimName)
+                        |> Array.keepIf
+                            (\package ->
+                                Array.any
+                                    (\generated -> generated.moduleName == adapterModule)
+                                    package.modules
+                            )
+            in
+            { passed = Array.isEmpty stragglers
+            , details =
+                "still carrying: "
+                    ++ String.join ", " (Array.map (\package -> package.manifest.name) stragglers)
+            }
+        )
+
+
+everyImporterDeclaresTheShim : Check
+everyImporterDeclaresTheShim =
+    withOutcome "both importers declare the shim as a local dependency"
+        (\outcome ->
+            { passed =
+                declaresShim outcome "krisajenkins/remotedata"
+                    && declaresShim outcome "ohanhi/remotedata-http"
+            , details = "declarers: " ++ String.join ", " (shimDeclarers outcome)
+            }
+        )
+
+
+reachingAnImporterDeclaresTheShim : Check
+reachingAnImporterDeclaresTheShim =
+    -- Each vendored package verifies standalone as its own root, and Gren
+    -- refuses a dependency's local dependency the root does not also declare.
+    withOutcome "a package that reaches an importer through a local edge declares it too"
+        (\outcome ->
+            { passed = declaresShim outcome "app/local"
+            , details = "declarers: " ++ String.join ", " (shimDeclarers outcome)
+            }
+        )
+
+
+unrelatedPackageDoesNotDeclareTheShim : Check
+unrelatedPackageDoesNotDeclareTheShim =
+    withOutcome "an unrelated package is not handed the shim"
+        (\outcome ->
+            { passed = not (declaresShim outcome "rtfeldman/elm-hex")
+            , details = "declarers: " ++ String.join ", " (shimDeclarers outcome)
+            }
+        )
+
+
+strippedRecordsWhatWasRemoved : Check
+strippedRecordsWhatWasRemoved =
+    -- This is the ported cache's contract: what came out here goes back into
+    -- the cache entry, or the entry cannot be restored.
+    withOutcome "stripped names the adapter for each carrier and nobody else"
+        (\outcome ->
+            let
+                names =
+                    Dict.keys outcome.stripped
+
+                modulesFor elmName =
+                    Dict.get elmName outcome.stripped
+                        |> Maybe.withDefault []
+                        |> Array.map (\generated -> generated.moduleName)
+            in
+            { passed =
+                names
+                    == [ "krisajenkins/remotedata", "ohanhi/remotedata-http" ]
+                    && modulesFor "krisajenkins/remotedata"
+                    == [ adapterModule ]
+                    && modulesFor "ohanhi/remotedata-http"
+                    == [ adapterModule ]
+            , details = "stripped from: " ++ String.join ", " names
+            }
+        )
+
+
+rootUsesTheWorkspaceRelativePath : Check
+rootUsesTheWorkspaceRelativePath =
+    -- The root sits at the workspace root; every vendored package sits beside
+    -- its siblings under `.elm-to-gren/packages`.
+    withOutcome "the root points into .elm-to-gren/packages, a sibling points at .."
+        (\outcome ->
+            { passed =
+                shimPathFor outcome "app/local"
+                    == Just (".elm-to-gren/packages/" ++ shimDirectory)
+                    && shimPathFor outcome "ohanhi/remotedata-http"
+                    == Just ("../" ++ shimDirectory)
+            , details =
+                "root -> "
+                    ++ Maybe.withDefault "(none)" (shimPathFor outcome "app/local")
+                    ++ ", sibling -> "
+                    ++ Maybe.withDefault "(none)" (shimPathFor outcome "ohanhi/remotedata-http")
+            }
+        )
+
+
+shimCarriesTheMappedPlatformAndDependencies : Check
+shimCarriesTheMappedPlatformAndDependencies =
+    -- Platform and ranges come from the registry the consumers were planned
+    -- against, so the shim cannot drift from what they compiled with.
+    withOutcome "the shim is browser and depends on the mapped Gren packages"
+        (\outcome ->
+            when Array.findFirst (\package -> package.manifest.name == shimName) outcome.packages is
+                Nothing ->
+                    { passed = False, details = "no shim package emitted" }
+
+                Just { value = shim } ->
+                    { passed =
+                        shim.manifest.platform
+                            == CompilerPlatform.Browser
+                            && Dict.get "gren-lang/browser" shim.manifest.dependencies
+                            == Just (VersionRange "6.0.2 <= v < 7.0.0")
+                            && Dict.get "gren-lang/core" shim.manifest.dependencies
+                            == Just (VersionRange "7.4.2 <= v < 8.0.0")
+                            && shim.manifest.exposedModules
+                            == ExposedArray [ adapterModule ]
+                    , details =
+                        "deps: " ++ String.join ", " (Dict.keys shim.manifest.dependencies)
+                    }
+        )
+
+
+
+-- HELPERS ---------------------------------------------------------------
+
+
+shimDirectory : String
+shimDirectory =
+    "elm-to-gren_compat-http__1_0_0"
+
+
+shimPathFor : CompatShim.Outcome -> String -> Maybe String
+shimPathFor outcome elmName =
+    outcome.packages
+        |> Array.findFirst (\package -> package.sourcePackage == elmName)
+        |> Maybe.andThen
+            (\found -> Dict.get shimName found.value.manifest.dependencies)
+        |> Maybe.andThen
+            (\dependency ->
+                when dependency is
+                    LocalPath path ->
+                        Just path
+
+                    VersionRange _ ->
+                        Nothing
+            )
+
+
+declaresShim : CompatShim.Outcome -> String -> Bool
+declaresShim outcome elmName =
+    shimPathFor outcome elmName /= Nothing
+
+
+shimDeclarers : CompatShim.Outcome -> Array String
+shimDeclarers outcome =
+    outcome.packages
+        |> Array.keepIf (\package -> Dict.member shimName package.manifest.dependencies)
+        |> Array.map (\package -> package.sourcePackage)
+
+
+withOutcome : String -> (CompatShim.Outcome -> { passed : Bool, details : String }) -> Check
+withOutcome name assess =
+    when applied is
+        Err error ->
+            failed name (PortError.message error)
+
+        Ok outcome ->
+            let
+                verdict =
+                    assess outcome
+            in
+            { name = name, passed = verdict.passed, details = verdict.details }
+
+
+check : String -> Bool -> String -> Check
+check name passed details =
+    { name = name, passed = passed, details = details }
+
+
+failed : String -> String -> Check
+failed name details =
+    { name = name, passed = False, details = details }

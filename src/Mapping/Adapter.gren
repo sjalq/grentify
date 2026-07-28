@@ -3,14 +3,18 @@ module Mapping.Adapter exposing
     , adapterIdForTarget
     , adapterModuleForTarget
     , all
+    , declaresNominalType
+    , elmRequirements
     , generate
     , generateFromRequirements
+    , generateOne
     , guarantee
     , guaranteeForModule
     , guaranteeForTarget
     , moduleName
     , normalize
     , requiredForModules
+    , shared
     , sourceFor
     )
 
@@ -93,6 +97,55 @@ all =
 moduleName : AdapterId -> String
 moduleName adapterId =
     prefix ++ adapterIdName adapterId
+
+
+{-| D106: does this adapter declare a CUSTOM type, as opposed to only functions
+and type aliases?
+
+The distinction decides whether the adapter can be generated per package. Gren
+compares aliases structurally, so two copies of `Compat.Markdown.Options` are
+the same type; a custom type is nominal, so two copies of `Compat.Http.Error`
+are two unrelated types and a value cannot cross the package boundary. Read
+off the generated source so a custom type added to any adapter is shared from
+that moment on, instead of silently reintroducing the defect.
+-}
+declaresNominalType : AdapterId -> Bool
+declaresNominalType adapterId =
+    sourceFor adapterId
+        |> String.lines
+        |> Array.any
+            (\line ->
+                String.startsWith "type " line
+                    && not (String.startsWith "type alias " line)
+            )
+
+
+{-| The adapters that must live in ONE shared package for the whole port —
+see `Port.CompatShim`.
+-}
+shared : Array AdapterId
+shared =
+    Array.keepIf declaresNominalType all
+
+
+{-| The Elm packages an adapter's own imports need. A shim package is not in
+the Elm dependency graph, so it has no manifest to derive its Gren dependencies
+from; naming the Elm coordinates here lets it resolve them through the same
+mapping registry its consumers were planned against.
+
+Only `shared` adapters are ever asked. The default is deliberately minimal:
+an adapter that needs more than core and reaches this list unlisted fails
+loudly at `gren docs` with the module it could not find, which is a better
+outcome than guessing a dependency set.
+-}
+elmRequirements : AdapterId -> Array String
+elmRequirements adapterId =
+    when adapterId is
+        HttpAdapter ->
+            [ "elm/core", "elm/json", "elm/http" ]
+
+        _ ->
+            [ "elm/core" ]
 
 
 adapterModuleForTarget : String -> Maybe String

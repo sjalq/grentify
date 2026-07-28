@@ -31,6 +31,7 @@ import Node
 import Resolve.SolverTest
 import Port.PlanTest
 import Port.PortedCacheTest
+import Port.CompatShimTest
 import Port.AddTransactionTest
 import Review.DependencyPinsTest
 import Review.RunnerTest
@@ -106,6 +107,7 @@ allChecks =
     , Verify.PackageTest.tests
     , Port.PlanTest.tests
     , Port.PortedCacheTest.tests
+    , Port.CompatShimTest.tests
     , Ast.BareResolveTest.tests
     , Ast.CtorLawTest.tests
     , Ast.EvalPropTest.tests

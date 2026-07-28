@@ -287,6 +287,19 @@ licenseNames =
 
 copyLicense : FileSystem.Permission -> Path -> Path -> Array String -> Task Error {}
 copyLicense permission sourceRoot destination names =
+    -- D106: a generated package (the compat shim) has no Elm source tree, and
+    -- an empty root resolves to the process's working directory — which would
+    -- copy whatever LICENSE the user happened to run the tool from and make
+    -- the output depend on where it was invoked.
+    if String.isEmpty (Path.toPosixString sourceRoot) then
+        Task.succeed {}
+
+    else
+        copyLicenseFrom permission sourceRoot destination names
+
+
+copyLicenseFrom : FileSystem.Permission -> Path -> Path -> Array String -> Task Error {}
+copyLicenseFrom permission sourceRoot destination names =
     when Array.popFirst names is
         Nothing ->
             Task.succeed {}
@@ -313,7 +326,7 @@ copyLicense permission sourceRoot destination names =
                                     )
 
                         else
-                            copyLicense permission sourceRoot destination remaining
+                            copyLicenseFrom permission sourceRoot destination remaining
                     )
 
 

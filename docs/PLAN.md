@@ -2712,11 +2712,32 @@ worse than the `../X` spelling, so `Port.Plan.localPath`'s rule is right and
 the incompatibility is something else. Recorded so a seventh attempt does not
 spend a cycle on it.
 
-All six attempts were reverted rather than half-landed: one known failure is
+ATTEMPT 7 settled (f): it is NOT a Gren rule. A hand-built workspace with
+exactly the target shape compiles — an app root AND a package root, each
+declaring `local:.elm-to-gren/packages/X`, with a vendored package declaring
+`local:../X`. Both `gren make` and `gren docs` accept it. The design is sound;
+the fault is in our emission.
+
+Making the ROOT declare the shim even when it has no adapters of its own
+(Gren's actual requirement) moved the `add` path to a new and much more
+specific error: it looks for a package manifest at
+`<app>/.elm-to-gren/.packages.elm-to-gren-<uuid>` — the STAGING directory.
+`add` stages vendored packages in `.elm-to-gren/.packages.<uuid>` and renames
+it to `.elm-to-gren/packages` on commit, so an app-relative
+`local:.elm-to-gren/packages/X` is wrong for the whole of staging and right
+only afterwards, while a package-relative `../X` is right throughout.
+
+That is the real remaining problem, and it is about the ADD PATH'S STAGING
+LIFECYCLE rather than about shims: the shared package needs a declaration
+that is valid both while staged under a temporary name and after the commit
+renames it. Worth solving on the fast repro (`add` into a scratch app, which
+reproduces in seconds) before touching the 10-app suite again.
+
+All seven attempts were reverted rather than half-landed: one known failure is
 worth more than four new ones. What they bought is the list above — the fix is
 not conceptually hard, it is six specific rules deep, five are solved, and the
-sixth now has one option eliminated. The next step is reading how the Gren
-compiler compares local-dependency sources, not another guess.
+sixth now has one option eliminated. The next step is the add path's staging
+lifecycle, not the shims and not the Gren compiler.
 
 - 2026-07-28 FULL SUITE RUN — every target in `test:all`, plus the ones
   outside it, actually executed rather than assumed:

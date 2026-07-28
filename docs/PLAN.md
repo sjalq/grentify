@@ -2751,11 +2751,30 @@ either it is not being counted as a host, or its adapter modules reach the
 staged `src/` by a route other than `package.modules`. That is the next thing
 to probe, and `add` into a scratch app reproduces it in seconds.
 
-All eight attempts were reverted rather than half-landed: one known failure is
+ATTEMPT 9 probed the remaining question and answered it. In the `add` flow
+`planned.packages` contains ONLY the vendored libraries — the consuming
+application is never in it:
+
+    PROBE: ["krisajenkins/remotedata PKG adapters=3",
+            "ohanhi/remotedata-http PKG adapters=3"]
+
+So the app's own `src/ElmToGren/Compat/*`, emitted when the app itself was
+ported, is out of the hoist's reach by construction, and it goes AMBIGUOUS
+IMPORT against the shared package the vendored libraries now depend on.
+
+That reframes the whole change. The shim set is not a property of one port —
+it is a property of the APPLICATION plus everything vendored into it over
+time, across separate `add` invocations. A shared shim package therefore has
+to be owned and reconciled at the app level (created or updated on each
+`add`, with the app's own private copies removed at the same time), not
+synthesised inside a single port's package set. Everything in layers a–h
+still applies; they are just not sufficient on their own.
+
+All nine attempts were reverted rather than half-landed: one known failure is
 worth more than four new ones. What they bought is the list above — the fix is
 not conceptually hard, it is six specific rules deep, five are solved, and the
-sixth now has one option eliminated. The next step is how the APPLICATION
-root's adapters reach the staged tree.
+sixth now has one option eliminated. The next step is designing the shim
+package as an APP-LEVEL artifact reconciled across `add` invocations.
 
 - 2026-07-28 FULL SUITE RUN — every target in `test:all`, plus the ones
   outside it, actually executed rather than assumed:

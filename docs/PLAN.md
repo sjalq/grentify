@@ -2770,11 +2770,58 @@ to be owned and reconciled at the app level (created or updated on each
 synthesised inside a single port's package set. Everything in layers a–h
 still applies; they are just not sufficient on their own.
 
-All nine attempts were reverted rather than half-landed: one known failure is
+ATTEMPT 10 corrected attempt 9 and got `shared-state` to PORT — then found
+why that is still not enough.
+
+First the correction: `test:apps` uses the PORT flow (a local path and
+`--out`), not `add`. Attempt 9's probe was of the `add` flow, which the app
+suite never exercises, so its conclusion ("the shim set is app-level across
+add invocations") was wrong. In a port the app IS the root of
+`planned.packages`.
+
+Probing the real flow gave the fact every earlier attempt was missing:
+
+    PROBE: [... "ohanhi/remotedata-http PKG adapters=0" ...]
+
+`ohanhi/remotedata-http` reports ZERO adapter modules and ships three. A
+ported-cache hit takes its `modules` from the entry while
+`replaceSrcFromEntry` puts the shim files on disk afterwards, so the hoist
+cannot see them: such a package was never stripped and never declared the
+shared package, and its restored copy went ambiguous. Counting a cache hit as
+a host fixes it.
+
+Then three more rules, each from an error rather than a guess:
+
+  i. EVERY package that can accept a shim must DECLARE it, not just the ones
+     carrying shims. Each package is verified STANDALONE and is therefore the
+     root of its own compilation; Gren refuses a dependency's local
+     dependency the root does not also declare. `rtfeldman/elm-css` depends
+     on `robinheghan/murmur3`, which declares the common shim, so elm-css
+     must declare it too. A `common` shim is acceptable to every platform, a
+     platform-bound one only to its own.
+  j. AN ADAPTER MUST LIVE IN EXACTLY ONE SHIM PACKAGE. With a package
+     depending on both the common and the browser shim, `ElmToGren.Compat.List`
+     in both is AMBIGUOUS IMPORT. Visiting `common` first and letting it claim
+     what it can, then excluding claimed modules from later platforms, settles
+     it.
+
+With i and j, `elm-to-gren port .test-cache/apps/src/shared-state` PASSES —
+11 packages, one shared shim set, verified clean.
+
+  k. …AND IT IS STILL CACHE-STATE DEPENDENT. The same build gives 6/10 on the
+     full `test:apps` run: which packages are ported-cache HITS differs with
+     suite ordering, and the hoist's behaviour still varies with that. A fix
+     that passes in one cache state and not another is worse than a known
+     failure, so this was reverted too. Making the outcome independent of
+     cache state — most likely by giving the shim package a content-addressed
+     identity, or by teaching the ported cache to store packages already
+     stripped — is the remaining work.
+
+All ten attempts were reverted rather than half-landed: one known failure is
 worth more than four new ones. What they bought is the list above — the fix is
 not conceptually hard, it is six specific rules deep, five are solved, and the
-sixth now has one option eliminated. The next step is designing the shim
-package as an APP-LEVEL artifact reconciled across `add` invocations.
+sixth now has one option eliminated. The next step is making the hoist
+independent of ported-cache state.
 
 - 2026-07-28 FULL SUITE RUN — every target in `test:all`, plus the ones
   outside it, actually executed rather than assumed:

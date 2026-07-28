@@ -2822,12 +2822,19 @@ With i and j, `elm-to-gren port .test-cache/apps/src/shared-state` PASSES —
      not. Fresh enough, and it works; cached enough, and packages import
      modules the shim never received.
 
-     The fix is therefore not to gather a union at all: generate the COMPLETE
-     adapter set (`Mapping.Adapter.all`) into the shim packages, and decide
-     each adapter's platform from its own imports (`import Http` / `Browser` /
-     `Html` / `Markdown` => browser, otherwise common) rather than from which
-     hosts happened to be visible. That is a pure function of the adapter
-     sources, so the result is identical in every cache state.
+     The obvious answer — generate the COMPLETE adapter set
+     (`Mapping.Adapter.all`) into the shim packages and classify each adapter
+     by its own imports — was tried in ATTEMPT 11 and is WRONG: `test:apps`
+     fell to 4/10, worse than any earlier attempt. Generating adapters nobody
+     asked for drags their dependencies and their platform constraints into
+     every workspace, and the import-scan classification is too crude to
+     partition them safely. Do not re-try it as stated.
+
+     What remains true is the diagnosis: the shim package's CONTENTS must not
+     depend on how many packages came from cache while its CONSUMERS do not.
+     The way to get there is probably to make the ported cache record which
+     adapters an entry carries — the information is lost today, which is the
+     whole problem — rather than to guess the set from either end.
 
 All ten attempts were reverted rather than half-landed: one known failure is
 worth more than four new ones. What they bought is the list above — the fix is

@@ -2733,11 +2733,29 @@ that is valid both while staged under a temporary name and after the commit
 renames it. Worth solving on the fast repro (`add` into a scratch app, which
 reproduces in seconds) before touching the 10-app suite again.
 
-All seven attempts were reverted rather than half-landed: one known failure is
+ATTEMPT 8 found two more real layers and cleared the error from attempt 7:
+
+  g. ORDER. `writeVendored` writes AND VERIFIES packages in array order, so a
+     shim package appended with `Array.pushLast` does not exist yet when its
+     dependents are verified — hence the ENOENT on the staging directory that
+     looked like a path bug. `Array.pushFirst`.
+  h. THE OTHER CACHE-RESTORE. `writeVendored` has its own cache-hit branch,
+     separate from `prepareStaging`'s, and it restores the banked `src/` too.
+     Both need the adapter prune, and both need the shim package excluded from
+     `gren docs` verification.
+
+With g and h the add path gets as far as the APPLICATION ROOT: the app's own
+`src/ElmToGren/Compat/String.gren` survives and goes ambiguous against the
+shared package. The app is an `ApplicationKind` package in `planned.packages`;
+either it is not being counted as a host, or its adapter modules reach the
+staged `src/` by a route other than `package.modules`. That is the next thing
+to probe, and `add` into a scratch app reproduces it in seconds.
+
+All eight attempts were reverted rather than half-landed: one known failure is
 worth more than four new ones. What they bought is the list above — the fix is
 not conceptually hard, it is six specific rules deep, five are solved, and the
-sixth now has one option eliminated. The next step is the add path's staging
-lifecycle, not the shims and not the Gren compiler.
+sixth now has one option eliminated. The next step is how the APPLICATION
+root's adapters reach the staged tree.
 
 - 2026-07-28 FULL SUITE RUN — every target in `test:all`, plus the ones
   outside it, actually executed rather than assumed:

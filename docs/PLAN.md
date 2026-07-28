@@ -2812,10 +2812,22 @@ With i and j, `elm-to-gren port .test-cache/apps/src/shared-state` PASSES —
      full `test:apps` run: which packages are ported-cache HITS differs with
      suite ordering, and the hoist's behaviour still varies with that. A fix
      that passes in one cache state and not another is worse than a known
-     failure, so this was reverted too. Making the outcome independent of
-     cache state — most likely by giving the shim package a content-addressed
-     identity, or by teaching the ported cache to store packages already
-     stripped — is the remaining work.
+     failure, so this was reverted too.
+
+     The mechanism is now clear enough to name the fix. A cache-hit host is
+     STRIPPED and DECLARES the shim, but contributes nothing to the shim's
+     module set, because the union is gathered from `package.modules` — which
+     for a cache hit is empty of adapters. So the shim package's CONTENTS
+     depend on how many packages happened to be fresh, while its CONSUMERS do
+     not. Fresh enough, and it works; cached enough, and packages import
+     modules the shim never received.
+
+     The fix is therefore not to gather a union at all: generate the COMPLETE
+     adapter set (`Mapping.Adapter.all`) into the shim packages, and decide
+     each adapter's platform from its own imports (`import Http` / `Browser` /
+     `Html` / `Markdown` => browser, otherwise common) rather than from which
+     hosts happened to be visible. That is a pure function of the adapter
+     sources, so the result is identical in every cache state.
 
 All ten attempts were reverted rather than half-landed: one known failure is
 worth more than four new ones. What they bought is the list above — the fix is

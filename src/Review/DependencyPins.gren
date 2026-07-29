@@ -30,6 +30,7 @@ import Json.Encode as Encode
 import Resolve.Solver as Solver exposing (Resolution)
 import Result exposing (Result)
 import String
+import System.JsonPairs as JsonPairs exposing (Pair)
 
 
 {-| Package name (`author/project`) to the exact version string the port
@@ -83,7 +84,7 @@ pinElmJson pins source =
             |> Result.mapError Decode.errorToString
             |> Result.andThen
                 (\topPairs ->
-                    when pairString "type" topPairs is
+                    when JsonPairs.pairString "type" topPairs is
                         Just "package" ->
                             pinPackageManifest pins topPairs
 
@@ -105,13 +106,13 @@ pinPackageManifest pins topPairs =
             let
                 newTop =
                     topPairs
-                        |> setPair "dependencies" (objectFromPairs (pinStringMap pins deps))
-                        |> setPair "test-dependencies" (objectFromPairs (pinStringMap pins tests))
+                        |> JsonPairs.setPair "dependencies" (JsonPairs.objectFromPairs (pinStringMap pins deps))
+                        |> JsonPairs.setPair "test-dependencies" (JsonPairs.objectFromPairs (pinStringMap pins tests))
             in
-            Encode.encode 4 (objectFromPairs newTop) ++ "\n"
+            Encode.encode 4 (JsonPairs.objectFromPairs newTop) ++ "\n"
         )
-        (objectPairs "dependencies" topPairs)
-        (objectPairsOrEmpty "test-dependencies" topPairs)
+        (JsonPairs.objectPairs "dependencies" topPairs)
+        (JsonPairs.objectPairsOrEmpty "test-dependencies" topPairs)
 
 
 pinApplicationManifest : Pins -> Array Pair -> Result String String
@@ -125,29 +126,29 @@ pinApplicationManifest pins topPairs =
                             let
                                 newDeps =
                                     deps
-                                        |> setPair "direct" (objectFromPairs (pinExactMap pins direct))
-                                        |> setPair "indirect" (objectFromPairs (pinExactMap pins indirect))
+                                        |> JsonPairs.setPair "direct" (JsonPairs.objectFromPairs (pinExactMap pins direct))
+                                        |> JsonPairs.setPair "indirect" (JsonPairs.objectFromPairs (pinExactMap pins indirect))
 
                                 newTests =
                                     tests
-                                        |> setPair "direct" (objectFromPairs (pinExactMap pins testDirect))
-                                        |> setPair "indirect" (objectFromPairs (pinExactMap pins testIndirect))
+                                        |> JsonPairs.setPair "direct" (JsonPairs.objectFromPairs (pinExactMap pins testDirect))
+                                        |> JsonPairs.setPair "indirect" (JsonPairs.objectFromPairs (pinExactMap pins testIndirect))
 
                                 newTop =
                                     topPairs
-                                        |> setPair "dependencies" (objectFromPairs newDeps)
-                                        |> setPair "test-dependencies" (objectFromPairs newTests)
+                                        |> JsonPairs.setPair "dependencies" (JsonPairs.objectFromPairs newDeps)
+                                        |> JsonPairs.setPair "test-dependencies" (JsonPairs.objectFromPairs newTests)
                             in
-                            Encode.encode 4 (objectFromPairs newTop) ++ "\n"
+                            Encode.encode 4 (JsonPairs.objectFromPairs newTop) ++ "\n"
                         )
-                        (objectPairsOrEmpty "direct" tests)
-                        (objectPairsOrEmpty "indirect" tests)
+                        (JsonPairs.objectPairsOrEmpty "direct" tests)
+                        (JsonPairs.objectPairsOrEmpty "indirect" tests)
                 )
-                (objectPairs "direct" deps)
-                (objectPairsOrEmpty "indirect" deps)
+                (JsonPairs.objectPairs "direct" deps)
+                (JsonPairs.objectPairsOrEmpty "indirect" deps)
         )
-        (objectPairs "dependencies" topPairs)
-        (objectPairsOrEmpty "test-dependencies" topPairs)
+        (JsonPairs.objectPairs "dependencies" topPairs)
+        (JsonPairs.objectPairsOrEmpty "test-dependencies" topPairs)
         |> Result.andThen identity
         |> Result.andThen identity
 
@@ -213,79 +214,3 @@ nextPatchBound version =
         ++ String.fromInt version.minor
         ++ "."
         ++ String.fromInt (version.patch + 1)
-
-
--- JSON object-pair helpers (same shape as Orchestrator's gren.json surgery).
-
-
-type alias Pair =
-    { key : String
-    , value : Decode.Value
-    }
-
-
-pairString : String -> Array Pair -> Maybe String
-pairString key pairs =
-    when Array.findFirst (\pair -> pair.key == key) pairs is
-        Just found ->
-            Decode.decodeValue Decode.string found.value.value
-                |> Result.toMaybe
-
-        Nothing ->
-            Nothing
-
-
-objectPairs : String -> Array Pair -> Result String (Array Pair)
-objectPairs key pairs =
-    when Array.findFirst (\pair -> pair.key == key) pairs is
-        Nothing ->
-            Err ("elm.json is missing \"" ++ key ++ "\".")
-
-        Just found ->
-            Decode.decodeValue (Decode.keyValuePairs Decode.value) found.value.value
-                |> Result.mapError
-                    (\problem ->
-                        "elm.json field \""
-                            ++ key
-                            ++ "\" is not a JSON object: "
-                            ++ Decode.errorToString problem
-                    )
-
-
-objectPairsOrEmpty : String -> Array Pair -> Result String (Array Pair)
-objectPairsOrEmpty key pairs =
-    when Array.findFirst (\pair -> pair.key == key) pairs is
-        Nothing ->
-            Ok []
-
-        Just found ->
-            Decode.decodeValue (Decode.keyValuePairs Decode.value) found.value.value
-                |> Result.mapError
-                    (\problem ->
-                        "elm.json field \""
-                            ++ key
-                            ++ "\" is not a JSON object: "
-                            ++ Decode.errorToString problem
-                    )
-
-
-setPair : String -> Decode.Value -> Array Pair -> Array Pair
-setPair key value pairs =
-    if Array.any (\pair -> pair.key == key) pairs then
-        Array.map
-            (\pair ->
-                if pair.key == key then
-                    { key = key, value = value }
-
-                else
-                    pair
-            )
-            pairs
-
-    else
-        Array.pushLast { key = key, value = value } pairs
-
-
-objectFromPairs : Array Pair -> Decode.Value
-objectFromPairs pairs =
-    Encode.object (Array.map (\pair -> { key = pair.key, value = pair.value }) pairs)

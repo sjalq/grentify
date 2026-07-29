@@ -1,0 +1,21 @@
+module System.Task exposing
+    ( fromResult
+    )
+
+{-| Lift a pure `Result` into a `Task` without inventing a new error type at
+each call site. Same one-liner lived in Port.Graph, Port.Orchestrator,
+Elm.Acquire, and Resolve.Online.
+-}
+
+import Result exposing (Result)
+import Task exposing (Task)
+
+
+fromResult : (problem -> error) -> Result problem value -> Task error value
+fromResult toError result =
+    when result is
+        Ok value ->
+            Task.succeed value
+
+        Err problem ->
+            Task.fail (toError problem)

@@ -9,7 +9,8 @@ import Review.Protocol exposing (Diagnostic)
 
 
 report
-    : { rootElm : String
+    : { toolVersion : String
+      , rootElm : String
       , rootGren : String
       , outputDirectory : String
       , verified : Bool
@@ -19,7 +20,7 @@ report
 report details =
     Encode.object
         [ { key = "schemaVersion", value = Encode.int 1 }
-        , { key = "toolVersion", value = Encode.string "0.1.0" }
+        , { key = "toolVersion", value = Encode.string details.toolVersion }
         , { key = "rootElm", value = Encode.string details.rootElm }
         , { key = "rootGren", value = Encode.string details.rootGren }
         , { key = "outputDirectory", value = Encode.string details.outputDirectory }

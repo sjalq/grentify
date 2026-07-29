@@ -11,6 +11,7 @@ import Emit.Manifest as GrenManifest
 import Mapping.Registry
 import Mapping.Types as Mapping exposing (PackageMapping(..), Registry)
 import Port.Error as PortError exposing (Error)
+import Port.Plan as Plan
 
 
 type alias LocalDependency =
@@ -117,7 +118,7 @@ buildDependencies targetName mappings localDependencies dependencies =
                                     Ok built
 
                                 else
-                                    setDependency local.grenPackage (GrenManifest.LocalPath local.path) built
+                                    Plan.setDependency local.grenPackage (GrenManifest.LocalPath local.path) built
 
                             Nothing ->
                                 when Mapping.Registry.mappingFor elmName mappings is
@@ -152,42 +153,14 @@ addMapped targetName details dependencies =
         Ok dependencies
 
     else
-        -- Applications pin exact versions; packages use ranges. Detect via
-        -- whether the gren version string already looks like a pin.
-        setDependency details.grenPackage (GrenManifest.VersionRange (mappedRange details.grenVersion)) dependencies
-
-
-setDependency
-    : String
-    -> GrenManifest.Dependency
-    -> Dict String GrenManifest.Dependency
-    -> Result Error (Dict String GrenManifest.Dependency)
-setDependency name requirement dependencies =
-    when Dict.get name dependencies is
-        Nothing ->
-            Ok (Dict.set name requirement dependencies)
-
-        Just previous ->
-            if previous == requirement then
-                Ok dependencies
-
-            else
-                Err <|
-                    PortError.create "GREN_DEPENDENCY_CONFLICT"
-                        ("Multiple Elm dependencies map to incompatible requirements for " ++ name ++ ".")
-
-
-mappedRange : String -> String
-mappedRange version =
-    when Elm.Semver.parseVersion version is
-        Ok parsed ->
-            version
-                ++ " <= v < "
-                ++ String.fromInt (parsed.major + 1)
-                ++ ".0.0"
-
-        Err _ ->
-            version ++ " <= v < " ++ version
+        -- Applications pin exact versions; packages use ranges. Same caret-range
+        -- helper as Plan/CompatShim (invalid grenVersion is an error, not a
+        -- silent `v < v` fallback).
+        Plan.mappedRange details.grenVersion
+            |> Result.andThen
+                (\range ->
+                    Plan.setDependency details.grenPackage (GrenManifest.VersionRange range) dependencies
+                )
 
 
 platformInferenceError : Mapping.PlatformInferenceError -> Error

@@ -4,7 +4,7 @@
  *
  * Never invents counts from catalogs or old logs.
  *
- * Also prints a LEDGER section (docs/PLAN.md §5): totals by state, coverage vs
+ * Also prints a LEDGER section (ledger law): totals by state, coverage vs
  * the registry snapshot, count of STALE entries (entry.commit predates the last
  * src/ change), and — when a valid suite proof exists — reconciliation of suite
  * failures against evidenced working-failure ledger entries. The ledger section
@@ -149,7 +149,7 @@ function proofSection() {
 }
 
 /**
- * LEDGER section (docs/PLAN.md §5). Always prints. `proof` is the loaded suite
+ * LEDGER section (ledger law). Always prints. `proof` is the loaded suite
  * proof, or null when there is no valid proof on this tree.
  */
 function ledgerSection(proof) {

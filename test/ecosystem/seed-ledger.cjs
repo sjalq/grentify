@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Law: the ledger (docs/PLAN.md §5) records the terminal state of every WALKED
+ * Law: the ledger (ledger law) records the terminal state of every WALKED
  * ecosystem package. This seeder is thin and RERUNNABLE:
  *
  *   1. Enumerates the suite packages from the candidate catalogs (pure +

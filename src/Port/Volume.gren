@@ -7,11 +7,9 @@ module Port.Volume exposing
     , summary
     )
 
-{-| Detect **volume catalog** packages (icon packs, CSS class dumps).
+{-| Huge packages (icon packs, CSS dumps): finite O(size) work, not hangs.
 
-These are finite O(size) work, not hangs. Pretty-printing them is pure cost for
-suite proof (`gren` verify does not need format). Thresholds match
-`docs/PHASE-ECOSYSTEM-HARDENING.md` scale policy.
+Format is skipped for suite cost; verify does not need pretty-printed sources.
 -}
 
 import Array exposing (Array)

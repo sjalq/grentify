@@ -1,0 +1,217 @@
+module Transform.Scan exposing
+    ( blockCommentEnd
+    , blockCommentStart
+    , glslEnd
+    , glslStart
+    , isIdentifierContinuation
+    , isIdentifierStart
+    , isQualifiedIdentifierContinuation
+    , lineCommentStart
+    , matchesAt
+    , multilineQuote
+    , scanIdentifierEnd
+    , scanQualifiedIdentifierEnd
+    , skipBlockComment
+    , skipGlsl
+    , skipLineComment
+    , skipMultilineString
+    , skipQuoted
+    , skipWhitespace
+    )
+
+{-| Shared source scanners: skip comments/strings/GLSL; identifier rules. -}
+
+import Array exposing (Array)
+import Char
+
+
+lineCommentStart : Array Char
+lineCommentStart =
+    [ '-', '-' ]
+
+
+blockCommentStart : Array Char
+blockCommentStart =
+    [ '{', '-' ]
+
+
+blockCommentEnd : Array Char
+blockCommentEnd =
+    [ '-', '}' ]
+
+
+glslStart : Array Char
+glslStart =
+    [ '[', 'g', 'l', 's', 'l', '|' ]
+
+
+glslEnd : Array Char
+glslEnd =
+    [ '|', ']' ]
+
+
+multilineQuote : Array Char
+multilineQuote =
+    [ '"', '"', '"' ]
+
+
+matchesAt : Array Char -> Int -> Array Char -> Bool
+matchesAt characters offset expected =
+    Array.indexedFoldl
+        (\relativeIndex expectedCharacter matches ->
+            matches
+                && Array.get (offset + relativeIndex) characters
+                == Just expectedCharacter
+        )
+        True
+        expected
+
+
+isIdentifierStart : Char -> Bool
+isIdentifierStart character =
+    Char.isAlpha character || character == '_'
+
+
+{-| Code-token identifier (no dots). Qualified names are separate tokens. -}
+isIdentifierContinuation : Char -> Bool
+isIdentifierContinuation character =
+    isIdentifierStart character
+        || Char.isDigit character
+        || character == '\''
+
+
+{-| Module-path style identifiers (`Foo.Bar`) used by hazard detection. -}
+isQualifiedIdentifierContinuation : Char -> Bool
+isQualifiedIdentifierContinuation character =
+    isIdentifierContinuation character || character == '.'
+
+
+scanIdentifierEnd : Array Char -> Int -> Int
+scanIdentifierEnd characters offset =
+    scanWhile isIdentifierContinuation characters offset
+
+
+scanQualifiedIdentifierEnd : Array Char -> Int -> Int
+scanQualifiedIdentifierEnd characters offset =
+    scanWhile isQualifiedIdentifierContinuation characters offset
+
+
+scanWhile : (Char -> Bool) -> Array Char -> Int -> Int
+scanWhile keep characters offset =
+    when Array.get offset characters is
+        Just character ->
+            if keep character then
+                scanWhile keep characters (offset + 1)
+
+            else
+                offset
+
+        Nothing ->
+            offset
+
+
+skipLineComment : Array Char -> Int -> Int
+skipLineComment characters offset =
+    when Array.get offset characters is
+        Nothing ->
+            Array.length characters
+
+        Just '\n' ->
+            offset
+
+        Just '\r' ->
+            offset
+
+        Just _ ->
+            skipLineComment characters (offset + 1)
+
+
+skipBlockComment : Array Char -> Int -> Int -> Int
+skipBlockComment characters offset depth =
+    if depth == 0 then
+        offset
+
+    else
+        when Array.get offset characters is
+            Nothing ->
+                Array.length characters
+
+            Just _ ->
+                if matchesAt characters offset blockCommentStart then
+                    skipBlockComment characters (offset + 2) (depth + 1)
+
+                else if matchesAt characters offset blockCommentEnd then
+                    skipBlockComment characters (offset + 2) (depth - 1)
+
+                else
+                    skipBlockComment characters (offset + 1) depth
+
+
+skipQuoted : Array Char -> Char -> Int -> Int
+skipQuoted characters delimiter offset =
+    when Array.get offset characters is
+        Nothing ->
+            Array.length characters
+
+        Just '\\' ->
+            if offset + 1 < Array.length characters then
+                skipQuoted characters delimiter (offset + 2)
+
+            else
+                Array.length characters
+
+        Just character ->
+            if character == delimiter then
+                offset + 1
+
+            else
+                skipQuoted characters delimiter (offset + 1)
+
+
+skipMultilineString : Array Char -> Int -> Int
+skipMultilineString characters offset =
+    when Array.get offset characters is
+        Nothing ->
+            Array.length characters
+
+        Just '\\' ->
+            if offset + 1 < Array.length characters then
+                skipMultilineString characters (offset + 2)
+
+            else
+                Array.length characters
+
+        Just _ ->
+            if matchesAt characters offset multilineQuote then
+                offset + 3
+
+            else
+                skipMultilineString characters (offset + 1)
+
+
+skipGlsl : Array Char -> Int -> Int
+skipGlsl characters offset =
+    when Array.get offset characters is
+        Nothing ->
+            Array.length characters
+
+        Just _ ->
+            if matchesAt characters offset glslEnd then
+                offset + 2
+
+            else
+                skipGlsl characters (offset + 1)
+
+
+skipWhitespace : Array Char -> Int -> Int
+skipWhitespace characters offset =
+    when Array.get offset characters is
+        Just character ->
+            if Array.member character [ ' ', '\t', '\n', '\r', '\u{000B}', '\u{000C}' ] then
+                skipWhitespace characters (offset + 1)
+
+            else
+                offset
+
+        Nothing ->
+            offset

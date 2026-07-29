@@ -22,6 +22,7 @@ module Mapping.Types exposing
     , mappingKind
     , mappingModules
     , mappingPlatform
+    , platformFromName
     , platformName
     )
 
@@ -46,6 +47,25 @@ platformName platform =
 
         Node ->
             "node"
+
+
+{-| Inverse of `platformName`. Callers map `Nothing` to their own error code
+(extraction vs cache vs CLI), so the spelling of platform tags stays one place.
+-}
+platformFromName : String -> Maybe Platform
+platformFromName name =
+    when name is
+        "common" ->
+            Just Common
+
+        "browser" ->
+            Just Browser
+
+        "node" ->
+            Just Node
+
+        _ ->
+            Nothing
 
 
 type MappingKind

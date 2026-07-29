@@ -18,6 +18,8 @@ import FileSystem.Path as Path exposing (Path)
 import Mapping.Types exposing (GeneratedModule)
 import Port.Error as PortError exposing (Error)
 import System.File
+import System.Result
+import System.Text
 import Task exposing (Task)
 
 
@@ -88,7 +90,7 @@ prepare package =
                 (\manifestText ->
                     package.modules
                         |> Array.map prepareModule
-                        |> combine
+                        |> System.Result.combine
                         |> Result.andThen
                             (\modules ->
                                 uniqueModules package.manifest.name modules
@@ -136,7 +138,7 @@ prepareModule generated =
                     Ok
                         { moduleName = generated.moduleName
                         , relativePath = relativePath
-                        , source = ensureTrailingNewline generated.source
+                        , source = System.Text.ensureTrailingNewline generated.source
                         }
             )
 
@@ -235,28 +237,13 @@ duplicate packageName moduleIdentity =
             )
 
 
-combine : Array (Result error value) -> Result error (Array value)
-combine results =
-    Array.foldl
-        (\result combined ->
-            combined
-                |> Result.andThen
-                    (\values ->
-                        result
-                            |> Result.map (\value -> Array.pushLast value values)
-                    )
-        )
-        (Ok [])
-        results
-
-
 write : FileSystem.Permission -> Path -> Prepared -> Task Error Path
 write permission directory package =
     System.File.ensureDirectory permission directory
         |> Task.andThen
             (\_ ->
                 System.File.writeText permission
-                    (inDirectory "gren.json" directory)
+                    (System.File.inDirectory "gren.json" directory)
                     package.manifestText
             )
         |> Task.andThen
@@ -274,7 +261,7 @@ writeModule permission directory module_ pending =
         |> Task.andThen
             (\_ ->
                 System.File.writeText permission
-                    (inDirectory ("src/" ++ module_.relativePath) directory)
+                    (System.File.inDirectory ("src/" ++ module_.relativePath) directory)
                     module_.source
                     |> Task.map (\_ -> {})
             )
@@ -307,13 +294,13 @@ copyLicenseFrom permission sourceRoot destination names =
         Just { first = name, rest = remaining } ->
             let
                 source =
-                    inDirectory name sourceRoot
+                    System.File.inDirectory name sourceRoot
             in
             System.File.exists permission source
                 |> Task.andThen
                     (\sourceExists ->
                         if sourceExists then
-                            FileSystem.copyFile permission (inDirectory name destination) source
+                            FileSystem.copyFile permission (System.File.inDirectory name destination) source
                                 |> Task.map (\_ -> {})
                                 |> Task.mapError
                                     (\error ->
@@ -328,17 +315,3 @@ copyLicenseFrom permission sourceRoot destination names =
                         else
                             copyLicenseFrom permission sourceRoot destination remaining
                     )
-
-
-inDirectory : String -> Path -> Path
-inDirectory relative directory =
-    Path.append (Path.fromPosixString relative) directory
-
-
-ensureTrailingNewline : String -> String
-ensureTrailingNewline source =
-    if String.endsWith "\n" source then
-        source
-
-    else
-        source ++ "\n"

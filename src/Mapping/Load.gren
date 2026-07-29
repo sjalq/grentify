@@ -1,4 +1,14 @@
-module Mapping.Load exposing (load)
+module Mapping.Load exposing
+    ( Loaded
+    , load
+    )
+
+{-| Single entry point for loading the builtin mapping plus overlays.
+
+Returns both the overlayed registry and the raw file texts (builtin first).
+Lockfile digests and local-port fingerprints hash those texts so callers never
+re-read the same JSON.
+-}
 
 import Array exposing (Array)
 import FileSystem
@@ -11,7 +21,14 @@ import System.File
 import Task exposing (Task)
 
 
-load : FileSystem.Permission -> Path -> Array Path -> Task Error Registry
+type alias Loaded =
+    { registry : Registry
+    , -- Raw file texts, builtin first then overlays (order stable for digests).
+      texts : Array String
+    }
+
+
+load : FileSystem.Permission -> Path -> Array Path -> Task Error Loaded
 load permission builtin overlays =
     readDocument permission builtin
         |> Task.andThen
@@ -21,24 +38,35 @@ load permission builtin overlays =
                         (\path pending ->
                             pending
                                 |> Task.andThen
-                                    (\documents ->
+                                    (\rows ->
                                         readDocument permission path
-                                            |> Task.map (\document -> Array.pushLast document documents)
+                                            |> Task.map (\row -> Array.pushLast row rows)
                                     )
                         )
                         (Task.succeed [ base ])
             )
-        |> Task.map Registry.overlayDocuments
+        |> Task.map
+            (\rows ->
+                { registry = Registry.overlayDocuments (Array.map .document rows)
+                , texts = Array.map .contents rows
+                }
+            )
 
 
-readDocument : FileSystem.Permission -> Path -> Task Error MappingDocument
+type alias DocumentRow =
+    { document : MappingDocument
+    , contents : String
+    }
+
+
+readDocument : FileSystem.Permission -> Path -> Task Error DocumentRow
 readDocument permission path =
     System.File.readText permission path
         |> Task.andThen
             (\contents ->
                 when Decode.decodeString (Path.toPosixString path) contents is
                     Ok document ->
-                        Task.succeed document
+                        Task.succeed { document = document, contents = contents }
 
                     Err (InvalidMapping details) ->
                         Task.fail <|

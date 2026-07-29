@@ -16,6 +16,7 @@ import Elm.PackageName as PackageName exposing (Name)
 import Elm.Semver as Semver exposing (Version)
 import Port.Error as PortError exposing (Error)
 import Resolve.Solver as Solver exposing (Requirement, Resolution)
+import System.Task
 import Task exposing (Task)
 
 
@@ -68,7 +69,7 @@ resolve options provider root =
                                     |> Dict.values
                                     |> Solver.catalogFromManifests
                                     |> Result.andThen (\catalog -> Solver.solveWith options catalog root)
-                                    |> resultTask solverFailure
+                                    |> System.Task.fromResult solverFailure
                     )
 
 
@@ -334,13 +335,3 @@ firstError existing next =
 solverFailure : Solver.Error -> Error
 solverFailure solverError =
     PortError.create "DEPENDENCY_CONFLICT" (Solver.errorToString solverError)
-
-
-resultTask : (problem -> Error) -> Result problem value -> Task Error value
-resultTask toError result =
-    when result is
-        Ok value ->
-            Task.succeed value
-
-        Err problem ->
-            Task.fail (toError problem)

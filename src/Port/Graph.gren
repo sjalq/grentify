@@ -33,7 +33,6 @@ import Cli
 import Dict exposing (Dict)
 import Elm.Manifest as ElmManifest exposing (Manifest)
 import Elm.PackageName as PackageName exposing (Name)
-import Elm.Registry as ElmRegistry
 import Elm.Semver as Semver
 import Emit.Manifest as GrenManifest
 import Emit.Workspace as Workspace
@@ -42,12 +41,13 @@ import FileSystem.Path as Path exposing (Path)
 import Format.Gren as Format
 import HttpClient
 import Json.Encode as Encode
-import Mapping.Adapter as Adapter exposing (AdapterError(..))
+import Mapping.Adapter as Adapter
 import Mapping.Load
 import Mapping.Registry as MappingRegistry
 import Mapping.Types as Mapping exposing (MappingKind(..), Registry)
 import Node
 import Port.Error as PortError exposing (Error)
+import Port.Mapped as Mapped
 import Port.Plan as Plan
 import Port.Volume as Volume
 import Resolve.Online
@@ -55,6 +55,8 @@ import Resolve.Solver as Solver exposing (Resolution)
 import Result as CoreResult
 import Review.Runner
 import System.File
+import System.JsonPairs as JsonPairs
+import System.Task
 import Task exposing (Task)
 import Transform.Pipeline as Pipeline
 import Verify.Package
@@ -139,7 +141,11 @@ run permissions options =
     in
     Mapping.Load.load permissions.fileSystem options.builtinMapping options.mappingOverlays
         |> Task.andThen
-            (\registry ->
+            (\loaded ->
+                let
+                    registry =
+                        loaded.registry
+                in
                 Acquire.acquire permissions acquireOptions options.input
                     |> Task.andThen
                         (\rootSource ->
@@ -152,7 +158,7 @@ run permissions options =
                                             |> Task.andThen
                                                 (\drafts ->
                                                     planPackages options registry resolution drafts
-                                                        |> resultTask identity
+                                                        |> System.Task.fromResult identity
                                                         |> Task.andThen
                                                             (emitGraph permissions options registry resolution drafts)
                                                 )
@@ -170,7 +176,7 @@ resolveGraph
 resolveGraph permissions acquireOptions registry rootSource =
     let
         solverOptions =
-            { isMapped = isMappedDependency registry }
+            { isMapped = Mapped.isMappedDependency registry }
 
         registryPermissions =
             { fileSystem = permissions.fileSystem
@@ -182,12 +188,12 @@ resolveGraph permissions acquireOptions registry rootSource =
             , offline = acquireOptions.offline
             }
     in
-    if hasUnmappedDependencies registry rootSource.manifest then
+    if Mapped.hasUnmappedDependencies registry rootSource.manifest then
         RegistryProvider.loadIndex registryPermissions registryOptions
             |> Task.andThen
                 (\index ->
                     Resolve.Online.resolve solverOptions
-                        { versionsFor = versionsFor index
+                        { versionsFor = Mapped.versionsFor index
                         , manifestFor = RegistryProvider.loadManifest registryPermissions registryOptions
                         }
                         rootSource.manifest
@@ -195,44 +201,16 @@ resolveGraph permissions acquireOptions registry rootSource =
 
     else
         Solver.solveWith solverOptions Dict.empty rootSource.manifest
-            |> CoreResult.mapError solverFailure
-            |> resultTask identity
+            |> CoreResult.mapError Mapped.solverFailure
+            |> System.Task.fromResult identity
 
 
-{-| Whether the dependency is satisfied by a Gren package mapping and must not
-be acquired or transpiled. `Transpile` entries intentionally return `False`.
+{-| Re-export of `Port.Mapped.isMappedDependency` for graph tests and callers
+that already import this module.
 -}
 isMappedDependency : Registry -> Name -> Bool
-isMappedDependency registry name =
-    when MappingRegistry.mappingFor (PackageName.toString name) registry is
-        Just mapping ->
-            Mapping.mappingKind mapping /= TranspileKind
-
-        Nothing ->
-            False
-
-
-hasUnmappedDependencies : Registry -> Manifest -> Bool
-hasUnmappedDependencies registry manifest =
-    ElmManifest.dependencyNames manifest
-        |> Array.any (not << isMappedDependency registry)
-
-
-versionsFor : ElmRegistry.Registry -> Name -> Task Error (Array Semver.Version)
-versionsFor registry name =
-    when ElmRegistry.versionsFor name registry is
-        Just versions ->
-            Task.succeed versions
-
-        Nothing ->
-            Task.fail <|
-                PortError.create "ELM_PACKAGE_NOT_FOUND"
-                    ("The Elm registry does not contain " ++ PackageName.toString name ++ ".")
-
-
-solverFailure : Solver.Error -> Error
-solverFailure problem =
-    PortError.create "DEPENDENCY_RESOLUTION_FAILED" (Solver.errorToString problem)
+isMappedDependency =
+    Mapped.isMappedDependency
 
 
 acquireResolvedSources
@@ -296,7 +274,7 @@ acquireExact permissions options expected =
             (Coordinate.errorToString
                 >> PortError.create "INTERNAL_ERROR"
             )
-        |> resultTask identity
+        |> System.Task.fromResult identity
         |> Task.andThen (Acquire.acquireCoordinate permissions options)
         |> Task.andThen
             (\acquired ->
@@ -421,8 +399,8 @@ transformOne permissions options registry source =
         }
         |> Task.andThen
             (\extraction ->
-                Pipeline.transform registry Pipeline.emptyDepMaps extraction pipelineSources
-                    |> resultTask identity
+                Pipeline.transform registry Pipeline.emptyDependencyMaps extraction pipelineSources
+                    |> System.Task.fromResult identity
             )
         |> Task.andThen
             (\transformed ->
@@ -447,20 +425,20 @@ transformOne permissions options registry source =
 
                 else
                     Adapter.generateFromRequirements transformed.requiredAdapters
-                        |> CoreResult.mapError adapterFailure
+                        |> CoreResult.mapError Mapped.adapterFailure
                         |> CoreResult.andThen
                             (\adapters ->
-                                parseDetectedPlatform transformed.detectedPlatform
+                                Mapped.detectedPlatform transformed.detectedPlatform
                                     |> CoreResult.map
-                                        (\detectedPlatform ->
+                                        (\platform ->
                                             { source = source
                                             , modules = Array.append transformed.modules adapters
                                             , diagnostics = transformed.diagnostics
-                                            , detectedPlatform = detectedPlatform
+                                            , detectedPlatform = platform
                                             }
                                         )
                             )
-                        |> resultTask identity
+                        |> System.Task.fromResult identity
             )
 
 
@@ -475,37 +453,6 @@ sourcePath relativePath =
 
     else
         "src/" ++ normalized
-
-
-parseDetectedPlatform : String -> CoreResult.Result Error Mapping.Platform
-parseDetectedPlatform value =
-    when value is
-        "common" ->
-            Ok Mapping.Common
-
-        "browser" ->
-            Ok Mapping.Browser
-
-        "node" ->
-            Ok Mapping.Node
-
-        _ ->
-            Err <|
-                PortError.create "EXTRACTION_INVALID"
-                    ("Unknown detected platform " ++ value ++ ".")
-
-
-adapterFailure : AdapterError -> Error
-adapterFailure adapterError =
-    when adapterError is
-        UnknownAdapter details ->
-            PortError.create "INVALID_MAPPING"
-                ("Unknown compatibility adapter "
-                    ++ details.requirement
-                    ++ ". Available adapters: "
-                    ++ String.join ", " details.available
-                    ++ "."
-                )
 
 
 planPackages
@@ -731,7 +678,7 @@ formatStaging platform fileSystem permission formatExecutable rootIdentity plann
                         (\_ ->
                             let
                                 dir =
-                                    packageDirectory rootIdentity staging package
+                                    Workspace.packageDirectory rootIdentity.grenName staging package
                             in
                             Volume.scanPackageDirectory fileSystem dir
                                 |> Task.andThen
@@ -762,7 +709,7 @@ verifyStaging platform permission grenExecutable rootIdentity planned staging =
                         (\_ ->
                             Verify.Package.verify platform
                                 permission
-                                { packageDirectory = packageDirectory rootIdentity staging package
+                                { packageDirectory = Workspace.packageDirectory rootIdentity.grenName staging package
                                 , grenExecutable = grenExecutable
                                 , label = package.manifest.name ++ " " ++ package.manifest.version
                                 , isApplication =
@@ -776,24 +723,6 @@ verifyStaging platform permission grenExecutable rootIdentity planned staging =
                         )
             )
             (Task.succeed {})
-
-
-packageDirectory : Plan.Identity -> Path -> Workspace.Package -> Path
-packageDirectory rootIdentity staging package =
-    if package.manifest.name == rootIdentity.grenName then
-        staging
-
-    else
-        Path.join
-            [ staging
-            , Path.fromPosixString ".elm-to-gren/packages"
-            , Path.fromPosixString
-                (Workspace.packageDirectoryName
-                    { name = package.manifest.name
-                    , version = package.manifest.version
-                    }
-                )
-            ]
 
 
 packageSummaries : Resolution -> Dict String Draft -> Planned -> Array PackageSummary
@@ -855,9 +784,9 @@ encodeDiagnostic diagnostic =
         [ { key = "code", value = Encode.string diagnostic.code }
         , { key = "severity", value = Encode.string diagnostic.severity }
         , { key = "message", value = Encode.string diagnostic.message }
-        , { key = "file", value = maybeString diagnostic.path }
-        , { key = "module", value = maybeString diagnostic.moduleName }
-        , { key = "help", value = maybeString diagnostic.help }
+        , { key = "file", value = JsonPairs.maybeString diagnostic.path }
+        , { key = "module", value = JsonPairs.maybeString diagnostic.moduleName }
+        , { key = "help", value = JsonPairs.maybeString diagnostic.help }
         ]
 
 
@@ -950,32 +879,12 @@ encodeLockPackage resolution drafts planned name =
         , { key = "grenName", value = Encode.string grenName }
         , { key = "strategy", value = Encode.string "transpile" }
         , { key = "sourceStrategy"
-          , value = provenance |> Maybe.map .strategy |> maybeString
+          , value = provenance |> Maybe.map .strategy |> JsonPairs.maybeString
           }
         , { key = "sourceUrl"
-          , value = provenance |> Maybe.map .sourceUrl |> maybeString
+          , value = provenance |> Maybe.map .sourceUrl |> JsonPairs.maybeString
           }
         , { key = "revision"
-          , value = provenance |> Maybe.andThen .revision |> maybeString
+          , value = provenance |> Maybe.andThen .revision |> JsonPairs.maybeString
           }
         ]
-
-
-maybeString : Maybe String -> Encode.Value
-maybeString value =
-    when value is
-        Just string ->
-            Encode.string string
-
-        Nothing ->
-            Encode.null
-
-
-resultTask : (problem -> Error) -> CoreResult.Result problem value -> Task Error value
-resultTask toError result =
-    when result is
-        Ok value ->
-            Task.succeed value
-
-        Err problem ->
-            Task.fail (toError problem)

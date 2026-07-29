@@ -25,7 +25,7 @@ in dependency `lue-bird/elm-bounded-nat`; the value is constructor
 `Linear.Down` in dependency `lue-bird/elm-linear-direction`. Package-local
 `collectHomes` never sees either module, so the repair was skipped and
 dependents printed `N.Down` as a variant. Dependency constructor homes are
-banked with the rest of DepMaps (D45/D70 channel) and merged in here.
+banked with the rest of DependencyMaps (D45/D70 channel) and merged in here.
 
 Record type aliases also create value-level names (`Graph.Node id label`).
 A module that declares such an alias MUST block re-pointing — otherwise
@@ -78,7 +78,7 @@ empty =
     }
 
 
-{-| Rebuild Homes from the DepMaps / banked-export flat maps. -}
+{-| Rebuild Homes from the DependencyMaps / banked-export flat maps. -}
 fromMaps : Dict String (Array String) -> Dict String {} -> Homes
 fromMaps byCtor knownModules =
     { byCtor = byCtor

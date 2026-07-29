@@ -49,6 +49,7 @@ import Char
 import Dict exposing ( Dict )
 import Math
 import Maybe exposing ( Maybe(..) )
+import System.Text
 
 
 {-| What each printer needs besides the node it is printing.
@@ -1162,13 +1163,8 @@ isDefaultCtor moduleName name =
 
 
 startsUpper : String -> Bool
-startsUpper name =
-    when String.popFirst name is
-        Just { first = first } ->
-            Char.isUpper first
-
-        Nothing ->
-            False
+startsUpper =
+    System.Text.startsUpper
 
 
 tupleFieldLabels : Int -> Array String

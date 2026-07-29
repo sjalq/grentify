@@ -1,0 +1,30 @@
+module System.Result exposing
+    ( combine
+    )
+
+{-| Array-of-Results helpers.
+
+`combine` lived identically in Emit.Package, Emit.Workspace, and Port.CompatShim.
+One fold keeps short-circuit-on-first-Err semantics consistent across emit and
+shim rewrites.
+-}
+
+import Array exposing (Array)
+import Result exposing (Result)
+
+
+{-| Left-to-right: first `Err` wins; on all `Ok`, preserve order.
+-}
+combine : Array (Result error value) -> Result error (Array value)
+combine results =
+    Array.foldl
+        (\result combined ->
+            combined
+                |> Result.andThen
+                    (\values ->
+                        result
+                            |> Result.map (\value -> Array.pushLast value values)
+                    )
+        )
+        (Ok [])
+        results

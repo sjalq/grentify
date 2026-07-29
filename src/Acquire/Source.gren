@@ -34,6 +34,7 @@ import Json.Encode as Encode
 import Node
 import Port.Error as PortError exposing ( Error )
 import System.File
+import System.JsonPairs as JsonPairs
 import System.Process
 import Task exposing ( Task )
 
@@ -440,16 +441,16 @@ provenanceJson provenance =
           , value = Encode.string provenance.coordinate
           }
         , { key = "manifestUrl"
-          , value = maybeString provenance.manifestUrl
+          , value = JsonPairs.maybeString provenance.manifestUrl
           }
         , { key = "registryEndpointUrl"
-          , value = maybeString provenance.registryEndpointUrl
+          , value = JsonPairs.maybeString provenance.registryEndpointUrl
           }
         , { key = "sourceUrl"
           , value = Encode.string provenance.sourceUrl
           }
         , { key = "revision"
-          , value = maybeString provenance.revision
+          , value = JsonPairs.maybeString provenance.revision
           }
         , { key = "fromCache"
           , value = Encode.bool provenance.fromCache
@@ -463,16 +464,6 @@ provenanceJson provenance =
                   "Portable verified archive extraction is not available in gren-lang/node 6; used a shallow exact-tag Git clone."
           }
         ]
-
-
-maybeString : Maybe String -> Encode.Value
-maybeString value =
-    when value is
-        Just string ->
-            Encode.string string
-
-        Nothing ->
-            Encode.null
 
 
 registryProvenance : Manifest -> Bool -> Maybe String -> Provenance
@@ -534,19 +525,4 @@ rebaseTree packageRoot provenance tree =
 
 removeIfExists : FileSystem.Permission -> Path -> Task Error {}
 removeIfExists permission path =
-    System.File.exists permission path
-        |> Task.andThen
-            (\pathExists ->
-                if pathExists then
-                    FileSystem.remove permission { recursive = True } path
-                        |> Task.map (\_ -> {})
-                        |> Task.mapError
-                            (\fileError ->
-                                PortError.create "SOURCE_CACHE_CLEANUP_FAILED"
-                                    ("Could not remove "
-                                        ++ Path.toPosixString path
-                                        ++ ": "
-                                        ++ FileSystem.errorToString fileError))
-
-                else
-                    Task.succeed {})
+    System.File.removeIfExists permission "SOURCE_CACHE_CLEANUP_FAILED" path

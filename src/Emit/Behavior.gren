@@ -19,6 +19,7 @@ import Emit.Manifest as Manifest exposing (Dependency(..))
 import Json.Encode as Encode
 import Mapping.Adapter as Adapter
 import Mapping.Types exposing (GeneratedModule)
+import System.Text
 
 
 type alias FilePlan =
@@ -70,7 +71,7 @@ planBehaviorTests rootGrenName testModules rootDependencies analogueInfo =
             testModules
                 |> Array.map (\module_ ->
                     { relativePath = "src/" ++ stripTestsPrefix module_.relativePath
-                    , contents = ensureTrailingNewline module_.source
+                    , contents = System.Text.ensureTrailingNewline module_.source
                     }
                 )
 
@@ -113,7 +114,7 @@ planBehaviorTests rootGrenName testModules rootDependencies analogueInfo =
                                         Array.map
                                             (\adapterModule ->
                                                 { relativePath = "src/" ++ adapterModule.relativePath
-                                                , contents = ensureTrailingNewline adapterModule.source
+                                                , contents = System.Text.ensureTrailingNewline adapterModule.source
                                                 }
                                             )
                                             generated
@@ -343,7 +344,7 @@ buildMain rootGrenName modules =
         fullSource =
             imports ++ "\n\n" ++ mainDeclaration
     in
-    ensureTrailingNewline fullSource
+    System.Text.ensureTrailingNewline fullSource
 
 
 {-| Build the suite definition from module test declarations.
@@ -502,7 +503,7 @@ buildManifest _ rootDependencies analogueInfo =
                 , { key = "dependencies", value = deps }
                 ]
     in
-    ensureTrailingNewline (Encode.encode 4 manifest)
+    System.Text.ensureTrailingNewline (Encode.encode 4 manifest)
 
 
 rangeLowerBound : String -> String
@@ -515,13 +516,3 @@ rangeLowerBound range =
         Nothing ->
             range
 
-
-{-| Ensure string ends with newline.
--}
-ensureTrailingNewline : String -> String
-ensureTrailingNewline source =
-    if String.endsWith "\n" source then
-        source
-
-    else
-        source ++ "\n"

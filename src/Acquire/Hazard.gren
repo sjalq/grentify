@@ -13,7 +13,21 @@ regions (comments/strings) are skipped; real `[glsl|…|]` blocks are not.
 -}
 
 import Array exposing ( Array )
-import Char
+import System.Text
+import Transform.Scan as Scan exposing
+    ( blockCommentStart
+    , glslStart
+    , isIdentifierStart
+    , lineCommentStart
+    , matchesAt
+    , multilineQuote
+    , scanQualifiedIdentifierEnd
+    , skipBlockComment
+    , skipGlsl
+    , skipLineComment
+    , skipMultilineString
+    , skipQuoted
+    )
 
 
 type Hazard
@@ -39,7 +53,7 @@ detect : String -> Array Hazard
 detect source =
     let
         scan =
-            scanFrom (sourceCharacters source) 0 { tokens = [], glsl = False }
+            scanFrom (System.Text.sourceCharacters source) 0 { tokens = [], glsl = False }
 
         findings =
             inspectTokens scan.tokens
@@ -101,7 +115,7 @@ scanFrom characters offset scan =
             else if isIdentifierStart character then
                 let
                     tokenEnd =
-                        scanIdentifierEnd characters (offset + 1)
+                        scanQualifiedIdentifierEnd characters (offset + 1)
 
                     token =
                         characters
@@ -141,165 +155,6 @@ inspectTokens tokens findings =
             inspectTokens rest updated
 
 
-skipLineComment : Array Char -> Int -> Int
-skipLineComment characters offset =
-    when Array.get offset characters is
-        Nothing ->
-            Array.length characters
-
-        Just '\n' ->
-            offset
-
-        Just '\r' ->
-            offset
-
-        Just _ ->
-            skipLineComment characters (offset + 1)
-
-
-skipBlockComment : Array Char -> Int -> Int -> Int
-skipBlockComment characters offset depth =
-    if depth == 0 then
-        offset
-
-    else
-        when Array.get offset characters is
-            Nothing ->
-                Array.length characters
-
-            Just _ ->
-                if matchesAt characters offset blockCommentStart then
-                    skipBlockComment characters (offset + 2) (depth + 1)
-
-                else if matchesAt characters offset blockCommentEnd then
-                    skipBlockComment characters (offset + 2) (depth - 1)
-
-                else
-                    skipBlockComment characters (offset + 1) depth
-
-
-skipQuoted : Array Char -> Char -> Int -> Int
-skipQuoted characters delimiter offset =
-    when Array.get offset characters is
-        Nothing ->
-            Array.length characters
-
-        Just '\\' ->
-            if offset + 1 < Array.length characters then
-                skipQuoted characters delimiter (offset + 2)
-
-            else
-                Array.length characters
-
-        Just character ->
-            if character == delimiter then
-                offset + 1
-
-            else
-                skipQuoted characters delimiter (offset + 1)
-
-
-skipMultilineString : Array Char -> Int -> Int
-skipMultilineString characters offset =
-    when Array.get offset characters is
-        Nothing ->
-            Array.length characters
-
-        Just '\\' ->
-            if offset + 1 < Array.length characters then
-                skipMultilineString characters (offset + 2)
-
-            else
-                Array.length characters
-
-        Just _ ->
-            if matchesAt characters offset multilineQuote then
-                offset + 3
-
-            else
-                skipMultilineString characters (offset + 1)
-
-
-skipGlsl : Array Char -> Int -> Int
-skipGlsl characters offset =
-    when Array.get offset characters is
-        Nothing ->
-            Array.length characters
-
-        Just _ ->
-            if matchesAt characters offset glslEnd then
-                offset + 2
-
-            else
-                skipGlsl characters (offset + 1)
-
-
-scanIdentifierEnd : Array Char -> Int -> Int
-scanIdentifierEnd characters offset =
-    when Array.get offset characters is
-        Just character ->
-            if isIdentifierContinuation character then
-                scanIdentifierEnd characters (offset + 1)
-
-            else
-                offset
-
-        Nothing ->
-            offset
-
-
-isIdentifierStart : Char -> Bool
-isIdentifierStart character =
-    Char.isAlpha character || character == '_'
-
-
-isIdentifierContinuation : Char -> Bool
-isIdentifierContinuation character =
-    isIdentifierStart character
-        || Char.isDigit character
-        || character == '\''
-        || character == '.'
-
-
-matchesAt : Array Char -> Int -> Array Char -> Bool
-matchesAt characters offset expected =
-    Array.indexedFoldl
-        (\relativeIndex expectedCharacter matches ->
-            matches
-                && Array.get (offset + relativeIndex) characters == Just
-                    expectedCharacter) True expected
-
-
-lineCommentStart : Array Char
-lineCommentStart =
-    [ '-', '-' ]
-
-
-blockCommentStart : Array Char
-blockCommentStart =
-    [ '{', '-' ]
-
-
-blockCommentEnd : Array Char
-blockCommentEnd =
-    [ '-', '}' ]
-
-
-glslStart : Array Char
-glslStart =
-    [ '[', 'g', 'l', 's', 'l', '|' ]
-
-
-glslEnd : Array Char
-glslEnd =
-    [ '|', ']' ]
-
-
-multilineQuote : Array Char
-multilineQuote =
-    [ '"', '"', '"' ]
-
-
 errorToString : Hazard -> String
 errorToString hazard =
     when hazard is
@@ -313,10 +168,3 @@ errorToString hazard =
             "contains an Elm [glsl|...|] shader block, which needs an explicit compatibility mapping"
 
 
-{-| `String.toArray` is O(n^2) in gren-lang/core 7.4.2 (`foldl Array.pushLast []`,
-and `pushLast` copies the whole array). Linear equivalent.
--}
-sourceCharacters : String -> Array Char
-sourceCharacters source =
-    String.foldl Builder.pushLast (Builder.empty (String.count source)) source
-        |> Builder.toArray

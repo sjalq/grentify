@@ -1,0 +1,116 @@
+module System.JsonPairs exposing
+    ( Pair
+    , hasPair
+    , maybeString
+    , objectFromPairs
+    , objectPairs
+    , objectPairsOrEmpty
+    , pairString
+    , removePair
+    , setPair
+    )
+
+{-| Ordered JSON object pairs for elm.json / gren.json field surgery. -}
+
+import Array exposing (Array)
+import Json.Decode as Decode
+import Json.Encode as Encode
+import Result exposing (Result)
+
+
+type alias Pair =
+    { key : String
+    , value : Decode.Value
+    }
+
+
+{-| Encode `Just s` as a JSON string and `Nothing` as null. Shared by report
+and provenance emitters so optional fields stay consistent.
+-}
+maybeString : Maybe String -> Encode.Value
+maybeString value =
+    when value is
+        Just string ->
+            Encode.string string
+
+        Nothing ->
+            Encode.null
+
+
+pairString : String -> Array Pair -> Maybe String
+pairString key pairs =
+    when Array.findFirst (\pair -> pair.key == key) pairs is
+        Just found ->
+            Decode.decodeValue Decode.string found.value.value
+                |> Result.toMaybe
+
+        Nothing ->
+            Nothing
+
+
+hasPair : String -> Array Pair -> Bool
+hasPair key pairs =
+    Array.any (\pair -> pair.key == key) pairs
+
+
+{-| Require `key` to be present and a JSON object. -}
+objectPairs : String -> Array Pair -> Result String (Array Pair)
+objectPairs key pairs =
+    when Array.findFirst (\pair -> pair.key == key) pairs is
+        Nothing ->
+            Err ("Missing \"" ++ key ++ "\" field.")
+
+        Just found ->
+            Decode.decodeValue (Decode.keyValuePairs Decode.value) found.value.value
+                |> Result.mapError
+                    (\problem ->
+                        "Field \""
+                            ++ key
+                            ++ "\" is not a JSON object: "
+                            ++ Decode.errorToString problem
+                    )
+
+
+{-| Like `objectPairs`, but a missing field is treated as `{}`. -}
+objectPairsOrEmpty : String -> Array Pair -> Result String (Array Pair)
+objectPairsOrEmpty key pairs =
+    when Array.findFirst (\pair -> pair.key == key) pairs is
+        Nothing ->
+            Ok []
+
+        Just found ->
+            Decode.decodeValue (Decode.keyValuePairs Decode.value) found.value.value
+                |> Result.mapError
+                    (\problem ->
+                        "Field \""
+                            ++ key
+                            ++ "\" is not a JSON object: "
+                            ++ Decode.errorToString problem
+                    )
+
+
+setPair : String -> Decode.Value -> Array Pair -> Array Pair
+setPair key value pairs =
+    if Array.any (\pair -> pair.key == key) pairs then
+        Array.map
+            (\pair ->
+                if pair.key == key then
+                    { key = key, value = value }
+
+                else
+                    pair
+            )
+            pairs
+
+    else
+        Array.pushLast { key = key, value = value } pairs
+
+
+removePair : String -> Array Pair -> Array Pair
+removePair key pairs =
+    Array.keepIf (\pair -> pair.key /= key) pairs
+
+
+objectFromPairs : Array Pair -> Decode.Value
+objectFromPairs pairs =
+    Encode.object (Array.map (\pair -> { key = pair.key, value = pair.value }) pairs)

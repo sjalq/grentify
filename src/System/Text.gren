@@ -1,0 +1,40 @@
+module System.Text exposing
+    ( ensureTrailingNewline
+    , sourceCharacters
+    , startsUpper
+    )
+
+{-| Shared string helpers. Prefer `sourceCharacters` over `String.toArray` on
+large sources — core's `toArray` is O(n²) in gren-lang/core 7.4.2.
+-}
+
+import Array exposing (Array)
+import Array.Builder as Builder
+import Char
+import String
+
+
+ensureTrailingNewline : String -> String
+ensureTrailingNewline source =
+    if String.endsWith "\n" source then
+        source
+
+    else
+        source ++ "\n"
+
+
+sourceCharacters : String -> Array Char
+sourceCharacters source =
+    String.foldl Builder.pushLast (Builder.empty (String.count source)) source
+        |> Builder.toArray
+
+
+{-| True when the first character is uppercase (empty string is false). -}
+startsUpper : String -> Bool
+startsUpper value =
+    when String.popFirst value is
+        Just { first = first } ->
+            Char.isUpper first
+
+        Nothing ->
+            False

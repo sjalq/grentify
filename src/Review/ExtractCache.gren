@@ -22,15 +22,12 @@ review surface changes the digest and invalidates stale entries.
 Local-path inputs are mutable and are never cached (see `keyFor`).
 -}
 
-import Bytes exposing (Bytes)
-import Bytes.Decode as BytesDecode
-import Crypto
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
-import Math
 import Port.Error as PortError
 import Review.Protocol as Protocol exposing (Extraction)
 import System.File
+import System.Hash
 import Task exposing (Task)
 
 
@@ -134,7 +131,7 @@ digestFor permission reviewConfig cliVersionMarker files dependencyPinsDigest =
                             ++ entries
                             |> String.join "\n---extract-cache---\n"
                 in
-                sha256Hex canonical
+                System.Hash.sha256Hex canonical
             )
         |> Task.onError (\_ -> Task.succeed "")
 
@@ -170,17 +167,6 @@ readSources permission paths =
         )
         (Task.succeed [])
         paths
-
-
-sha256Hex : String -> Task x String
-sha256Hex input =
-    Crypto.getSecureContext
-        |> Task.andThen
-            (\context ->
-                Crypto.digest context Crypto.Sha256 (Bytes.fromString input)
-            )
-        |> Task.map (\digestBytes -> Maybe.withDefault "" (bytesToHex digestBytes))
-        |> Task.onError (\_ -> Task.succeed "")
 
 
 {-| Read a cached extraction. Returns `Nothing` on a cache miss or when the
@@ -219,7 +205,7 @@ store permission path rawStdout =
 
 writeAtomic : FileSystem.Permission -> Path -> String -> Task x {}
 writeAtomic permission path contents =
-    freshUuid
+    System.Hash.freshUuid
         |> Task.andThen
             (\maybeUuid ->
                 when maybeUuid is
@@ -229,7 +215,7 @@ writeAtomic permission path contents =
                     Just uuid ->
                         let
                             tempPath =
-                                tempSibling path uuid
+                                System.File.tempSibling path (".tmp-" ++ uuid)
                         in
                         writeTemp permission tempPath contents
                             |> Task.andThen
@@ -241,14 +227,6 @@ writeAtomic permission path contents =
                                         Task.succeed {}
                                 )
             )
-
-
-freshUuid : Task x (Maybe String)
-freshUuid =
-    Crypto.getSecureContext
-        |> Task.andThen Crypto.randomUuidV4
-        |> Task.map Just
-        |> Task.onError (\_ -> Task.succeed Nothing)
 
 
 writeTemp : FileSystem.Permission -> Path -> String -> Task x Bool
@@ -264,70 +242,4 @@ renameInto permission destination tempPath =
     -- already published the destination just wins; drop our temp and adopt it.
     FileSystem.move permission destination tempPath
         |> Task.map (\_ -> {})
-        |> Task.onError (\_ -> removeIfExists permission tempPath)
-
-
-tempSibling : Path -> String -> Path
-tempSibling path uuid =
-    let
-        parent =
-            Path.parentPath path
-                |> Maybe.withDefault Path.empty
-
-        name =
-            "." ++ Path.filenameWithExtension path ++ ".tmp-" ++ uuid
-    in
-    Path.join [ parent, Path.fromPosixString name ]
-
-
-removeIfExists : FileSystem.Permission -> Path -> Task x {}
-removeIfExists permission path =
-    System.File.exists permission path
-        |> Task.andThen
-            (\present ->
-                if present then
-                    FileSystem.remove permission { recursive = False } path
-                        |> Task.map (\_ -> {})
-
-                else
-                    Task.succeed {}
-            )
-        |> Task.onError (\_ -> Task.succeed {})
-
-
-bytesToHex : Bytes -> Maybe String
-bytesToHex bytes =
-    BytesDecode.decode
-        (BytesDecode.loop
-            { remaining = Bytes.length bytes, output = [] }
-            (\state ->
-                if state.remaining <= 0 then
-                    BytesDecode.succeed (BytesDecode.Done (String.join "" state.output))
-
-                else
-                    BytesDecode.unsignedInt8
-                        |> BytesDecode.map
-                            (\byte ->
-                                BytesDecode.Loop
-                                    { remaining = state.remaining - 1
-                                    , output = Array.pushLast (hexByte byte) state.output
-                                    }
-                            )
-            )
-        )
-        bytes
-
-
-hexByte : Int -> String
-hexByte value =
-    let
-        digits =
-            "0123456789abcdef"
-
-        high =
-            value // 16
-
-        low =
-            Math.modBy 16 value
-    in
-    String.slice high (high + 1) digits ++ String.slice low (low + 1) digits
+        |> Task.onError (\_ -> System.File.removeIfExistsBestEffort permission tempPath)

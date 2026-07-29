@@ -11,11 +11,11 @@ publishes that tree and the proposed manifest together, runs validation while
 both backups still exist, and restores both resources if any step fails.
 -}
 
-import Crypto
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Port.Error as PortError exposing (Error)
 import System.File
+import System.Hash
 import Task exposing (Task)
 
 
@@ -79,8 +79,7 @@ commit permission options =
                         )
                     |> Task.onError
                         (\error ->
-                            removeIfExists permission paths.stagedManifest
-                                |> Task.onError (\_ -> Task.succeed {})
+                            System.File.removeIfExistsBestEffort permission paths.stagedManifest
                                 |> Task.andThen (\_ -> Task.fail error)
                         )
             )
@@ -120,11 +119,11 @@ rollback permission options paths hadPackages originalError =
                     |> Task.andThen
                         (\packageFailure ->
                             attempt "staging cleanup"
-                                (removeIfExists permission options.staging)
+                                (System.File.removeIfExists permission "ADD_FAILED" options.staging)
                                 |> Task.andThen
                                     (\stagingFailure ->
                                         attempt "manifest staging cleanup"
-                                            (removeIfExists permission paths.stagedManifest)
+                                            (System.File.removeIfExists permission "ADD_FAILED" paths.stagedManifest)
                                             |> Task.andThen
                                                 (\manifestStagingFailure ->
                                                     let
@@ -159,7 +158,7 @@ restorePath permission hadOriginal destination backup =
             |> Task.andThen
                 (\backupExists ->
                     if backupExists then
-                        removeIfExists permission destination
+                        System.File.removeIfExists permission "ADD_FAILED" destination
                             |> Task.andThen
                                 (\_ ->
                                     move permission destination backup "restore previous add state"
@@ -170,22 +169,19 @@ restorePath permission hadOriginal destination backup =
                 )
 
     else
-        removeIfExists permission destination
+        System.File.removeIfExists permission "ADD_FAILED" destination
 
 
 cleanupSuccess : FileSystem.Permission -> TransactionPaths -> Task Error {}
 cleanupSuccess permission paths =
-    removeIfExists permission paths.packageBackup
-        |> Task.onError (\_ -> Task.succeed {})
+    System.File.removeIfExistsBestEffort permission paths.packageBackup
         |> Task.andThen
             (\_ ->
-                removeIfExists permission paths.manifestBackup
-                    |> Task.onError (\_ -> Task.succeed {})
+                System.File.removeIfExistsBestEffort permission paths.manifestBackup
             )
         |> Task.andThen
             (\_ ->
-                removeIfExists permission paths.stagedManifest
-                    |> Task.onError (\_ -> Task.succeed {})
+                System.File.removeIfExistsBestEffort permission paths.stagedManifest
             )
 
 
@@ -215,60 +211,19 @@ transactionPaths options =
 
 uniqueSibling : Path -> String -> Task Error Path
 uniqueSibling destination role =
-    Crypto.getSecureContext
+    System.Hash.requireUuid
         |> Task.mapError
             (\_ ->
                 PortError.create "ADD_FAILED"
                     "Secure randomness is unavailable for the add transaction."
             )
-        |> Task.andThen Crypto.randomUuidV4
         |> Task.map
             (\uuid ->
-                let
-                    parent =
-                        Path.parentPath destination |> Maybe.withDefault Path.empty
-
-                    name =
-                        "."
-                            ++ Path.filenameWithExtension destination
-                            ++ ".elm-to-gren-"
-                            ++ role
-                            ++ "-"
-                            ++ uuid
-                in
-                Path.join [ parent, Path.fromPosixString name ]
+                System.File.tempSibling destination
+                    (".elm-to-gren-" ++ role ++ "-" ++ uuid)
             )
 
 
 move : FileSystem.Permission -> Path -> Path -> String -> Task Error {}
 move permission destination source action =
-    FileSystem.move permission destination source
-        |> Task.map (\_ -> {})
-        |> Task.mapError
-            (\error ->
-                PortError.create "ADD_FAILED"
-                    ("Could not " ++ action ++ ": " ++ FileSystem.errorToString error)
-            )
-
-
-removeIfExists : FileSystem.Permission -> Path -> Task Error {}
-removeIfExists permission path =
-    System.File.exists permission path
-        |> Task.andThen
-            (\exists ->
-                if exists then
-                    FileSystem.remove permission { recursive = True } path
-                        |> Task.map (\_ -> {})
-                        |> Task.mapError
-                            (\error ->
-                                PortError.create "ADD_FAILED"
-                                    ("Could not remove "
-                                        ++ Path.toPosixString path
-                                        ++ ": "
-                                        ++ FileSystem.errorToString error
-                                    )
-                            )
-
-                else
-                    Task.succeed {}
-            )
+    System.File.move permission "ADD_FAILED" destination source action

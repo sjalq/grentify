@@ -32,6 +32,7 @@ import Node
 import Port.Error as PortError exposing (Error)
 import System.File
 import System.Process
+import System.Task
 import Task exposing (Task)
 
 
@@ -230,7 +231,7 @@ loadRegistry permissions options =
 
         decode source =
             Registry.decodeString source
-                |> resultTask
+                |> System.Task.fromResult
                     (Registry.errorToString
                         >> PortError.create "REGISTRY_INVALID"
                     )
@@ -322,7 +323,7 @@ loadManifest permissions options name version =
 
         decode body =
             Manifest.decodeString body
-                |> resultTask
+                |> System.Task.fromResult
                     (Manifest.errorToString
                         >> PortError.create "ELM_MANIFEST_INVALID"
                     )
@@ -420,7 +421,7 @@ loadEndpoint permissions options name version =
 
         decode body =
             Decode.decodeString endpointDecoder body
-                |> resultTask
+                |> System.Task.fromResult
                     (Decode.errorToString
                         >> PortError.create "REGISTRY_INVALID"
                     )
@@ -982,26 +983,14 @@ validateArchiveEntries platform permission archivePath =
                     |> String.lines
                     |> Array.keepIf (String.isEmpty >> not)
                     |> validateEntryNames
-                    |> resultTask (PortError.create "ARCHIVE_INVALID")
+                    |> System.Task.fromResult (PortError.create "ARCHIVE_INVALID")
             )
 
 
 removeIfExists : FileSystem.Permission -> Path -> Task Error {}
 removeIfExists permission path =
-    System.File.exists permission path
-        |> Task.andThen
-            (\exists ->
-                if exists then
-                    FileSystem.remove permission { recursive = True } path
-                        |> Task.map (\_ -> {})
-                        |> Task.mapError
-                            (FileSystem.errorToString
-                                >> PortError.create "CACHE_WRITE_FAILED"
-                            )
+    System.File.removeIfExists permission "CACHE_WRITE_FAILED" path
 
-                else
-                    Task.succeed {}
-            )
 
 
 {-| Generate a unique suffix for temporary files/directories.
@@ -1132,7 +1121,7 @@ readPackageAt permission root =
         (System.File.readText permission manifestPath
             |> Task.andThen
                 (Manifest.decodeString
-                    >> resultTask
+                    >> System.Task.fromResult
                         (Manifest.errorToString
                             >> PortError.create "ELM_MANIFEST_INVALID"
                         )
@@ -1263,13 +1252,3 @@ packageUrl options name version leaf =
         ++ Semver.versionToString version
         ++ "/"
         ++ leaf
-
-
-resultTask : (problem -> Error) -> Result problem value -> Task Error value
-resultTask toError result =
-    when result is
-        Ok value ->
-            Task.succeed value
-
-        Err problem ->
-            Task.fail (toError problem)

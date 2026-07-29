@@ -17,33 +17,23 @@ module Port.PortedCache exposing
     , store
     )
 
-{-| Content-addressed cache of fully ported, gren-verified package trees for
-immutable registry dependencies.
+{-| Content-addressed cache of verified ported trees for registry coordinates.
 
-A registry package at a fixed `author/name@version` produces identical Gren
-output for a fixed tool version, mappings set, platform label, and namespacing
-flag. Repeat ports reuse the verified tree and skip transform + verify. The
-cache key combines the package coordinate with a SHA-256 digest of those
-transform inputs: any drift invalidates the entry.
-
-Local-path inputs and the root package are never cached (see `keyFor`). Store
-is only called on the success path after gren verification.
+Key = package id + digest(tool, mappings, platform, namespace). Local roots are
+never cached. Store only after successful gren verify.
 -}
 
-import Bytes exposing (Bytes)
-import Bytes.Decode as BytesDecode
 import ChildProcess
-import Crypto
 import Dict exposing (Dict)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Mapping.Types exposing (GeneratedModule)
-import Math
 import Node
 import Port.Error as PortError
 import System.File
+import System.Hash
 import System.Process
 import Task exposing (Task)
 
@@ -234,7 +224,7 @@ digestFor permission mappingsDirectory toolVersion platform namespacing =
             )
         |> Task.andThen
             (\mappingFiles ->
-                sha256Hex (canonicalInput toolVersion mappingFiles platform namespacing)
+                System.Hash.sha256Hex (canonicalInput toolVersion mappingFiles platform namespacing)
             )
         |> Task.onError (\_ -> Task.succeed "")
 
@@ -258,7 +248,7 @@ hashMappingFiles permission paths =
                         System.File.readText permission path
                             |> Task.andThen
                                 (\contents ->
-                                    sha256Hex contents
+                                    System.Hash.sha256Hex contents
                                         |> Task.map
                                             (\contentSha ->
                                                 Array.pushLast
@@ -443,7 +433,7 @@ store :
     -> Array GeneratedModule
     -> Task x {}
 store platform childProcess permission entry sourcePackageDir toolVersion digest platformName exports restore =
-    freshUuid
+    System.Hash.freshUuid
         |> Task.andThen
             (\maybeUuid ->
                 when maybeUuid is
@@ -453,7 +443,7 @@ store platform childProcess permission entry sourcePackageDir toolVersion digest
                     Just uuid ->
                         let
                             tempPath =
-                                tempSibling entry uuid
+                                System.File.tempSibling entry (".tmp-" ++ uuid)
 
                             -- Store only the transform surface (src/ + LICENSE*).
                             -- gren.json is resolution-specific (local: dep versions)
@@ -566,7 +556,7 @@ store platform childProcess permission entry sourcePackageDir toolVersion digest
                                 (\_ ->
                                     renameInto permission entry tempPath
                                 )
-                            |> Task.onError (\_ -> removeIfExists permission tempPath)
+                            |> Task.onError (\_ -> System.File.removeIfExistsBestEffort permission tempPath)
             )
         |> Task.onError (\_ -> Task.succeed {})
 
@@ -654,14 +644,6 @@ copyPackageSurface platform childProcess source destination =
             )
 
 
-freshUuid : Task x (Maybe String)
-freshUuid =
-    Crypto.getSecureContext
-        |> Task.andThen Crypto.randomUuidV4
-        |> Task.map Just
-        |> Task.onError (\_ -> Task.succeed Nothing)
-
-
 renameInto : FileSystem.Permission -> Path -> Path -> Task x {}
 renameInto permission destination tempPath =
     -- Replace any existing entry, then `move dest temp` renames temp -> dest
@@ -670,87 +652,10 @@ renameInto permission destination tempPath =
     -- replacing the incomplete entry, every subsequent hit soft-misses forever
     -- and the new facts never land. Concurrent writers that both finish both
     -- publish a valid entry (last writer wins).
-    removeIfExists permission destination
+    System.File.removeIfExistsBestEffort permission destination
         |> Task.andThen
             (\_ ->
                 FileSystem.move permission destination tempPath
                     |> Task.map (\_ -> {})
             )
-        |> Task.onError (\_ -> removeIfExists permission tempPath)
-
-
-tempSibling : Path -> String -> Path
-tempSibling path uuid =
-    let
-        parent =
-            Path.parentPath path
-                |> Maybe.withDefault Path.empty
-
-        name =
-            "." ++ Path.filenameWithExtension path ++ ".tmp-" ++ uuid
-    in
-    Path.join [ parent, Path.fromPosixString name ]
-
-
-removeIfExists : FileSystem.Permission -> Path -> Task x {}
-removeIfExists permission path =
-    System.File.exists permission path
-        |> Task.andThen
-            (\present ->
-                if present then
-                    FileSystem.remove permission { recursive = True } path
-                        |> Task.map (\_ -> {})
-
-                else
-                    Task.succeed {}
-            )
-        |> Task.onError (\_ -> Task.succeed {})
-
-
-sha256Hex : String -> Task x String
-sha256Hex input =
-    Crypto.getSecureContext
-        |> Task.andThen
-            (\context ->
-                Crypto.digest context Crypto.Sha256 (Bytes.fromString input)
-            )
-        |> Task.map (\digestBytes -> Maybe.withDefault "" (bytesToHex digestBytes))
-        |> Task.onError (\_ -> Task.succeed "")
-
-
-bytesToHex : Bytes -> Maybe String
-bytesToHex bytes =
-    BytesDecode.decode
-        (BytesDecode.loop
-            { remaining = Bytes.length bytes, output = [] }
-            (\state ->
-                if state.remaining <= 0 then
-                    BytesDecode.succeed (BytesDecode.Done (String.join "" state.output))
-
-                else
-                    BytesDecode.unsignedInt8
-                        |> BytesDecode.map
-                            (\byte ->
-                                BytesDecode.Loop
-                                    { remaining = state.remaining - 1
-                                    , output = Array.pushLast (hexByte byte) state.output
-                                    }
-                            )
-            )
-        )
-        bytes
-
-
-hexByte : Int -> String
-hexByte value =
-    let
-        digits =
-            "0123456789abcdef"
-
-        high =
-            value // 16
-
-        low =
-            Math.modBy 16 value
-    in
-    String.slice high (high + 1) digits ++ String.slice low (low + 1) digits
+        |> Task.onError (\_ -> System.File.removeIfExistsBestEffort permission tempPath)

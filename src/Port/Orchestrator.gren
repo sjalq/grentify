@@ -7,17 +7,14 @@ module Port.Orchestrator exposing
 
 import Array exposing (Array)
 import Bytes
-import Bytes.Decode as BytesDecode
 import Char
 import ChildProcess
 import Cli
 import Compiler.Platform as GrenPlatform
-import Crypto
 import Dict exposing (Dict)
 import Elm.Acquire as Acquire
 import Elm.Manifest exposing (Manifest)
 import Elm.PackageName as PackageName exposing (Name)
-import Elm.Registry as ElmRegistry
 import Elm.Semver as Semver
 import Emit.Behavior as Behavior
 import Emit.Manifest as Manifest exposing (Dependency(..), ExposedModules(..))
@@ -28,15 +25,15 @@ import FileSystem.Path as Path exposing (Path)
 import HttpClient
 import Json.Decode as Decode
 import Json.Encode as Encode
-import Mapping.Adapter as Adapter exposing (AdapterError(..))
+import Mapping.Adapter as Adapter
 import Mapping.Load
 import Mapping.Registry as MappingRegistry
-import Mapping.Types as Mapping exposing (MappingKind(..), Registry)
-import Math
+import Mapping.Types as Mapping exposing (Registry)
 import Node
 import Port.AddTransaction as AddTransaction
 import Port.CompatShim as CompatShim
 import Port.Error as PortError exposing (Error)
+import Port.Mapped as Mapped
 import Port.Plan as Plan
 import Resolve.Online
 import Resolve.Solver as Solver exposing (Resolution)
@@ -48,7 +45,10 @@ import Review.Runner
 import Stream exposing (Writable)
 import Stream.Log
 import System.File
+import System.Hash
+import System.JsonPairs as JsonPairs exposing (Pair)
 import System.Process
+import System.Task
 import Task exposing (Task)
 import Format.Gren as Format
 import Port.Volume as Volume
@@ -107,7 +107,7 @@ type alias Draft =
       portedCachePending : Maybe PortedCache.Pending
     , -- D45/D45b: this package's exported cross-package maps (ctor
       -- arities + sole ctors), fed to every dependent's transform.
-      depExports : Pipeline.DepMaps
+      depExports : Pipeline.DependencyMaps
     }
 
 
@@ -145,6 +145,7 @@ run context permissions cliOptions =
             , offline = cliOptions.offline
             }
     in
+    -- Pipeline: locate assets → load mappings → acquire → resolve → transform → plan → emit/verify
     locateAssets context permissions.fileSystem
         |> Task.andThen
             (\assets ->
@@ -156,89 +157,110 @@ run context permissions cliOptions =
                 in
                 Mapping.Load.load permissions.fileSystem assets.mappings overlays
                     |> Task.andThen
-                        (\registry ->
-                            Acquire.parseInput context.platform context.workingDirectory context.homeDirectory cliOptions.input
-                                |> resultTask identity
-                                |> Task.andThen (Acquire.acquire context.platform permissions acquireOptions)
-                                -- D100: drop declared-but-unimported root
-                                -- edges BEFORE anything reads the manifest, so
-                                -- the solver, the plan and the emitted
-                                -- gren.json all agree on one dependency set.
+                        (\loaded ->
+                            mappingDigestFromTexts loaded.texts
                                 |> Task.andThen
-                                    (\acquired ->
-                                        pruneFalseRootEdges permissions acquireOptions registry acquired
-                                            |> Task.map
-                                                (\pruned -> { acquired | manifest = pruned })
+                                    (\digest ->
+                                        portPipeline context permissions cliOptions output cache acquireOptions assets digest loaded.registry
+                                    )
+                        )
+            )
+
+
+{-| Acquire root → prune false edges → resolve graph → acquire deps → transform →
+plan → namespace/shim → emit (port workspace or add vendor). Named to match the
+README pipeline so the control flow stays student-readable.
+-}
+portPipeline
+    : Context
+    -> Permissions
+    -> Cli.Options
+    -> Path
+    -> Path
+    -> Acquire.Options
+    -> Assets
+    -> String
+    -> Registry
+    -> Task Error Outcome
+portPipeline context permissions cliOptions output cache acquireOptions assets digest registry =
+    Acquire.parseInput context.platform context.workingDirectory context.homeDirectory cliOptions.input
+        |> System.Task.fromResult identity
+        |> Task.andThen (Acquire.acquire context.platform permissions acquireOptions)
+        -- D100: drop declared-but-unimported root edges BEFORE anything reads
+        -- the manifest, so the solver, the plan and the emitted gren.json all
+        -- agree on one dependency set.
+        |> Task.andThen
+            (\acquired ->
+                pruneFalseRootEdges permissions acquireOptions registry acquired
+                    |> Task.map
+                        (\pruned -> { acquired | manifest = pruned })
+            )
+        |> Task.andThen
+            (\rootSource ->
+                let
+                    registryForRoot =
+                        MappingRegistry.applyVersionedMappings
+                            (manifestDependencyRanges rootSource.manifest)
+                            registry
+                in
+                resolveGraph permissions acquireOptions registryForRoot rootSource
+                    |> Task.andThen
+                        (\resolution ->
+                            acquireSources context.platform permissions acquireOptions rootSource resolution
+                                |> Task.andThen
+                                    (\sources ->
+                                        let
+                                            -- `add`: overlay synthetic `M -> Elm.M` so transform
+                                            -- rewrites cross-module imports/refs under Elm. prefix.
+                                            transformRegistry =
+                                                if cliOptions.namespaceModules then
+                                                    overlayPortedModules sources registryForRoot
+
+                                                else
+                                                    registryForRoot
+                                        in
+                                        transformSources context permissions cache cliOptions.offline cliOptions.namespaceModules cliOptions.extractCache cliOptions.portedCache (cliPlatformLabel cliOptions.platform) assets transformRegistry resolution cliOptions.withTests sources
                                     )
                                 |> Task.andThen
-                                    (\rootSource ->
+                                    (\drafts ->
+                                        planPackages cliOptions registryForRoot resolution drafts
+                                            |> System.Task.fromResult identity
+                                    )
+                                |> Task.andThen
+                                    (\planned ->
                                         let
-                                            registryForRoot =
-                                                MappingRegistry.applyVersionedMappings
-                                                    (manifestDependencyRanges
-                                                        rootSource.manifest)
-                                                    registry
+                                            -- Feature 2: exposed-module names must track the
+                                            -- Elm. prefix applied to the module sources, or
+                                            -- `gren docs` cannot find the exposed modules.
+                                            namespaced =
+                                                if cliOptions.namespaceModules then
+                                                    { planned | packages = Array.map namespaceExposedModules planned.packages }
+
+                                                else
+                                                    planned
                                         in
-                                        resolveGraph permissions acquireOptions registryForRoot rootSource
+                                        -- D106: after namespacing, because the shim declares
+                                        -- the adapter module name and adapters are never
+                                        -- prefixed; before emit, because it rewrites both the
+                                        -- module set and the manifests.
+                                        CompatShim.apply registryForRoot
+                                            (PackageName.toString resolution.root)
+                                            namespaced.packages
+                                            |> System.Task.fromResult identity
                                             |> Task.andThen
-                                                (\resolution ->
-                                                    acquireSources context.platform permissions acquireOptions rootSource resolution
-                                                        |> Task.andThen
-                                                            (\sources ->
-                                                                let
-                                                                    -- `add`: overlay synthetic `M -> Elm.M` so transform
-                                                                    -- rewrites cross-module imports/refs under Elm. prefix.
-                                                                    transformRegistry =
-                                                                        if cliOptions.namespaceModules then
-                                                                            overlayPortedModules sources registryForRoot
+                                                (\hoisted ->
+                                                    let
+                                                        finalPlanned =
+                                                            { namespaced
+                                                                | packages = hoisted.packages
+                                                                , shimStripped = hoisted.stripped
+                                                            }
+                                                    in
+                                                    if cliOptions.vendor then
+                                                        finalizeAdd context permissions cliOptions output assets resolution finalPlanned
 
-                                                                        else
-                                                                            registryForRoot
-                                                                in
-                                                                transformSources context permissions cache cliOptions.offline cliOptions.namespaceModules cliOptions.extractCache cliOptions.portedCache (cliPlatformLabel cliOptions.platform) assets transformRegistry resolution cliOptions.withTests sources
-                                                            )
-                                                        |> Task.andThen
-                                                            (\drafts ->
-                                                                planPackages cliOptions registryForRoot resolution drafts
-                                                                    |> resultTask identity
-                                                            )
-                                                        |> Task.andThen
-                                                            (\planned ->
-                                                                let
-                                                                    -- Feature 2: exposed-module names must track the
-                                                                    -- Elm. prefix applied to the module sources, or
-                                                                    -- `gren docs` cannot find the exposed modules.
-                                                                    namespaced =
-                                                                        if cliOptions.namespaceModules then
-                                                                            { planned | packages = Array.map namespaceExposedModules planned.packages }
-
-                                                                        else
-                                                                            planned
-                                                                in
-                                                                -- D106: after namespacing, because the shim declares
-                                                                -- the adapter module name and adapters are never
-                                                                -- prefixed; before emit, because it rewrites both the
-                                                                -- module set and the manifests.
-                                                                CompatShim.apply registryForRoot
-                                                                    (PackageName.toString resolution.root)
-                                                                    namespaced.packages
-                                                                    |> resultTask identity
-                                                                    |> Task.andThen
-                                                                        (\hoisted ->
-                                                                            let
-                                                                                finalPlanned =
-                                                                                    { namespaced
-                                                                                        | packages = hoisted.packages
-                                                                                        , shimStripped = hoisted.stripped
-                                                                                    }
-                                                                            in
-                                                                            if cliOptions.vendor then
-                                                                                finalizeAdd context permissions cliOptions output assets resolution finalPlanned
-
-                                                                            else
-                                                                                finalize context permissions cliOptions output overlays assets registryForRoot resolution finalPlanned
-                                                                        )
-                                                            )
+                                                    else
+                                                        finalize context permissions cliOptions output digest assets registryForRoot resolution finalPlanned
                                                 )
                                     )
                         )
@@ -332,30 +354,13 @@ rootImportedModules fileSystem rootSource =
                                 |> Task.onError (\_ -> Task.succeed "")
                                 |> Task.map
                                     (\contents ->
-                                        Array.foldl (\name acc -> Dict.set name {} acc)
+                                        Dict.foldl (\name _ acc -> Dict.set name {} acc)
                                             found
-                                            (importedModuleNames contents)
+                                            (Pipeline.sourceImportedModules contents)
                                     )
                         )
             )
             (Task.succeed Dict.empty)
-
-
-importedModuleNames : String -> Array String
-importedModuleNames source =
-    String.lines source
-        |> Array.mapAndKeepJust
-            (\line ->
-                let
-                    trimmed =
-                        String.trimLeft line
-                in
-                if String.startsWith "import " trimmed then
-                    Array.first (String.words (String.dropFirst 7 trimmed))
-
-                else
-                    Nothing
-            )
 
 
 {-| True when the root imports at least one module this dependency exposes. -}
@@ -388,20 +393,12 @@ dependencyIsImported permissions acquireOptions imported dependency =
 resolveFrom : Permissions -> Acquire.Options -> Registry -> Manifest -> Task Error Resolution
 resolveFrom permissions acquireOptions registry rootManifest =
     let
-        isMapped name =
-            when MappingRegistry.mappingFor (PackageName.toString name) registry is
-                Just mapping ->
-                    Mapping.mappingKind mapping /= TranspileKind
-
-                Nothing ->
-                    False
-
         solverOptions =
-            { isMapped = isMapped }
+            { isMapped = Mapped.isMappedDependency registry }
     in
     -- Mapped dependencies are omitted from the solver graph. When every direct
     -- root dependency is already mapped, no registry index is required.
-    if hasUnmappedDependencies registry rootManifest then
+    if Mapped.hasUnmappedDependencies registry rootManifest then
         -- Load /all-packages once for the whole search. Calling loadVersions
         -- per candidate package re-fetched the mutable index on every probe and
         -- could observe inconsistent snapshots mid-solve.
@@ -409,7 +406,7 @@ resolveFrom permissions acquireOptions registry rootManifest =
             |> Task.andThen
                 (\elmRegistry ->
                     Resolve.Online.resolve solverOptions
-                        { versionsFor = versionsFor elmRegistry
+                        { versionsFor = Mapped.versionsFor elmRegistry
                         , manifestFor = Acquire.loadManifest permissions acquireOptions
                         }
                         rootManifest
@@ -417,40 +414,8 @@ resolveFrom permissions acquireOptions registry rootManifest =
 
     else
         Solver.solveWith solverOptions Dict.empty rootManifest
-            |> Result.mapError
-                (Solver.errorToString
-                    >> PortError.create "DEPENDENCY_CONFLICT"
-                )
-            |> resultTask identity
-
-
-{-| Whether any direct dependency must be acquired or transpiled.
-`Transpile` mappings intentionally count as unmapped for solving.
--}
-hasUnmappedDependencies : Registry -> Manifest -> Bool
-hasUnmappedDependencies registry manifest =
-    Elm.Manifest.dependencyNames manifest
-        |> Array.any
-            (\name ->
-                when MappingRegistry.mappingFor (PackageName.toString name) registry is
-                    Just mapping ->
-                        Mapping.mappingKind mapping == TranspileKind
-
-                    Nothing ->
-                        True
-            )
-
-
-versionsFor : ElmRegistry.Registry -> Name -> Task Error (Array Semver.Version)
-versionsFor elmRegistry name =
-    when ElmRegistry.versionsFor name elmRegistry is
-        Just versions ->
-            Task.succeed versions
-
-        Nothing ->
-            Task.fail <|
-                PortError.create "PACKAGE_NOT_FOUND"
-                    ("Elm registry does not contain " ++ PackageName.toString name ++ ".")
+            |> Result.mapError Mapped.solverFailure
+            |> System.Task.fromResult identity
 
 
 acquireSources
@@ -547,31 +512,31 @@ transformSources context permissions cache offline namespaceModules extractCache
                                                 -- D45: deps transform before dependents
                                                 -- (resolution.order), so each package sees
                                                 -- every prior package's ctor arities.
-                                                transformOne context permissions cache elmHome reviewAppCache offline namespaceModules extractCacheEnabled portedCacheEnabled platformLabel assets registry state.depMaps resolution source withTests (key == rootName)
+                                                transformOne context permissions cache elmHome reviewAppCache offline namespaceModules extractCacheEnabled portedCacheEnabled platformLabel assets registry state.dependencyMaps resolution source withTests (key == rootName)
                                                     |> Task.map
                                                         (\draft ->
                                                             { drafts = Dict.set key draft state.drafts
-                                                            , depMaps =
+                                                            , dependencyMaps =
                                                                 { ctorArities =
-                                                                    Dict.foldl Dict.set state.depMaps.ctorArities draft.depExports.ctorArities
+                                                                    Dict.foldl Dict.set state.dependencyMaps.ctorArities draft.depExports.ctorArities
                                                                 , soleCtors =
-                                                                    Dict.foldl Dict.set state.depMaps.soleCtors draft.depExports.soleCtors
+                                                                    Dict.foldl Dict.set state.dependencyMaps.soleCtors draft.depExports.soleCtors
                                                                 , recordAliases =
-                                                                    Dict.foldl Dict.set state.depMaps.recordAliases draft.depExports.recordAliases
+                                                                    Dict.foldl Dict.set state.dependencyMaps.recordAliases draft.depExports.recordAliases
                                                                 , reservedExports =
-                                                                    Dict.foldl Dict.set state.depMaps.reservedExports draft.depExports.reservedExports
+                                                                    Dict.foldl Dict.set state.dependencyMaps.reservedExports draft.depExports.reservedExports
                                                                 , ctorHomes =
-                                                                    mergeCtorHomes state.depMaps.ctorHomes
+                                                                    mergeCtorHomes state.dependencyMaps.ctorHomes
                                                                         draft.depExports.ctorHomes
                                                                 , knownModules =
-                                                                    Dict.foldl Dict.set state.depMaps.knownModules
+                                                                    Dict.foldl Dict.set state.dependencyMaps.knownModules
                                                                         draft.depExports.knownModules
                                                                 }
                                                             }
                                                         )
                                     )
                         )
-                        (Task.succeed { drafts = Dict.empty, depMaps = Pipeline.emptyDepMaps })
+                        (Task.succeed { drafts = Dict.empty, dependencyMaps = Pipeline.emptyDependencyMaps })
                     |> Task.map .drafts
             )
 
@@ -589,13 +554,13 @@ transformOne
     -> String
     -> Assets
     -> Registry
-    -> Pipeline.DepMaps
+    -> Pipeline.DependencyMaps
     -> Resolution
     -> Acquire.PackageSource
     -> Bool
     -> Bool
     -> Task Error Draft
-transformOne context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled portedCacheEnabled platformLabel assets registry depMaps resolution source withTests isRoot =
+transformOne context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled portedCacheEnabled platformLabel assets registry dependencyMaps resolution source withTests isRoot =
     let
         coordinate =
             { author = PackageName.author source.manifest.name
@@ -612,14 +577,14 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
     in
     when portedKey is
         Nothing ->
-            transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps resolution source withTests isRoot Nothing
+            transformUncached context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry dependencyMaps resolution source withTests isRoot Nothing
 
         Just key ->
             PortedCache.digestFor permissions.fileSystem mappingsDirectory context.toolVersion platformLabel namespaceModules
                 |> Task.andThen
                     (\digestHex ->
                         if String.isEmpty digestHex then
-                            transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps resolution source withTests isRoot Nothing
+                            transformUncached context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry dependencyMaps resolution source withTests isRoot Nothing
 
                         else
                             let
@@ -652,7 +617,7 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
                                                                                 logPortedCached context coordinate
                                                                                     |> Task.andThen
                                                                                         (\_ ->
-                                                                                            materializeDraftFromCache permissions.fileSystem source cachePath digestHex
+                                                                                            draftFromPortedCache permissions.fileSystem source cachePath digestHex
                                                                                         )
                                                                                     |> Task.map (\draft -> { draft | depExports = exports })
 
@@ -665,38 +630,35 @@ transformOne context permissions cacheRoot elmHome reviewAppCache offline namesp
                                                                 |> Task.onError
                                                                     (\_ ->
                                                                         -- Corrupt/incomplete entry: soft-miss and re-port.
-                                                                        transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps resolution source withTests isRoot
+                                                                        transformUncached context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry dependencyMaps resolution source withTests isRoot
                                                                             (Just
                                                                                 { cacheRoot = key.cacheRoot
                                                                                 , coordinate = key.coordinate
                                                                                 , digest = digestHex
-                                                                                , exports = Pipeline.emptyDepMaps
+                                                                                , exports = Pipeline.emptyDependencyMaps
                                                                                 }
                                                                             )
                                                                     )
                                                         )
 
                                             Nothing ->
-                                                transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps resolution source withTests isRoot
+                                                transformUncached context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry dependencyMaps resolution source withTests isRoot
                                                     (Just
                                                         { cacheRoot = key.cacheRoot
                                                         , coordinate = key.coordinate
                                                         , digest = digestHex
-                                                        , exports = Pipeline.emptyDepMaps
+                                                        , exports = Pipeline.emptyDependencyMaps
                                                         }
                                                     )
                                     )
                     )
 
 
-{-| Cold transform path: extract, pipeline, adapters. `pendingStore` is `Just`
-after a ported-cache miss so the verified tree can be written later.
-
-D82: extract always runs on a disposable staging tree whose `elm.json` is
-pinned to the solver's selected dependency versions, so elm-review's docs
-lookup (which only reads each constraint's first token) matches the port.
+{-| Extract + transform without ported-cache. Staging elm.json is pin-locked to
+the solver versions so elm-review docs match the port. `pendingStore` is set on
+cache miss so we can write the verified tree after verify.
 -}
-transformFresh
+transformUncached
     : Context
     -> Permissions
     -> Path
@@ -707,16 +669,15 @@ transformFresh
     -> Bool
     -> Assets
     -> Registry
-    -> Pipeline.DepMaps
+    -> Pipeline.DependencyMaps
     -> Resolution
     -> Acquire.PackageSource
     -> Bool
     -> Bool
     -> Maybe PortedCache.Pending
     -> Task Error Draft
-transformFresh context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry depMaps resolution source withTests isRoot pendingStore =
+transformUncached context permissions cacheRoot elmHome reviewAppCache offline namespaceModules extractCacheEnabled assets registry dependencyMaps resolution source withTests isRoot pendingStore =
     let
-        -- Determine which directories to review: src only, or src + tests
         includeTests =
             withTests && isRoot && not (Array.isEmpty source.testFiles)
 
@@ -823,13 +784,13 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
     in
     Task.map2
         (\extraction sourceFiles -> { extraction = extraction, sourceFiles = sourceFiles })
-        (logPhase context "extract" (PackageName.toString source.manifest.name)
+        (announcePhase context "extract" (PackageName.toString source.manifest.name)
             |> Task.andThen (\_ -> runReview)
         )
         (readSources permissions.fileSystem source includeTests)
         |> Task.andThen
             (\inputs ->
-                logPhase context "transform" (PackageName.toString source.manifest.name)
+                announcePhase context "transform" (PackageName.toString source.manifest.name)
                     |> Task.andThen
                         (\_ ->
                             let
@@ -838,8 +799,8 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
                                         includeTests
                                         inputs
                             in
-                            Pipeline.transform registry depMaps live.extraction live.sourceFiles
-                                |> resultTask identity
+                            Pipeline.transform registry dependencyMaps live.extraction live.sourceFiles
+                                |> System.Task.fromResult identity
                         )
             )
         |> Task.andThen
@@ -858,10 +819,10 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
 
                 else
                     Adapter.generateFromRequirements transformed.requiredAdapters
-                        |> Result.mapError adapterFailure
+                        |> Result.mapError Mapped.adapterFailure
                         |> Result.andThen
                             (\adapters ->
-                                parseDetectedPlatform transformed.detectedPlatform
+                                Mapped.detectedPlatform transformed.detectedPlatform
                                     |> Result.map
                                         (\detectedPlatform ->
                                             let
@@ -898,7 +859,7 @@ transformFresh context permissions cacheRoot elmHome reviewAppCache offline name
                                             }
                                         )
                             )
-                        |> resultTask identity
+                        |> System.Task.fromResult identity
             )
 
 
@@ -953,13 +914,9 @@ logConsumerVerdict context verdict =
                 )
 
 
-{-| Phase markers. The tool cannot report its own death — the harness SIGKILLs
-it at budget — so it announces each phase on entry and the killer reads the
-last marker. No clock plumbing here on purpose: consumers timestamp on receipt,
-which also makes the markers free when nobody is listening.
--}
-logPhase : Context -> String -> String -> Task x {}
-logPhase context phase subject =
+{-| Log `[phase] …` so external harnesses can see where a timed-out port died. -}
+announcePhase : Context -> String -> String -> Task x {}
+announcePhase context phase subject =
     when context.logStream is
         Nothing ->
             Task.succeed {}
@@ -1060,8 +1017,8 @@ removeHoistedModules fileSystem packageDir modules =
 emit can proceed without re-running extract/transform. gren.json is not read
 from the cache: it is resolution-specific and re-planned for the current graph.
 -}
-materializeDraftFromCache : FileSystem.Permission -> Acquire.PackageSource -> Path -> String -> Task Error Draft
-materializeDraftFromCache permission source cachePath expectedDigest =
+draftFromPortedCache : FileSystem.Permission -> Acquire.PackageSource -> Path -> String -> Task Error Draft
+draftFromPortedCache permission source cachePath expectedDigest =
     let
         srcRoot =
             Path.join [ cachePath, Path.fromPosixString "src" ]
@@ -1116,7 +1073,7 @@ materializeDraftFromCache permission source cachePath expectedDigest =
                                                     , portedCacheHit = Just cachePath
                                                     , portedCachePending = Nothing
                                                     , -- caller overlays from the extract cache (D45)
-                                                      depExports = Pipeline.emptyDepMaps
+                                                      depExports = Pipeline.emptyDependencyMaps
                                                     }
                                         )
             )
@@ -1149,21 +1106,18 @@ danglingCompatImports modules =
 
 parseCachedPlatform : String -> Result Error Mapping.Platform
 parseCachedPlatform platformName =
+    -- "pure" is the CLI/cache alias for Mapping.Common; canonical names go through platformFromName.
     when platformName is
-        "common" ->
-            Ok Mapping.Common
-
         "pure" ->
             Ok Mapping.Common
 
-        "browser" ->
-            Ok Mapping.Browser
+        _ ->
+            when Mapping.platformFromName platformName is
+                Just platform ->
+                    Ok platform
 
-        "node" ->
-            Ok Mapping.Node
-
-        other ->
-            Err (PortError.create "PORTED_CACHE_INVALID" ("Cached entry has unknown platform " ++ other ++ "."))
+                Nothing ->
+                    Err (PortError.create "PORTED_CACHE_INVALID" ("Cached entry has unknown platform " ++ platformName ++ "."))
 
 
 readCachedModules : FileSystem.Permission -> Path -> Array Path -> Task Error (Array Mapping.GeneratedModule)
@@ -1242,7 +1196,7 @@ readSources permission packageSource includeTests =
                     |> Task.andThen
                         (\sources ->
                             relativeSourcePath packageSource.root filename
-                                |> resultTask identity
+                                |> System.Task.fromResult identity
                                 |> Task.andThen
                                     (\relative ->
                                         System.File.readText permission filename
@@ -1431,13 +1385,13 @@ finalize
     -> Permissions
     -> Cli.Options
     -> Path
-    -> Array Path
+    -> String
     -> Assets
     -> Registry
     -> Resolution
     -> Planned
     -> Task Error Outcome
-finalize context permissions cliOptions output overlayPaths assets registry resolution planned =
+finalize context permissions cliOptions output digest assets registry resolution planned =
     let
         rootKey =
             PackageName.toString resolution.root
@@ -1447,17 +1401,15 @@ finalize context permissions cliOptions output overlayPaths assets registry reso
             Task.fail (PortError.create "INTERNAL_ERROR" "Root package identity was not planned.")
 
         Just rootIdentity ->
-            Task.map2
-                (\resolvedCompilerVersion resolvedMappingDigest ->
-                    { compilerVersion = resolvedCompilerVersion
-                    , mappingDigest = resolvedMappingDigest
-                    }
-                )
-                (compilerVersion context.platform permissions.childProcess assets.grenExecutable)
-                (mappingDigest permissions.fileSystem assets.mappings overlayPaths)
+            compilerVersion context.platform permissions.childProcess assets.grenExecutable
                 |> Task.andThen
-                    (\metadata ->
+                    (\resolvedCompilerVersion ->
                         let
+                            metadata =
+                                { compilerVersion = resolvedCompilerVersion
+                                , mappingDigest = digest
+                                }
+
                             report =
                                 encodeReport context cliOptions output rootIdentity metadata.compilerVersion planned Nothing
 
@@ -1612,7 +1564,7 @@ prepareStaging context permissions assets rootIdentity planned staging =
                                             |> Maybe.withDefault []
                                         )
                                         cachePath
-                                        (packageDirectory rootIdentity planned staging package)
+                                        (Workspace.packageDirectory rootIdentity.grenName staging package)
 
                                 Nothing ->
                                     Task.succeed {}
@@ -1646,7 +1598,7 @@ prepareOnePackage
 prepareOnePackage context permissions assets rootIdentity planned staging package =
     let
         dir =
-            packageDirectory rootIdentity planned staging package
+            Workspace.packageDirectory rootIdentity.grenName staging package
 
         elmName =
             package.sourcePackage
@@ -1658,14 +1610,14 @@ prepareOnePackage context permissions assets rootIdentity planned staging packag
             Task.succeed {}
 
         Nothing ->
-            logPhase context "format" package.manifest.name
+            announcePhase context "format" package.manifest.name
                 |> Task.andThen
                     (\_ ->
                         maybeFormatPackage context.platform permissions.fileSystem permissions.childProcess assets.formatExecutable dir
                     )
                 |> Task.andThen
                     (\_ ->
-                        logPhase context "verify" package.manifest.name
+                        announcePhase context "verify" package.manifest.name
                     )
                 |> Task.andThen
                     (\_ ->
@@ -1786,7 +1738,7 @@ verifyOne
 verifyOne context permissions assets rootIdentity planned staging package =
     Verify.Package.verify context.platform
         permissions.childProcess
-        { packageDirectory = packageDirectory rootIdentity planned staging package
+        { packageDirectory = Workspace.packageDirectory rootIdentity.grenName staging package
         , grenExecutable = assets.grenExecutable
         , label = package.manifest.name ++ " " ++ package.manifest.version
         , isApplication =
@@ -1838,7 +1790,7 @@ escalateDependencyBlame context permissions assets rootIdentity planned staging 
             Task.fail error
 
         Just candidate ->
-            logPhase context "verify (blamed dependency)" candidate.manifest.name
+            announcePhase context "verify (blamed dependency)" candidate.manifest.name
                 |> Task.andThen
                     (\_ ->
                         verifyOne context permissions assets rootIdentity planned staging candidate
@@ -1860,24 +1812,6 @@ escalateDependencyBlame context permissions assets rootIdentity planned staging 
                             (Array.pushLast candidate.manifest.name visited)
                             deeper
                     )
-
-
-packageDirectory : Plan.Identity -> Planned -> Path -> Workspace.Package -> Path
-packageDirectory rootIdentity _ staging package =
-    if package.manifest.name == rootIdentity.grenName then
-        staging
-
-    else
-        Path.join
-            [ staging
-            , Path.fromPosixString ".elm-to-gren/packages"
-            , Path.fromPosixString
-                (Workspace.packageDirectoryName
-                    { name = package.manifest.name
-                    , version = package.manifest.version
-                    }
-                )
-            ]
 
 
 locateAssets : Context -> FileSystem.Permission -> Task Error Assets
@@ -2035,84 +1969,15 @@ compilerVersionAttempt platform permission executable attemptsLeft =
             )
 
 
-mappingDigest : FileSystem.Permission -> Path -> Array Path -> Task Error String
-mappingDigest permission builtin overlays =
-    Array.pushFirst builtin overlays
-        |> Array.foldl
-            (\path pending ->
-                pending
-                    |> Task.andThen
-                        (\texts ->
-                            System.File.readText permission path
-                                -- Content only: absolute paths would make the lockfile
-                                -- digest machine-specific for identical mapping files.
-                                |> Task.map (\text -> Array.pushLast text texts)
-                        )
-            )
-            (Task.succeed [])
-        |> Task.andThen
-            (\texts ->
-                Crypto.getSecureContext
-                    |> Task.mapError (\_ -> PortError.create "CRYPTO_FAILED" "Could not initialize SHA-256.")
-                    |> Task.andThen
-                        (\context ->
-                            Crypto.digest context
-                                Crypto.Sha256
-                                (Bytes.fromString
-                                    (String.join "\n---elm-to-gren-mapping---\n" texts)
-                                )
-                        )
-                    |> Task.andThen
-                        (\digestBytes ->
-                            when bytesToHex digestBytes is
-                                Just hex ->
-                                    if String.isEmpty hex then
-                                        Task.fail (PortError.create "CRYPTO_FAILED" "SHA-256 digest was empty.")
-
-                                    else
-                                        Task.succeed hex
-
-                                Nothing ->
-                                    Task.fail (PortError.create "CRYPTO_FAILED" "Could not encode SHA-256 digest as hex.")
-                        )
-            )
-
-
-bytesToHex : Bytes.Bytes -> Maybe String
-bytesToHex bytes =
-    BytesDecode.decode
-        (BytesDecode.loop
-            { remaining = Bytes.length bytes, output = [] }
-            (\state ->
-                if state.remaining <= 0 then
-                    BytesDecode.succeed (BytesDecode.Done (String.join "" state.output))
-
-                else
-                    BytesDecode.unsignedInt8
-                        |> BytesDecode.map
-                            (\byte ->
-                                BytesDecode.Loop
-                                    { remaining = state.remaining - 1
-                                    , output = Array.pushLast (hexByte byte) state.output
-                                    }
-                            )
-            )
-        )
-        bytes
-
-
-hexByte value =
-    let
-        digits =
-            "0123456789abcdef"
-
-        high =
-            value // 16
-
-        low =
-            Math.modBy 16 value
-    in
-    String.slice high (high + 1) digits ++ String.slice low (low + 1) digits
+{-| SHA-256 of mapping file texts already loaded by `Mapping.Load`. Content
+only: absolute paths would make the lockfile digest machine-specific for
+identical mapping files.
+-}
+mappingDigestFromTexts : Array String -> Task Error String
+mappingDigestFromTexts texts =
+    System.Hash.requireSha256Hex
+        (String.join "\n---elm-to-gren-mapping---\n" texts)
+        |> Task.mapError (\reason -> PortError.create "CRYPTO_FAILED" reason)
 
 
 encodeReport context cliOptions output rootIdentity compiler planned behaviorVerdict =
@@ -2196,40 +2061,9 @@ encodeDiagnostic diagnostic =
         [ { key = "code", value = Encode.string diagnostic.code }
         , { key = "severity", value = Encode.string diagnostic.severity }
         , { key = "message", value = Encode.string diagnostic.message }
-        , { key = "file", value = maybeString diagnostic.path }
-        , { key = "module", value = maybeString diagnostic.moduleName }
+        , { key = "file", value = JsonPairs.maybeString diagnostic.path }
+        , { key = "module", value = JsonPairs.maybeString diagnostic.moduleName }
         ]
-
-
-maybeString value =
-    when value is
-        Just string ->
-            Encode.string string
-
-        Nothing ->
-            Encode.null
-
-
-parseDetectedPlatform value =
-    when value is
-        "common" ->
-            Ok Mapping.Common
-
-        "browser" ->
-            Ok Mapping.Browser
-
-        "node" ->
-            Ok Mapping.Node
-
-        _ ->
-            Err (PortError.create "EXTRACTION_INVALID" ("Unknown detected platform " ++ value ++ "."))
-
-
-adapterFailure adapterError =
-    when adapterError is
-        UnknownAdapter details ->
-            PortError.create "INVALID_MAPPING"
-                ("Unknown compatibility adapter " ++ details.requirement ++ ".")
 
 
 -- ELM. NAMESPACING (Feature 2)
@@ -2388,25 +2222,7 @@ moduleNameFromSource : Path -> Path -> Maybe String
 moduleNameFromSource root filename =
     when relativeSourcePath root filename is
         Ok relative ->
-            let
-                withoutSrc =
-                    if String.startsWith "src/" relative then
-                        String.dropFirst 4 relative
-
-                    else
-                        relative
-
-                withoutExtension =
-                    if String.endsWith ".elm" withoutSrc then
-                        String.dropLast 4 withoutSrc
-
-                    else if String.endsWith ".gren" withoutSrc then
-                        String.dropLast 5 withoutSrc
-
-                    else
-                        withoutSrc
-            in
-            Just (String.replace "/" "." withoutExtension)
+            pathModuleName relative
 
         Err _ ->
             Nothing
@@ -2594,7 +2410,7 @@ finalizeAdd context permissions cliOptions output assets resolution planned =
                                                     )
                                                 |> Task.onError
                                                     (\error ->
-                                                        removeIfExistsAdd permissions.fileSystem staging
+                                                        removePath permissions.fileSystem staging
                                                             |> Task.onError (\_ -> Task.succeed {})
                                                             |> Task.andThen (\_ -> Task.fail error)
                                                     )
@@ -2740,64 +2556,20 @@ siblingRelativeDependency dependency =
 
 removePath : FileSystem.Permission -> Path -> Task Error {}
 removePath permission path =
-    System.File.exists permission path
-        |> Task.andThen
-            (\pathExists ->
-                if pathExists then
-                    FileSystem.remove permission { recursive = True } path
-                        |> Task.map (\_ -> {})
-                        |> Task.mapError
-                            (\error ->
-                                PortError.create "ADD_FAILED"
-                                    ("Could not clear " ++ Path.toPosixString path ++ ": " ++ FileSystem.errorToString error)
-                            )
-
-                else
-                    Task.succeed {}
-            )
+    System.File.removeIfExists permission "ADD_FAILED" path
 
 
 generateStagingPath : Path -> Task Error Path
 generateStagingPath destination =
-    Crypto.getSecureContext
+    System.Hash.requireUuid
         |> Task.mapError
             (\_ ->
                 PortError.create "ADD_FAILED"
                     "Secure randomness is unavailable for staging packages."
             )
-        |> Task.andThen Crypto.randomUuidV4
         |> Task.map
             (\uuid ->
-                let
-                    parent =
-                        Path.parentPath destination |> Maybe.withDefault Path.empty
-
-                    name =
-                        "."
-                            ++ Path.filenameWithExtension destination
-                            ++ ".elm-to-gren-"
-                            ++ uuid
-                in
-                Path.join [ parent, Path.fromPosixString name ]
-            )
-
-
-removeIfExistsAdd : FileSystem.Permission -> Path -> Task Error {}
-removeIfExistsAdd permission path =
-    System.File.exists permission path
-        |> Task.andThen
-            (\pathExists ->
-                if pathExists then
-                    FileSystem.remove permission { recursive = True } path
-                        |> Task.map (\_ -> {})
-                        |> Task.mapError
-                            (\error ->
-                                PortError.create "ADD_FAILED"
-                                    ("Could not clean up staging directory " ++ Path.toPosixString path ++ ": " ++ FileSystem.errorToString error)
-                            )
-
-                else
-                    Task.succeed {}
+                System.File.tempSibling destination (".elm-to-gren-" ++ uuid)
             )
 
 
@@ -2859,35 +2631,35 @@ applyManifestChanges manifestText name value indirectDependencies =
                                 (\directBase indirectBase ->
                                     let
                                         direct =
-                                            setPair name (Encode.string value) directBase
+                                            JsonPairs.setPair name (Encode.string value) directBase
 
                                         -- Drop the library from indirect if a previous
                                         -- install left it there; a package cannot live in
                                         -- both direct and indirect.
                                         indirectWithoutLibrary =
-                                            removePair name indirectBase
+                                            JsonPairs.removePair name indirectBase
 
                                         indirect =
                                             Dict.foldl
                                                 (\dependencyName dependencyVersion accumulated ->
-                                                    if hasPair dependencyName direct || hasPair dependencyName accumulated then
+                                                    if JsonPairs.hasPair dependencyName direct || JsonPairs.hasPair dependencyName accumulated then
                                                         accumulated
 
                                                     else
-                                                        setPair dependencyName (Encode.string dependencyVersion) accumulated
+                                                        JsonPairs.setPair dependencyName (Encode.string dependencyVersion) accumulated
                                                 )
                                                 indirectWithoutLibrary
                                                 indirectDependencies
 
                                         newDependencies =
                                             dependencies
-                                                |> setPair "direct" (objectFromPairs direct)
-                                                |> setPair "indirect" (objectFromPairs indirect)
+                                                |> JsonPairs.setPair "direct" (JsonPairs.objectFromPairs direct)
+                                                |> JsonPairs.setPair "indirect" (JsonPairs.objectFromPairs indirect)
 
                                         newTop =
-                                            setPair "dependencies" (objectFromPairs newDependencies) topPairs
+                                            JsonPairs.setPair "dependencies" (JsonPairs.objectFromPairs newDependencies) topPairs
                                     in
-                                    Encode.encode 4 (objectFromPairs newTop) ++ "\n"
+                                    Encode.encode 4 (JsonPairs.objectFromPairs newTop) ++ "\n"
                                 )
                                 (requireObjectPairs "direct" dependencies)
                                 (requireObjectPairs "indirect" dependencies)
@@ -2897,7 +2669,7 @@ applyManifestChanges manifestText name value indirectDependencies =
 
 requireApplicationManifest : Array Pair -> Result Error (Array Pair)
 requireApplicationManifest topPairs =
-    when pairString "type" topPairs is
+    when JsonPairs.pairString "type" topPairs is
         Just "application" ->
             Ok topPairs
 
@@ -2915,72 +2687,13 @@ requireApplicationManifest topPairs =
                     "gren.json is missing a type field; `add` requires a Gren application project."
 
 
-hasPair : String -> Array Pair -> Bool
-hasPair key pairs =
-    Array.any (\pair -> pair.key == key) pairs
-
-
-type alias Pair =
-    { key : String, value : Decode.Value }
-
-
-pairString : String -> Array Pair -> Maybe String
-pairString key pairs =
-    when Array.findFirst (\pair -> pair.key == key) pairs is
-        Just found ->
-            Decode.decodeValue Decode.string found.value.value
-                |> Result.toMaybe
-
-        Nothing ->
-            Nothing
-
-
 requireObjectPairs : String -> Array Pair -> Result Error (Array Pair)
 requireObjectPairs key pairs =
-    when Array.findFirst (\pair -> pair.key == key) pairs is
-        Nothing ->
-            Err <|
-                PortError.create "ADD_FAILED"
-                    ("gren.json is missing \"" ++ key ++ "\".")
-
-        Just found ->
-            Decode.decodeValue (Decode.keyValuePairs Decode.value) found.value.value
-                |> Result.mapError
-                    (\problem ->
-                        PortError.create "ADD_FAILED"
-                            ("gren.json field \""
-                                ++ key
-                                ++ "\" is not a JSON object: "
-                                ++ Decode.errorToString problem
-                            )
-                    )
-
-
-setPair : String -> Decode.Value -> Array Pair -> Array Pair
-setPair key value pairs =
-    if Array.any (\pair -> pair.key == key) pairs then
-        Array.map
-            (\pair ->
-                if pair.key == key then
-                    { key = key, value = value }
-
-                else
-                    pair
+    JsonPairs.objectPairs key pairs
+        |> Result.mapError
+            (\problem ->
+                PortError.create "ADD_FAILED" ("gren.json: " ++ problem)
             )
-            pairs
-
-    else
-        Array.pushLast { key = key, value = value } pairs
-
-
-removePair : String -> Array Pair -> Array Pair
-removePair key pairs =
-    Array.keepIf (\pair -> pair.key /= key) pairs
-
-
-objectFromPairs : Array Pair -> Decode.Value
-objectFromPairs pairs =
-    Encode.object (Array.map (\pair -> { key = pair.key, value = pair.value }) pairs)
 
 
 addReport : Plan.Identity -> String -> Planned -> String
@@ -3193,16 +2906,6 @@ extractCompileError stderr stdout =
     truncated
 
 
-resultTask : (problem -> Error) -> Result problem value -> Task Error value
-resultTask toError result =
-    when result is
-        Ok value ->
-            Task.succeed value
-
-        Err problem ->
-            Task.fail (toError problem)
-
-
 {-| D83: union ctor→modules maps when folding dependencies. Duplicates for
 the same (ctor, module) pair are dropped so CtorHome's sole-home count stays
 accurate.
@@ -3247,6 +2950,8 @@ uniqueAppendModules base extra =
 
 Elm resolves a module name to exactly one path under a source directory,
 so `src/Eth/Sentry/Event.elm` can only ever be `Eth.Sentry.Event`.
+Also used by `moduleNameFromSource` (overlay namespacing) so both paths
+agree on `src/` and `tests/` layouts.
 -}
 pathModuleName : String -> Maybe String
 pathModuleName relative =
@@ -3264,6 +2969,9 @@ pathModuleName relative =
                 if String.endsWith ".elm" joined then
                     Just (String.dropLast 4 joined)
 
+                else if String.endsWith ".gren" joined then
+                    Just (String.dropLast 5 joined)
+
                 else
                     Nothing
 
@@ -3274,55 +2982,14 @@ pathModuleName relative =
             Nothing
 
 
-{-| The module name a source file declares, if it declares one. -}
-declaredModuleName : String -> Maybe String
-declaredModuleName source =
-    String.lines source
-        |> Array.mapAndKeepJust
-            (\line ->
-                let
-                    trimmed =
-                        String.trimLeft line
+{-| True if path and `module` declaration agree.
 
-                    afterKeyword =
-                        if String.startsWith "port module " trimmed then
-                            Just (String.dropFirst 12 trimmed)
-
-                        else if String.startsWith "effect module " trimmed then
-                            Just (String.dropFirst 14 trimmed)
-
-                        else if String.startsWith "module " trimmed then
-                            Just (String.dropFirst 7 trimmed)
-
-                        else
-                            Nothing
-                in
-                afterKeyword
-                    |> Maybe.andThen
-                        (\rest -> Array.first (String.words rest))
-            )
-        |> Array.first
-
-
-{-| D89: is this file one the Elm compiler could ever load?
-
-`cmditch/elm-ethereum` ships `src/Eth/Sentry/OldEventWS.elm` declaring
-`module Eth.Sentry.Event`, duplicating the real `Eth/Sentry/Event.elm`.
-Elm publishes and compiles the package fine — it only ever loads a module
-by resolving its name to the matching path, so the stale file is dead
-code. elm-review reads every `.elm` file under the source directories
-instead, finds two modules with one name, and refuses the whole project
-with "Incorrect project" and an empty extract — which reached us only as
-an unclassified exit-1.
-
-A file whose declared name disagrees with its path is unreachable by
-construction, so dropping it cannot change what the package means. Files
-that declare nothing recognisable are kept: absent evidence is not
-evidence of deadness.
+Elm never loads a file whose path does not match its module name; elm-review
+does, and duplicate names break extract. Drop only clear mismatches.
 -}
 isReachableModule : String -> String -> Bool
 isReachableModule relative source =
-    when { path = pathModuleName relative, declared = declaredModuleName source } is
+    when { path = pathModuleName relative, declared = Pipeline.declaredModuleName source } is
         { path = Just expected, declared = Just actual } ->
             expected == actual
 
@@ -3330,10 +2997,7 @@ isReachableModule relative source =
             True
 
 
-{-| D89: delete the staged files elm-review would choke on (see
-`isReachableModule`). Only the staged copy is touched — the shared
-registry tree is never written to.
--}
+{-| Remove staged sources that would break elm-review (see `isReachableModule`). -}
 pruneUnreachableModules : FileSystem.Permission -> Path -> Task Error {}
 pruneUnreachableModules fileSystem stagedRoot =
     [ "src", "tests" ]

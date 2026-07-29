@@ -3,14 +3,16 @@ module Transform.Pipeline exposing
     , SourceFile
     , TransformResult
     , TransformedModule
-    , DepMaps
+    , DependencyMaps
     , collectMappingEdits
     , collectPackageCtorArities
     , collectPackageRecordAliases
     , collectPackageSoleCtors
     , convertEditKind
-    , emptyDepMaps
+    , declaredModuleName
+    , emptyDependencyMaps
     , ensureModuleImports
+    , sourceImportedModules
     , toGrenSourcePath
     , transform
     , transformModule
@@ -34,7 +36,6 @@ import Ast.CtorHome as AstCtorHome
 import Ast.KeyEncode as AstKeyEncode
 import Ast.ModuleName as ModuleName
 import Ast.TupleCompare as AstTupleCompare
-import Char
 import Dict exposing (Dict)
 import Json.Decode as Decode
 import Mapping.Adapter as Adapter
@@ -44,9 +45,11 @@ import Maybe exposing (Maybe(..))
 import Port.Error as PortError exposing (Error)
 import Result exposing (Result(..))
 import Review.Protocol as Protocol
+import System.Text
 import Transform.Lexical as Lexical
 import Transform.AstPipeline as AstPipeline
 import Transform.Evidence as Evidence
+import Transform.Scan as Scan
 import Transform.SourceEdit as SourceEdit exposing (EditKind(..), SourceEdit, SourceError)
 
 
@@ -85,37 +88,19 @@ type alias TransformResult =
     , diagnostics : Array Diagnostic
     , requiredAdapters : Array String
     , detectedPlatform : String
-    , -- D45/D45b: this package's cross-package-relevant maps (post-NameSub
-      -- keys), exported so dependents recordify PARTIAL ctor applications
-      -- and treat dep sole ctors as irrefutable (no dead `_` arm — the
-      -- redundant wildcard on a record-payload sole ctor panics Gren 0.6.6).
-      depExports : DepMaps
+    , -- Maps this package exports so *dependents* can lower ctor/alias/reserved
+      -- uses correctly (partial apps, sole ctors, record-alias apps, reserved renames).
+      depExports : DependencyMaps
     }
 
 
-{-| Cross-package knowledge a dependency exports to its dependents.
+{-| Knowledge one package must hand its dependents for correct lowering.
 
-D70 added `recordAliases`: Elm lets a record type alias be applied like a
-constructor (`PortFunnel.GenericMessage moduleName tag args`) and Gren does not,
-so `Ast.RecordAlias` lowers those to record literals from the *defining*
-module's field names. Field names are knowledge only the defining package holds,
-so a dependent that cannot see them silently left the application standing and
-`Ast.CtorLaw` recordified it as if it were a data constructor — emitting
-`PortFunnel.GenericMessage { first = …, second = …, third = … }` against an
-alias that is not a variant at all.
-
-D70 also added `reservedExports`: `Ast.Reserved` already refuses to guess a
-cross-MODULE escape and reads the defining module's decision from a package-wide
-map, for exactly the desync reason stated in its header. The package boundary is
-the same boundary — elm-codegen's `Elm.Annotation.alias` escapes to `alias_`,
-and a dependent that could not see that decision emitted `Type.alias`.
-
-D83 added `ctorHomes` / `knownModules`: D46's CtorHome repair needs every
-surveyed module's constructor set, including dependencies. Without them a value
-ref wrongly homed to a dep type-alias module (`N.Down`) could not re-point to
-the sole importable declaring module (`Linear.Down`).
+Includes ctor arities, sole constructors, record-alias field lists, reserved
+renames, and constructor-home maps. Without these, dependents guess wrong at
+the package boundary (e.g. treat a record alias as a data ctor).
 -}
-type alias DepMaps =
+type alias DependencyMaps =
     { ctorArities : Dict String Int
     , soleCtors : Dict String {}
     , recordAliases : Dict String (Array String)
@@ -125,8 +110,8 @@ type alias DepMaps =
     }
 
 
-emptyDepMaps : DepMaps
-emptyDepMaps =
+emptyDependencyMaps : DependencyMaps
+emptyDependencyMaps =
     { ctorArities = Dict.empty
     , soleCtors = Dict.empty
     , recordAliases = Dict.empty
@@ -406,8 +391,8 @@ importEdit registry fact =
             )
 
 
-transform : Registry -> DepMaps -> Protocol.Extraction -> Array SourceFile -> Result Error TransformResult
-transform registry depMaps extraction sources =
+transform : Registry -> DependencyMaps -> Protocol.Extraction -> Array SourceFile -> Result Error TransformResult
+transform registry dependencyMaps extraction sources =
     validateExtraction extraction sources
         |> Result.andThen (\_ -> ensureImportsExistInGren registry extraction)
         |> Result.andThen
@@ -415,15 +400,15 @@ transform registry depMaps extraction sources =
                 let
                     packageEvidence =
                         Evidence.collect registry
-                            { constructorArities = depMaps.ctorArities
-                            , soleConstructors = depMaps.soleCtors
-                            , recordAliases = depMaps.recordAliases
-                            , reservedExports = depMaps.reservedExports
+                            { constructorArities = dependencyMaps.ctorArities
+                            , soleConstructors = dependencyMaps.soleCtors
+                            , recordAliases = dependencyMaps.recordAliases
+                            , reservedExports = dependencyMaps.reservedExports
                             , constructorHomes =
-                                AstCtorHome.fromMaps depMaps.ctorHomes
-                                    depMaps.knownModules
+                                AstCtorHome.fromMaps dependencyMaps.ctorHomes
+                                    dependencyMaps.knownModules
                                     |> AstCtorHome.protectRecordAliases
-                                        depMaps.recordAliases
+                                        dependencyMaps.recordAliases
                             }
                             extraction.modules
                 in
@@ -778,7 +763,7 @@ finalizeTransformedModule registry input extraction outputPath source reviewEdit
                                 -- so name and path stay in agreement.
                                 { moduleName = ModuleName.toGren extraction.moduleName
                                 , relativePath = outputPath
-                                , source = ensureTrailingNewline finalSource
+                                , source = System.Text.ensureTrailingNewline finalSource
                                 }
                             , inputPath = input.path
                             , reviewEdits = reviewEdits
@@ -1010,40 +995,43 @@ validateModuleExtraction input extraction =
         Err (PortError.create "EXTRACTION_INVALID" ("Review extraction for '" ++ input.path ++ "' omitted its module name."))
 
     else
-        declaredModuleName input.source
-            |> Result.andThen
-                (\declared ->
-                    if declared /= extraction.moduleName then
-                        Err <|
-                            PortError.create "EXTRACTION_INVALID"
-                                ("Review extraction names module '"
-                                    ++ extraction.moduleName
-                                    ++ "', but '"
-                                    ++ input.path
-                                    ++ "' declares '"
-                                    ++ declared
-                                    ++ "'."
-                                )
+        when declaredModuleName input.source is
+            Nothing ->
+                Err <|
+                    PortError.create "SOURCE_INVALID"
+                        ("Could not read a module declaration from '" ++ input.path ++ "'.")
 
-                    else
-                        validateDetectedPlatform extraction.detectedPlatform
-                )
-            |> Result.andThen (\_ -> validateDiagnostics input.path extraction.diagnostics)
-            |> Result.andThen (\_ -> normalizeRequiredAdapters extraction.requiredAdapters |> Result.map (\_ -> {}))
-            |> Result.andThen
-                (\_ ->
-                    extraction.edits
-                        |> Array.foldl
-                            (\edit result ->
-                                result
-                                    |> Result.andThen
-                                        (\edits ->
-                                            convertReviewEdit edit
-                                                |> Result.map (\converted -> Array.pushLast converted edits)
-                                        )
+            Just declared ->
+                if declared /= extraction.moduleName then
+                    Err <|
+                        PortError.create "EXTRACTION_INVALID"
+                            ("Review extraction names module '"
+                                ++ extraction.moduleName
+                                ++ "', but '"
+                                ++ input.path
+                                ++ "' declares '"
+                                ++ declared
+                                ++ "'."
                             )
-                            (Ok [])
-                )
+
+                else
+                    validateDetectedPlatform extraction.detectedPlatform
+                        |> Result.andThen (\_ -> validateDiagnostics input.path extraction.diagnostics)
+                        |> Result.andThen (\_ -> normalizeRequiredAdapters extraction.requiredAdapters |> Result.map (\_ -> {}))
+                        |> Result.andThen
+                            (\_ ->
+                                extraction.edits
+                                    |> Array.foldl
+                                        (\edit result ->
+                                            result
+                                                |> Result.andThen
+                                                    (\edits ->
+                                                        convertReviewEdit edit
+                                                            |> Result.map (\converted -> Array.pushLast converted edits)
+                                                    )
+                                        )
+                                        (Ok [])
+                            )
 
 
 validateDetectedPlatform : String -> Result Error {}
@@ -1244,7 +1232,12 @@ sourcePathsMatch left right =
         || String.endsWith ("/" ++ normalizedLeft) normalizedRight
 
 
-declaredModuleName : String -> Result Error String
+{-| Declared module name from source, if one is present.
+
+Token scan (comments/strings skipped). One API for transform validation and
+orchestrator reachability — both used to disagree on the same idea.
+-}
+declaredModuleName : String -> Maybe String
 declaredModuleName source =
     let
         tokens =
@@ -1255,15 +1248,15 @@ declaredModuleName source =
     in
     when moduleToken is
         Nothing ->
-            Err (PortError.create "SOURCE_INVALID" "Elm source does not contain a module declaration.")
+            Nothing
 
         Just found ->
             when qualifiedNameAt tokens (found.index + 1) is
                 Nothing ->
-                    Err (PortError.create "SOURCE_INVALID" "Elm module declaration does not contain a valid module name.")
+                    Nothing
 
                 Just qualified ->
-                    Ok qualified.name
+                    Just qualified.name
 
 
 {-| Build catalog mapping edits against code tokens only.
@@ -1280,16 +1273,8 @@ mappedSymbol mapping symbol =
 
 qualifiedNameAt : Array CodeToken -> Int -> Maybe { name : String, afterIndex : Int }
 qualifiedNameAt tokens start =
-    when Array.get start tokens is
-        Just first ->
-            if first.kind == IdentifierToken && startsUpper first.text then
-                qualifiedNameFrom tokens (start + 1) first.text first.endOffset
-
-            else
-                Nothing
-
-        Nothing ->
-            Nothing
+    -- Module path only: each segment after a dot must start uppercase.
+    qualifiedNameAtWith tokens start True
 
 
 {-| D80: adjacency is decided by OFFSETS, never by re-reading the source.
@@ -1301,17 +1286,49 @@ the span between them IS that dot. Confirming it by slicing the module source
 was a tautology that cost `Array.from(whole file)` per qualified-name step
 (`String.slice` is code-point indexed), i.e. quadratic in file size.
 -}
-qualifiedNameFrom : Array CodeToken -> Int -> String -> Int -> Maybe { name : String, afterIndex : Int }
-qualifiedNameFrom tokens cursor name previousEnd =
+qualifiedNameAtWith :
+    Array CodeToken
+    -> Int
+    -> Bool
+    -> Maybe { name : String, afterIndex : Int }
+qualifiedNameAtWith tokens start requireUpperSegments =
+    when Array.get start tokens is
+        Just first ->
+            if first.kind == IdentifierToken && startsUpper first.text then
+                qualifiedNameFromWith tokens
+                    (start + 1)
+                    first.text
+                    first.endOffset
+                    requireUpperSegments
+
+            else
+                Nothing
+
+        Nothing ->
+            Nothing
+
+
+qualifiedNameFromWith :
+    Array CodeToken
+    -> Int
+    -> String
+    -> Int
+    -> Bool
+    -> Maybe { name : String, afterIndex : Int }
+qualifiedNameFromWith tokens cursor name previousEnd requireUpperSegments =
     when { dot = Array.get cursor tokens, next = Array.get (cursor + 1) tokens } is
         { dot = Just dot, next = Just next } ->
             if dot.kind == DotToken
                 && next.kind == IdentifierToken
-                && startsUpper next.text
+                && (not requireUpperSegments || startsUpper next.text)
                 && previousEnd == dot.startOffset
                 && dot.endOffset == next.startOffset
             then
-                qualifiedNameFrom tokens (cursor + 2) (name ++ "." ++ next.text) next.endOffset
+                qualifiedNameFromWith tokens
+                    (cursor + 2)
+                    (name ++ "." ++ next.text)
+                    next.endOffset
+                    requireUpperSegments
 
             else
                 Just { name = name, afterIndex = cursor }
@@ -1321,13 +1338,8 @@ qualifiedNameFrom tokens cursor name previousEnd =
 
 
 startsUpper : String -> Bool
-startsUpper value =
-    when Array.first (String.toArray value) is
-        Just first ->
-            Char.isUpper first
-
-        Nothing ->
-            False
+startsUpper =
+    System.Text.startsUpper
 
 
 type alias RequiredModules =
@@ -1413,37 +1425,18 @@ collectReferencedModules tokens index token found =
 
 fullQualifiedNameAt : Array CodeToken -> Int -> Maybe { name : String, afterIndex : Int }
 fullQualifiedNameAt tokens start =
-    when Array.get start tokens is
-        Just first ->
-            if first.kind == IdentifierToken && startsUpper first.text then
-                fullQualifiedNameFrom tokens (start + 1) first.text first.endOffset
-
-            else
-                Nothing
-
-        Nothing ->
-            Nothing
+    -- Keep lowercase tails so `Module.value` resolves whole (same D80 law).
+    qualifiedNameAtWith tokens start False
 
 
-{-| Same law, and same D80 offset-only adjacency, as `qualifiedNameFrom`; this
-one keeps lowercase tails so `Module.value` resolves whole.
+{-| Module names imported by `source` (token scan; comments/strings skipped).
+
+Shared with the orchestrator so root-edge pruning and transform import
+injection agree on what a file imports.
 -}
-fullQualifiedNameFrom : Array CodeToken -> Int -> String -> Int -> Maybe { name : String, afterIndex : Int }
-fullQualifiedNameFrom tokens cursor name previousEnd =
-    when { dot = Array.get cursor tokens, next = Array.get (cursor + 1) tokens } is
-        { dot = Just dot, next = Just next } ->
-            if dot.kind == DotToken
-                && next.kind == IdentifierToken
-                && previousEnd == dot.startOffset
-                && dot.endOffset == next.startOffset
-            then
-                fullQualifiedNameFrom tokens (cursor + 2) (name ++ "." ++ next.text) next.endOffset
-
-            else
-                Just { name = name, afterIndex = cursor }
-
-        _ ->
-            Just { name = name, afterIndex = cursor }
+sourceImportedModules : String -> Dict String {}
+sourceImportedModules source =
+    importedModuleNames (scanCodeTokens source)
 
 
 importedModuleNames : Array CodeToken -> Dict String {}
@@ -1564,11 +1557,14 @@ moduleImportInsertionOffset source tokens =
 
                         Just close ->
                             let
+                                characters =
+                                    System.Text.sourceCharacters source
+
                                 afterWhitespace =
-                                    skipWhitespace (sourceCharacters source) close.endOffset
+                                    Scan.skipWhitespace characters close.endOffset
                             in
-                            if matchesCharactersAt (sourceCharacters source) afterWhitespace [ '{', '-', '|' ] then
-                                skipBlockComment (String.toArray source) (afterWhitespace + 2) 1
+                            if Scan.matchesAt characters afterWhitespace [ '{', '-', '|' ] then
+                                Scan.skipBlockComment characters (afterWhitespace + 2) 1
 
                             else
                                 close.endOffset
@@ -1793,27 +1789,6 @@ aggregatePlatform modules =
         "common"
 
 
-ensureTrailingNewline : String -> String
-ensureTrailingNewline source =
-    if String.endsWith "\n" source then
-        source
-
-    else
-        source ++ "\n"
-
-
-{-| `String.toArray` is O(n^2) in gren-lang/core 7.4.2: it is
-`foldl Array.pushLast []`, and `Array.pushLast` is `toSpliced`, which copies
-the whole array on every character. Profiling a single 100KB module showed
-this one call dominating the entire port. Same fold, Builder accumulator,
-linear.
--}
-sourceCharacters : String -> Array Char
-sourceCharacters source =
-    String.foldl Builder.pushLast (Builder.empty (String.count source)) source
-        |> Builder.toArray
-
-
 scanCodeTokens : String -> Array CodeToken
 scanCodeTokens source =
     -- Builder, not Array: `Builder.pushLast` is `toSpliced`, which COPIES the
@@ -1821,7 +1796,7 @@ scanCodeTokens source =
     -- O(N^2). Measured before this change: elm-community/list-extra spent
     -- 97.5s of a 101s port inside transform. Builder.pushLast is amortized
     -- O(1) and the array materializes once.
-    Builder.toArray (scanTokensFrom (sourceCharacters source) 0 (Builder.empty 1024))
+    Builder.toArray (scanTokensFrom (System.Text.sourceCharacters source) 0 (Builder.empty 1024))
 
 
 scanTokensFrom : Array Char -> Int -> Builder.Builder CodeToken -> Builder.Builder CodeToken
@@ -1845,21 +1820,21 @@ scanTokensFrom characters offset tokens =
             if character == '-' && charAt characters (offset + 1) == Just '-' then
                 let
                     next =
-                        skipLineComment characters (offset + 2)
+                        Scan.skipLineComment characters (offset + 2)
                 in
                 scanTokensFrom characters next tokens
 
             else if character == '{' && charAt characters (offset + 1) == Just '-' then
                 let
                     next =
-                        skipBlockComment characters (offset + 2) 1
+                        Scan.skipBlockComment characters (offset + 2) 1
                 in
                 scanTokensFrom characters next tokens
 
-            else if character == '[' && matchesCharactersAt characters offset [ '[', 'g', 'l', 's', 'l', '|' ] then
+            else if character == '[' && Scan.matchesAt characters offset Scan.glslStart then
                 let
                     next =
-                        skipGlsl characters (offset + 6)
+                        Scan.skipGlsl characters (offset + 6)
                 in
                 scanTokensFrom characters next tokens
 
@@ -1867,28 +1842,28 @@ scanTokensFrom characters offset tokens =
                 if charAt characters (offset + 1) == Just '"' && charAt characters (offset + 2) == Just '"' then
                     let
                         next =
-                            skipMultilineString characters (offset + 3)
+                            Scan.skipMultilineString characters (offset + 3)
                     in
                     scanTokensFrom characters next tokens
 
                 else
                     let
                         next =
-                            skipQuoted characters '"' (offset + 1)
+                            Scan.skipQuoted characters '"' (offset + 1)
                     in
                     scanTokensFrom characters next tokens
 
             else if character == '\'' then
                 let
                     next =
-                        skipQuoted characters '\'' (offset + 1)
+                        Scan.skipQuoted characters '\'' (offset + 1)
                 in
                 scanTokensFrom characters next tokens
 
-            else if isIdentifierStart character then
+            else if Scan.isIdentifierStart character then
                 let
                     tokenEnd =
-                        scanIdentifierEnd characters (offset + 1)
+                        Scan.scanIdentifierEnd characters (offset + 1)
 
                     nextTokens =
                         Builder.pushLast
@@ -1993,30 +1968,6 @@ isOperatorChar character =
         _ -> False
 
 
-isIdentifierStart : Char -> Bool
-isIdentifierStart character =
-    Char.isAlpha character || character == '_'
-
-
-isIdentifierContinuation : Char -> Bool
-isIdentifierContinuation character =
-    isIdentifierStart character || Char.isDigit character || character == '\''
-
-
-scanIdentifierEnd : Array Char -> Int -> Int
-scanIdentifierEnd characters offset =
-    when Array.get offset characters is
-        Just character ->
-            if isIdentifierContinuation character then
-                scanIdentifierEnd characters (offset + 1)
-
-            else
-                offset
-
-        Nothing ->
-            offset
-
-
 scanOperatorEnd : Array Char -> Int -> Int
 scanOperatorEnd characters offset =
     when Array.get offset characters is
@@ -2029,120 +1980,3 @@ scanOperatorEnd characters offset =
 
         Nothing ->
             offset
-
-
-skipLineComment : Array Char -> Int -> Int
-skipLineComment characters offset =
-    when Array.get offset characters is
-        Nothing ->
-            Array.length characters
-
-        Just '\n' ->
-            offset
-
-        Just '\r' ->
-            offset
-
-        Just _ ->
-            skipLineComment characters (offset + 1)
-
-
-skipBlockComment : Array Char -> Int -> Int -> Int
-skipBlockComment characters offset depth =
-    if depth == 0 then
-        offset
-
-    else
-        when Array.get offset characters is
-            Nothing ->
-                Array.length characters
-
-            Just _ ->
-                if matchesCharactersAt characters offset [ '{', '-' ] then
-                    skipBlockComment characters (offset + 2) (depth + 1)
-
-                else if matchesCharactersAt characters offset [ '-', '}' ] then
-                    skipBlockComment characters (offset + 2) (depth - 1)
-
-                else
-                    skipBlockComment characters (offset + 1) depth
-
-
-skipQuoted : Array Char -> Char -> Int -> Int
-skipQuoted characters delimiter offset =
-    when Array.get offset characters is
-        Nothing ->
-            Array.length characters
-
-        Just '\\' ->
-            if offset + 1 < Array.length characters then
-                skipQuoted characters delimiter (offset + 2)
-
-            else
-                Array.length characters
-
-        Just character ->
-            if character == delimiter then
-                offset + 1
-
-            else
-                skipQuoted characters delimiter (offset + 1)
-
-
-skipMultilineString : Array Char -> Int -> Int
-skipMultilineString characters offset =
-    when Array.get offset characters is
-        Nothing ->
-            Array.length characters
-
-        Just '\\' ->
-            if offset + 1 < Array.length characters then
-                skipMultilineString characters (offset + 2)
-
-            else
-                Array.length characters
-
-        Just _ ->
-            if matchesCharactersAt characters offset [ '"', '"', '"' ] then
-                offset + 3
-
-            else
-                skipMultilineString characters (offset + 1)
-
-
-skipGlsl : Array Char -> Int -> Int
-skipGlsl characters offset =
-    when Array.get offset characters is
-        Nothing ->
-            Array.length characters
-
-        Just _ ->
-            if matchesCharactersAt characters offset [ '|', ']' ] then
-                offset + 2
-
-            else
-                skipGlsl characters (offset + 1)
-
-
-skipWhitespace : Array Char -> Int -> Int
-skipWhitespace characters offset =
-    when Array.get offset characters is
-        Just character ->
-            if Array.member character [ ' ', '\t', '\n', '\r', '\u{000B}', '\u{000C}' ] then
-                skipWhitespace characters (offset + 1)
-
-            else
-                offset
-
-        Nothing ->
-            offset
-
-
-matchesCharactersAt : Array Char -> Int -> Array Char -> Bool
-matchesCharactersAt characters offset expected =
-    Array.indexedFoldl
-        (\relative expectedCharacter matches ->
-            matches && Array.get (offset + relative) characters == Just expectedCharacter
-        )
-        True
-        expected

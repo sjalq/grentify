@@ -1,5 +1,5 @@
 /**
- * Ledger law (docs/PLAN.md §5 — ground-truth artifact + reconciliation).
+ * Ledger law (ledger law — ground-truth artifact + reconciliation).
  *
  * The ledger is the durable record of every ecosystem package we have WALKED
  * (attempted to port) together with its terminal state. Packages not yet walked
@@ -14,7 +14,7 @@
  *  - State-key law: every entry.state MUST be one of the seven canonical states
  *    (see STATES / STATE_KEY). working-failure additionally REQUIRES reason +
  *    evidence.
- *  - STALE law (docs/PLAN.md §5): an entry is STALE when its stamped commit
+ *  - STALE law (ledger law): an entry is STALE when its stamped commit
  *    strictly predates the last commit that touched src/. Formally,
  *      stale iff isAncestor(entry.commit, lastSrcChangeCommit)
  *               AND entry.commit != lastSrcChangeCommit

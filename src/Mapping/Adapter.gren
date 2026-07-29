@@ -5,6 +5,7 @@ module Mapping.Adapter exposing
     , all
     , declaresNominalType
     , elmRequirements
+    , errorMessage
     , generate
     , generateFromRequirements
     , generateOne
@@ -56,6 +57,20 @@ type AdapterError
         { requirement : String
         , available : Array String
         }
+
+
+{-| Stable human text for adapter failures. Port layers wrap this with their
+`INVALID_MAPPING` code so Graph and Orchestrator cannot drift on wording.
+-}
+errorMessage : AdapterError -> String
+errorMessage adapterError =
+    when adapterError is
+        UnknownAdapter details ->
+            "Unknown compatibility adapter "
+                ++ details.requirement
+                ++ ". Available adapters: "
+                ++ String.join ", " details.available
+                ++ "."
 
 
 prefix : String

@@ -42,6 +42,7 @@ type alias Options =
     , formatExecutable : String
     , requestedPlatform : Cli.PlatformChoice
     , offline : Bool
+    , toolVersion : String
     }
 
 
@@ -171,7 +172,7 @@ transformModules options registry extraction =
             )
             (Task.succeed [])
         |> Task.andThen
-            (\sources -> TransformPipeline.transform registry TransformPipeline.emptyDepMaps extraction sources |> taskFromResult)
+            (\sources -> TransformPipeline.transform registry TransformPipeline.emptyDependencyMaps extraction sources |> taskFromResult)
 
 
 emit
@@ -205,7 +206,8 @@ emit options mappingFingerprint manifest targetName builtManifest transformed ex
 
         report =
             Port.Report.report
-                { rootElm = sourceName
+                { toolVersion = options.toolVersion
+                , rootElm = sourceName
                 , rootGren = targetName
                 , outputDirectory = System.File.pathToString options.platform options.destination
                 , verified = True

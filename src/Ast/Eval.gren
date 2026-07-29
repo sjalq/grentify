@@ -983,7 +983,7 @@ strictBinop fuel operator left right =
 
         { op = "++", l = VArray a, r = VArray b } ->
             -- Elm order (a then b). Avoid Gren's argument-flipped
-            -- Array.append entirely; see D2 in docs/PLAN.md.
+            -- Array.append entirely; see D2 (Array.append).
             done fuel (VArray (concatElm a b))
 
         { op = "::", r = VArray xs } ->

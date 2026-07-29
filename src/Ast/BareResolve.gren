@@ -1,24 +1,10 @@
 module Ast.BareResolve exposing (apply)
 
-{-| Law: a bare `ExprVar { moduleName = Nothing }` whose name appears in an
-import's EXPLICIT exposing list, and is not bound by any enclosing lambda
-argument, let declaration, case pattern, or top-level declaration argument,
-is restored to a qualified reference to the importing module.
+{-| Restore bare vars that elm-review mis-marked LOCAL (shadow leak past lambda+let).
 
-Why this pass exists (D23): elm-review 2.13.5's ModuleNameLookupTable leaks a
-lambda-parameter shadow outward past the lambda when the lambda body contains
-a `let` — `fuzz (list int) "…" <| \list -> let … in …` extracts the fuzzer's
-`list` as LOCAL. The extraction is the lie; this pass repairs it with scope
-knowledge we hold exactly. It runs BEFORE NameSub so restored qualified refs
-receive catalog mapping like any other qualified ref.
-
-Names from `exposing (..)` imports are untouched (their member lists are not
-known here); a shadow-leak on such a name would survive — accepted residual,
-see D23 in docs/PLAN.md.
-
-The scope walk (which names are bound at a given use site) is shared with
-`Ast.NameSub` via `Ast.Scope` — see that module's header for why a second,
-independent tracker is exactly how this bug class breeds.
+If a free name is in an explicit `exposing` list and not bound in scope, re-qualify
+it to the import. Runs before NameSub. Uses `Ast.Scope` (same binder walk as NameSub).
+`exposing (..)` is not repaired — member sets are unknown here.
 -}
 
 import Array exposing (Array)

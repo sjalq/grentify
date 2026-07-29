@@ -1,0 +1,77 @@
+module Port.Mapped exposing
+    ( adapterFailure
+    , detectedPlatform
+    , hasUnmappedDependencies
+    , isMappedDependency
+    , solverFailure
+    , versionsFor
+    )
+
+{-| Shared map/skip/solver helpers used by both Graph and Orchestrator. -}
+
+import Array exposing (Array)
+import Elm.Manifest as ElmManifest exposing (Manifest)
+import Elm.PackageName as PackageName exposing (Name)
+import Elm.Registry as ElmRegistry
+import Elm.Semver as Semver
+import Mapping.Adapter as Adapter exposing (AdapterError)
+import Mapping.Registry as MappingRegistry
+import Mapping.Types as Mapping exposing (MappingKind(..), Registry)
+import Port.Error as PortError exposing (Error)
+import Resolve.Solver as Solver
+import Task exposing (Task)
+
+
+{-| True if this dependency is fully covered by a non-Transpile catalog mapping. -}
+isMappedDependency : Registry -> Name -> Bool
+isMappedDependency registry name =
+    when MappingRegistry.mappingFor (PackageName.toString name) registry is
+        Just mapping ->
+            Mapping.mappingKind mapping /= TranspileKind
+
+        Nothing ->
+            False
+
+
+{-| True if any direct dependency still needs acquire/transpile. -}
+hasUnmappedDependencies : Registry -> Manifest -> Bool
+hasUnmappedDependencies registry manifest =
+    ElmManifest.dependencyNames manifest
+        |> Array.any (not << isMappedDependency registry)
+
+
+versionsFor : ElmRegistry.Registry -> Name -> Task Error (Array Semver.Version)
+versionsFor elmRegistry name =
+    when ElmRegistry.versionsFor name elmRegistry is
+        Just versions ->
+            Task.succeed versions
+
+        Nothing ->
+            Task.fail <|
+                PortError.create "PACKAGE_NOT_FOUND"
+                    ("Elm registry does not contain " ++ PackageName.toString name ++ ".")
+
+
+solverFailure : Solver.Error -> Error
+solverFailure problem =
+    PortError.create "DEPENDENCY_CONFLICT" (Solver.errorToString problem)
+
+
+adapterFailure : AdapterError -> Error
+adapterFailure adapterError =
+    PortError.create "INVALID_MAPPING" (Adapter.errorMessage adapterError)
+
+
+{-| Parse a review-detected platform tag (`common` / `browser` / `node`).
+Unknown values become `EXTRACTION_INVALID`.
+-}
+detectedPlatform : String -> Result Error Mapping.Platform
+detectedPlatform value =
+    when Mapping.platformFromName value is
+        Just platform ->
+            Ok platform
+
+        Nothing ->
+            Err <|
+                PortError.create "EXTRACTION_INVALID"
+                    ("Unknown detected platform " ++ value ++ ".")

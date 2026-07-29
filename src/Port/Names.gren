@@ -8,30 +8,33 @@ import Mapping.Types exposing (PackageMapping(..), Registry)
 import Port.Error as PortError exposing (Error)
 
 
-{-| Gren package name: catalog mapping if present, else Elm coordinate.
+{-| Gren package name for publish (strict).
+
+Always runs `isValidGrenPackageName`. For planning unmapped Elm coordinates
+through the graph, use permissive `Port.Plan.targetName`.
 -}
 targetName : Registry -> Manifest -> Result Error String
-targetName mappings manifest =
+targetName registry manifest =
     let
         sourceName =
             Elm.PackageName.toString manifest.name
     in
-    when Mapping.Registry.mappingFor sourceName mappings is
+    when Mapping.Registry.mappingFor sourceName registry is
         Just (Transpile details) ->
-            valid details.grenPackage
+            requireValidGrenPackageName details.grenPackage
 
         Just (GrenAnalogue details) ->
-            valid details.grenPackage
+            requireValidGrenPackageName details.grenPackage
 
         Just (Absorbed details) ->
-            valid details.grenPackage
+            requireValidGrenPackageName details.grenPackage
 
         Nothing ->
-            valid sourceName
+            requireValidGrenPackageName sourceName
 
 
-valid : String -> Result Error String
-valid candidate =
+requireValidGrenPackageName : String -> Result Error String
+requireValidGrenPackageName candidate =
     if Mapping.Decode.isValidGrenPackageName candidate then
         Ok candidate
 

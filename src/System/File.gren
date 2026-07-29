@@ -2,11 +2,16 @@ module System.File exposing
     ( copyDirectoryContents
     , ensureDirectory
     , exists
+    , inDirectory
     , listFilesRecursively
+    , move
     , pathFromString
     , pathToString
     , readText
+    , removeIfExists
+    , removeIfExistsBestEffort
     , resolve
+    , tempSibling
     , writeText
     )
 
@@ -51,6 +56,13 @@ resolve platform workingDirectory value =
         candidate
 
 
+{-| Join a relative POSIX-style path under `directory` (e.g. `"src/Main.gren"`).
+-}
+inDirectory : String -> Path -> Path
+inDirectory relative directory =
+    Path.append (Path.fromPosixString relative) directory
+
+
 readText : FileSystem.Permission -> Path -> Task Error String
 readText permission path =
     FileSystem.readFile permission path
@@ -92,6 +104,72 @@ exists permission path =
     FileSystem.metadata permission { resolveLink = True } path
         |> Task.map (\_ -> True)
         |> Task.onError (\_ -> Task.succeed False)
+
+
+{-| Recursive remove; failures use caller-supplied `errorCode`. -}
+removeIfExists : FileSystem.Permission -> String -> Path -> Task Error {}
+removeIfExists permission errorCode path =
+    exists permission path
+        |> Task.andThen
+            (\pathExists ->
+                if pathExists then
+                    FileSystem.remove permission { recursive = True } path
+                        |> Task.map (\_ -> {})
+                        |> Task.mapError
+                            (\error ->
+                                PortError.create errorCode
+                                    ("Could not remove "
+                                        ++ Path.toPosixString path
+                                        ++ ": "
+                                        ++ FileSystem.errorToString error
+                                    )
+                            )
+
+                else
+                    Task.succeed {}
+            )
+
+
+{-| Cache/temp cleanup; never fails. -}
+removeIfExistsBestEffort : FileSystem.Permission -> Path -> Task x {}
+removeIfExistsBestEffort permission path =
+    exists permission path
+        |> Task.andThen
+            (\present ->
+                if present then
+                    FileSystem.remove permission { recursive = True } path
+                        |> Task.map (\_ -> {})
+
+                else
+                    Task.succeed {}
+            )
+        |> Task.onError (\_ -> Task.succeed {})
+
+
+{-| Path next to `path`: `.<filename><label>` (atomic writes / staging). -}
+tempSibling : Path -> String -> Path
+tempSibling path label =
+    let
+        parent =
+            Path.parentPath path
+                |> Maybe.withDefault Path.empty
+
+        name =
+            "." ++ Path.filenameWithExtension path ++ label
+    in
+    Path.join [ parent, Path.fromPosixString name ]
+
+
+{-| Rename `source` → `destination` (Gren API is dest-first). -}
+move : FileSystem.Permission -> String -> Path -> Path -> String -> Task Error {}
+move permission errorCode destination source action =
+    FileSystem.move permission destination source
+        |> Task.map (\_ -> {})
+        |> Task.mapError
+            (\error ->
+                PortError.create errorCode
+                    ("Could not " ++ action ++ ": " ++ FileSystem.errorToString error)
+            )
 
 
 listFilesRecursively : FileSystem.Permission -> Path -> Task Error (Array Path)

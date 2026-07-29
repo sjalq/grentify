@@ -1,0 +1,106 @@
+module System.Hash exposing
+    ( bytesToHex
+    , freshUuid
+    , requireSha256Hex
+    , requireUuid
+    , sha256Hex
+    )
+
+{-| SHA-256 hex and UUIDs for cache keys.
+
+`require*` fails hard; soft helpers (`sha256Hex`, `freshUuid`) degrade to empty /
+Nothing so optional caches never abort a port.
+-}
+
+import Bytes exposing (Bytes)
+import Bytes.Decode as BytesDecode
+import Crypto
+import Math
+import Task exposing (Task)
+
+
+freshUuid : Task x (Maybe String)
+freshUuid =
+    requireUuid
+        |> Task.map Just
+        |> Task.onError (\_ -> Task.succeed Nothing)
+
+
+requireUuid : Task String String
+requireUuid =
+    Crypto.getSecureContext
+        |> Task.mapError (\_ -> "Secure randomness is unavailable.")
+        |> Task.andThen Crypto.randomUuidV4
+
+
+bytesToHex : Bytes -> Maybe String
+bytesToHex bytes =
+    BytesDecode.decode
+        (BytesDecode.loop
+            { remaining = Bytes.length bytes, output = [] }
+            (\state ->
+                if state.remaining <= 0 then
+                    BytesDecode.succeed (BytesDecode.Done (String.join "" state.output))
+
+                else
+                    BytesDecode.unsignedInt8
+                        |> BytesDecode.map
+                            (\byte ->
+                                BytesDecode.Loop
+                                    { remaining = state.remaining - 1
+                                    , output = Array.pushLast (hexByte byte) state.output
+                                    }
+                            )
+            )
+        )
+        bytes
+
+
+{-| Soft SHA-256 of a UTF-8 string. Returns `""` on crypto failure so cache
+lookups degrade to a miss rather than aborting the port.
+-}
+sha256Hex : String -> Task x String
+sha256Hex input =
+    requireSha256Hex input
+        |> Task.onError (\_ -> Task.succeed "")
+
+
+{-| Hard SHA-256 hex. Err with a short reason on crypto or encode failure
+(lockfile mapping digests that must not be empty).
+-}
+requireSha256Hex : String -> Task String String
+requireSha256Hex input =
+    Crypto.getSecureContext
+        |> Task.mapError (\_ -> "Could not initialize SHA-256.")
+        |> Task.andThen
+            (\context ->
+                Crypto.digest context Crypto.Sha256 (Bytes.fromString input)
+            )
+        |> Task.andThen
+            (\digestBytes ->
+                when bytesToHex digestBytes is
+                    Just hex ->
+                        if String.isEmpty hex then
+                            Task.fail "SHA-256 digest was empty."
+
+                        else
+                            Task.succeed hex
+
+                    Nothing ->
+                        Task.fail "Could not encode SHA-256 digest as hex."
+            )
+
+
+hexByte : Int -> String
+hexByte value =
+    let
+        digits =
+            "0123456789abcdef"
+
+        high =
+            value // 16
+
+        low =
+            Math.modBy 16 value
+    in
+    String.slice high (high + 1) digits ++ String.slice low (low + 1) digits

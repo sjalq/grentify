@@ -1912,23 +1912,57 @@ elm-review an explicit `--compiler`, say — need to tell the two cases apart.
 -}
 bundledBinary : Node.Platform -> FileSystem.Permission -> Path -> String -> Task error (Maybe String)
 bundledBinary platform permission root name =
-    let
-        binDirectory =
-            Path.join [ root, Path.fromPosixString "node_modules/.bin" ]
+    firstExistingBinary platform permission (binaryCandidates platform root name)
 
-        candidates =
+
+{-| Every `node_modules/.bin` npm could have put `name` in, nearest first.
+
+In a checkout of this repo that is `<root>/node_modules/.bin`. Installed as a
+package it is not: npm HOISTS dependencies to the consuming project, so the
+pinned elm / elm-review / gren sit in the app's `node_modules/.bin`, several
+levels above this package. Looking only beside ourselves finds them during
+development and nowhere else, which is the failure mode that hides worst —
+everything works for whoever wrote it.
+-}
+binaryCandidates : Node.Platform -> Path -> String -> Array Path
+binaryCandidates platform root name =
+    let
+        fileNames =
             when platform is
                 Node.Win32 ->
                     -- npm installs Windows cmd shims as name.cmd; prefer those so
                     -- ChildProcess.NoShell can spawn without a shell.
-                    [ Path.join [ binDirectory, Path.fromPosixString (name ++ ".cmd") ]
-                    , Path.join [ binDirectory, Path.fromPosixString name ]
-                    ]
+                    [ name ++ ".cmd", name ]
 
                 _ ->
-                    [ Path.join [ binDirectory, Path.fromPosixString name ] ]
+                    [ name ]
     in
-    firstExistingBinary platform permission candidates
+    selfAndAncestors 64 root
+        |> Array.mapAndFlatten
+            (\directory ->
+                Array.map
+                    (\fileName ->
+                        Path.join
+                            [ directory
+                            , Path.fromPosixString ("node_modules/.bin/" ++ fileName)
+                            ]
+                    )
+                    fileNames
+            )
+
+
+selfAndAncestors : Int -> Path -> Array Path
+selfAndAncestors fuel path =
+    if fuel <= 0 then
+        [ path ]
+
+    else
+        when Path.parentPath path is
+            Nothing ->
+                [ path ]
+
+            Just parent ->
+                Array.pushFirst path (selfAndAncestors (fuel - 1) parent)
 
 
 firstExistingBinary : Node.Platform -> FileSystem.Permission -> Array Path -> Task error (Maybe String)

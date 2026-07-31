@@ -2342,6 +2342,36 @@ finalizeAdd context permissions cliOptions output assets resolution planned =
                         Dict.empty
                         planned.packages
 
+                -- The library's own transpiled dependencies, which are vendored
+                -- beside it and which its manifest names `local:../X`.
+                --
+                -- Gren refuses a dependency that declares a local dependency of
+                -- its own "unless they happen to point to the same local
+                -- dependency as the root project" — so the app has to name them
+                -- too, from its own vantage point. `local:../X` and
+                -- `local:.elm-to-gren/packages/X` are the same directory read
+                -- from the two places, which is exactly what the resolver
+                -- checks. Leave these out and every add of a package with a
+                -- transpiled dependency fails verification and rolls back.
+                vendoredLocalDependencies =
+                    Array.foldl
+                        (\package collected ->
+                            if package.manifest.name == rootIdentity.grenName then
+                                collected
+
+                            else
+                                Dict.set package.manifest.name
+                                    ("local:.elm-to-gren/packages/"
+                                        ++ Workspace.packageDirectoryName
+                                            { name = package.manifest.name
+                                            , version = package.manifest.version
+                                            }
+                                    )
+                                    collected
+                        )
+                        Dict.empty
+                        planned.packages
+
                 dependencyValue =
                     "local:.elm-to-gren/packages/" ++ libDirectory
 
@@ -2359,7 +2389,7 @@ finalizeAdd context permissions cliOptions output assets resolution planned =
                     )
                 |> Task.andThen
                     (\manifestText ->
-                        when applyManifestChanges manifestText rootIdentity.grenName dependencyValue indirectDependencies is
+                        when applyManifestChanges manifestText rootIdentity.grenName dependencyValue indirectDependencies vendoredLocalDependencies is
                             Err error ->
                                 Task.fail error
 
@@ -2632,13 +2662,18 @@ mergeLowerBound name candidate deps =
             Dict.set name (preferHigherVersion existing candidate) deps
 
 
-{-| Add the library to `dependencies.direct` and its transitive registry deps to
-`dependencies.indirect`, preserving every other field. Deps already present in
-`direct` or `indirect` are left as the project set them. The library is removed
-from `indirect` if it was already there, so it is not listed twice.
+{-| Add the library to `dependencies.direct` and everything the vendored tree
+needs to `dependencies.indirect`, preserving every other field. The library is
+removed from `indirect` if it was already there, so it is not listed twice.
+
+`indirectDependencies` are registry packages, added only where the app is
+silent — an existing pin is the project's business.
+`vendoredLocalDependencies` are the sibling packages this tool just wrote, so
+their paths are restated on every add: a stale one points at a directory that
+no longer holds the version the library now asks for.
 -}
-applyManifestChanges : String -> String -> String -> Dict String String -> Result Error String
-applyManifestChanges manifestText name value indirectDependencies =
+applyManifestChanges : String -> String -> String -> Dict String String -> Dict String String -> Result Error String
+applyManifestChanges manifestText name value indirectDependencies vendoredLocalDependencies =
     Decode.decodeString (Decode.keyValuePairs Decode.value) manifestText
         |> Result.mapError
             (\problem ->
@@ -2663,7 +2698,7 @@ applyManifestChanges manifestText name value indirectDependencies =
                                         indirectWithoutLibrary =
                                             JsonPairs.removePair name indirectBase
 
-                                        indirect =
+                                        withIndirect =
                                             Dict.foldl
                                                 (\dependencyName dependencyVersion accumulated ->
                                                     if JsonPairs.hasPair dependencyName direct || JsonPairs.hasPair dependencyName accumulated then
@@ -2674,6 +2709,18 @@ applyManifestChanges manifestText name value indirectDependencies =
                                                 )
                                                 indirectWithoutLibrary
                                                 indirectDependencies
+
+                                        indirect =
+                                            Dict.foldl
+                                                (\dependencyName localValue accumulated ->
+                                                    if JsonPairs.hasPair dependencyName direct then
+                                                        accumulated
+
+                                                    else
+                                                        JsonPairs.setPair dependencyName (Encode.string localValue) accumulated
+                                                )
+                                                withIndirect
+                                                vendoredLocalDependencies
 
                                         newDependencies =
                                             dependencies

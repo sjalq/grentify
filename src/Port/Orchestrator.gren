@@ -299,13 +299,17 @@ pruneFalseRootEdges permissions acquireOptions registry rootSource =
         manifest =
             rootSource.manifest
 
-        -- A MAPPED dependency is never pruned. Its modules reach the output
-        -- through the Gren analogue and through the `ElmToGren.Compat.*` shims
-        -- the tool generates, which import names (`Platform.Sub`,
-        -- `Platform.Cmd`) no root source ever mentions. Dropping elm/core
-        -- because a package only imports `Bitwise` took the canary from 14/14
-        -- to 2/14.
-        isMappedDependency name =
+        -- A CATALOG-MAPPED dependency is never pruned. Its modules reach the
+        -- output through the Gren analogue and through the
+        -- `ElmToGren.Compat.*` shims the tool generates, which import names
+        -- (`Platform.Sub`, `Platform.Cmd`) no root source ever mentions.
+        -- Dropping elm/core because a package only imports `Bitwise` took the
+        -- canary from 14/14 to 2/14.
+        --
+        -- NOT `Mapped.isMappedDependency`: that one excludes Transpile
+        -- mappings (they must still be acquired/solved), while pruning must
+        -- keep ANY catalog-mapped edge, Transpile included.
+        hasCatalogMapping name =
             MappingRegistry.mappingFor name registry /= Nothing
     in
     if Dict.isEmpty manifest.dependencies then
@@ -320,7 +324,7 @@ pruneFalseRootEdges permissions acquireOptions registry rootSource =
                             pending
                                 |> Task.andThen
                                     (\kept ->
-                                        if isMappedDependency key then
+                                        if hasCatalogMapping key then
                                             Task.succeed (Dict.set key dependency kept)
 
                                         else

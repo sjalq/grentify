@@ -1,10 +1,11 @@
 # elm-to-gren (Grenity)
 
-Port an Elm package (and its dependency graph) into **compiler-validated Gren packages**.
+Vendor an Elm package (and its dependency graph) into your Gren application as **compiler-validated Gren code**.
 
 ```sh
 npm install && npm run build
-node bin/elm-to-gren.cjs elm-community/list-extra --out ./out --cache ./cache
+# from your Gren app root
+node bin/elm-to-gren.cjs add elm-community/list-extra --cache ./cache
 ```
 
 ## What it does
@@ -15,10 +16,10 @@ This tool:
 1. Downloads (or reads) an Elm package and its Elm dependencies  
 2. Decides per package: **map** to an existing Gren package, or **transpile**  
 3. Transpiles Elm sources into Gren  
-4. Writes a Gren package (or vendors into an app)  
+4. Vendors the result into your app  
 5. Formats (unless the package is huge) and **verifies with the real Gren compiler**
 
-If Gren accepts the result, the port is treated as successful.
+If Gren accepts the result, the conversion is treated as successful.
 
 ## How it works (pipeline)
 
@@ -31,7 +32,7 @@ input (author/pkg@version or local path)
   → for each package (dependencies first):
         map to Gren  |  or  extract AST → transform → adapters
   → plan gren.json names/versions
-  → emit files (workspace or .elm-to-gren/ vendor)
+  → emit files (vendored under .elm-to-gren/)
   → format (skip volume packages)
   → verify (`gren docs` / `gren make`)
 ```
@@ -47,18 +48,15 @@ normal Gren dependencies.
 ## Commands
 
 ```
-elm-to-gren [port] <author/package[@version] | local-path> [options]
-elm-to-gren add    <author/package[@version] | local-path> [options]
+elm-to-gren add <author/package[@version] | local-path> [options]
 ```
 
-| Command | Meaning |
-| --- | --- |
-| `port` (default) | Fresh Gren workspace (`--out`, default `./gren-output`). No module prefix. |
-| `add` | Vendor into an existing Gren **application** (`--out` default `.`). Modules get an `Elm.` prefix. Idempotent. |
+`add` vendors into an existing Gren **application** (`--out` default `.`).
+Modules get an `Elm.` prefix. Idempotent.
 
 | Flag | Meaning |
 | --- | --- |
-| `-o, --out <dir>` | Workspace (`port`) or app root (`add`) |
+| `-o, --out <dir>` | App root |
 | `--cache <dir>` | Download / analysis cache (default `~/.cache/elm-to-gren`) |
 | `--platform <p>` | `auto` (default), `common`, `browser`, or `node` |
 | `--mapping <file>` | Extra mapping file (repeatable) |
@@ -74,7 +72,7 @@ node bin/elm-to-gren.cjs add elm-community/list-extra --cache ./cache
 # → gren.json: "local:.elm-to-gren/packages/..."
 ```
 
-## What ports / what does not
+## What converts / what does not
 
 **Good fit:** pure or browser libraries over `elm/core` and common packages
 (`json`, `time`, `random`, `bytes`, `regex`, `url`, `parser`, …).

@@ -61,14 +61,7 @@ objectPairs key pairs =
             Err ("Missing \"" ++ key ++ "\" field.")
 
         Just found ->
-            Decode.decodeValue (Decode.keyValuePairs Decode.value) found.value.value
-                |> Result.mapError
-                    (\problem ->
-                        "Field \""
-                            ++ key
-                            ++ "\" is not a JSON object: "
-                            ++ Decode.errorToString problem
-                    )
+            decodeObjectField key found.value
 
 
 {-| Like `objectPairs`, but a missing field is treated as `{}`. -}
@@ -79,14 +72,19 @@ objectPairsOrEmpty key pairs =
             Ok []
 
         Just found ->
-            Decode.decodeValue (Decode.keyValuePairs Decode.value) found.value.value
-                |> Result.mapError
-                    (\problem ->
-                        "Field \""
-                            ++ key
-                            ++ "\" is not a JSON object: "
-                            ++ Decode.errorToString problem
-                    )
+            decodeObjectField key found.value
+
+
+decodeObjectField : String -> Pair -> Result String (Array Pair)
+decodeObjectField key pair =
+    Decode.decodeValue (Decode.keyValuePairs Decode.value) pair.value
+        |> Result.mapError
+            (\problem ->
+                "Field \""
+                    ++ key
+                    ++ "\" is not a JSON object: "
+                    ++ Decode.errorToString problem
+            )
 
 
 setPair : String -> Decode.Value -> Array Pair -> Array Pair

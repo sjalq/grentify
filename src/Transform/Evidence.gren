@@ -71,8 +71,15 @@ collect registry dependencies modules =
         resolvedFiles =
             Array.map BareResolve.apply decodedFiles
 
+        -- Package-wide maps below are keyed `Module.Name`, and every lookup
+        -- against them comes from a transformed file, which speaks the mapped
+        -- module names. `NameSub.underMappedName` makes each file agree with
+        -- its own importers about what it is called, so those keys land where
+        -- they will be looked for.
         namedFiles =
-            Array.map (NameSub.apply registry) resolvedFiles
+            Array.map
+                (NameSub.apply registry >> NameSub.underMappedName registry)
+                resolvedFiles
 
         ownRecordAliases =
             mergeFileMaps RecordAlias.collectFromFile namedFiles
@@ -217,7 +224,7 @@ collectConstructorArities :
 collectConstructorArities registry modules =
     modules
         |> decodeFiles
-        |> Array.map (BareResolve.apply >> NameSub.apply registry)
+        |> Array.map (BareResolve.apply >> NameSub.apply registry >> NameSub.underMappedName registry)
         |> mergeFileMaps CtorLaw.collectFromFile
 
 
@@ -228,7 +235,7 @@ collectRecordAliases :
 collectRecordAliases registry modules =
     modules
         |> decodeFiles
-        |> Array.map (BareResolve.apply >> NameSub.apply registry)
+        |> Array.map (BareResolve.apply >> NameSub.apply registry >> NameSub.underMappedName registry)
         |> mergeFileMaps RecordAlias.collectFromFile
 
 
@@ -239,7 +246,7 @@ collectSoleConstructors :
 collectSoleConstructors registry modules =
     modules
         |> decodeFiles
-        |> Array.map (BareResolve.apply >> NameSub.apply registry)
+        |> Array.map (BareResolve.apply >> NameSub.apply registry >> NameSub.underMappedName registry)
         |> mergeFileMaps MatchCompile.collectSoleCtorsFromFile
 
 

@@ -1,4 +1,4 @@
-module Ast.NameSub exposing ( apply )
+module Ast.NameSub exposing ( apply, underMappedName )
 
 {-| Catalog-driven name substitution on a resolved AST.
 
@@ -80,6 +80,37 @@ apply registry file =
     -- Law: qualified refs must use the local import alias when present.
     -- `import Json.Decode as Decode` forbids `Json.Decode.field` in Gren/Elm.
     qualifyByImports withMapped
+
+
+{-| Restate a file's own module name as the name its importers now use.
+
+`apply` rewrites every import and reference through the catalog but leaves the
+module header alone, because the header belongs to the emitter: under `add` it
+is prefixed afterwards, textually, once per generated module. The two halves of
+that rename therefore disagree in between — the file calls itself
+`Yaml.Parser.Ast` while every other file in the port has been rewritten to say
+`Elm.Yaml.Parser.Ast`.
+
+The disagreement is invisible until something keys a package-wide map by module
+name, at which point every cross-module fact about this file is filed under a
+name no other file will ever ask for. `Transform.Evidence` builds exactly such
+maps, so it renames each file through here first. The header is untouched.
+-}
+underMappedName : Registry -> File -> File
+underMappedName registry file =
+    let
+        moduleDefinition =
+            file.moduleDefinition
+    in
+    when Registry.moduleMappingFor moduleDefinition.moduleName registry is
+        Nothing ->
+            file
+
+        Just mapping ->
+            { file
+                | moduleDefinition =
+                    { moduleDefinition | moduleName = mapping.target }
+            }
 
 
 {-| From `import Http exposing (Expect, …)`, if Expect remaps to a multi-segment

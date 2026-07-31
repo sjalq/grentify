@@ -90,6 +90,10 @@ type alias Assets =
     , mappings : Path
     , review : Path
     , elmReviewExecutable : String
+    , -- The Elm compiler bundled with this tool, when it is installed.
+      -- Handed to elm-review as `--compiler` so the extract phase does not
+      -- depend on whatever `elm` the caller happens to have on PATH.
+      elmExecutable : Maybe String
     , grenExecutable : String
     , formatExecutable : String
     }
@@ -728,6 +732,7 @@ transformUncached context permissions cacheRoot elmHome reviewAppCache offline n
                 , elmJson = Path.join [ packageRoot, Path.fromPosixString "elm.json" ]
                 , reviewConfig = assets.review
                 , executable = assets.elmReviewExecutable
+                , elmCompiler = assets.elmExecutable
                 , elmHome = Just elmHome
                 , files = reviewFiles
                 , offline = offline
@@ -1833,19 +1838,24 @@ locateAssets context permission =
     findAssetRoot permission candidates
         |> Task.andThen
             (\root ->
-                Task.map3
-                    (\elmReviewExecutable grenExecutable formatExecutable ->
-                        { root = root
-                        , mappings = Path.join [ root, Path.fromPosixString "mappings/builtin.json" ]
-                        , review = Path.join [ root, Path.fromPosixString "review" ]
-                        , elmReviewExecutable = elmReviewExecutable
-                        , grenExecutable = grenExecutable
-                        , formatExecutable = formatExecutable
-                        }
-                    )
-                    (binary context.platform permission root "elm-review")
-                    (binary context.platform permission root "gren")
-                    (formatTool permission root)
+                bundledBinary context.platform permission root "elm"
+                    |> Task.andThen
+                        (\elmExecutable ->
+                            Task.map3
+                                (\elmReviewExecutable grenExecutable formatExecutable ->
+                                    { root = root
+                                    , mappings = Path.join [ root, Path.fromPosixString "mappings/builtin.json" ]
+                                    , review = Path.join [ root, Path.fromPosixString "review" ]
+                                    , elmReviewExecutable = elmReviewExecutable
+                                    , elmExecutable = elmExecutable
+                                    , grenExecutable = grenExecutable
+                                    , formatExecutable = formatExecutable
+                                    }
+                                )
+                                (binary context.platform permission root "elm-review")
+                                (binary context.platform permission root "gren")
+                                (formatTool permission root)
+                        )
             )
 
 
@@ -1892,6 +1902,16 @@ findAssetRoot permission candidates =
 
 binary : Node.Platform -> FileSystem.Permission -> Path -> String -> Task error String
 binary platform permission root name =
+    bundledBinary platform permission root name
+        |> Task.map (Maybe.withDefault name)
+
+
+{-| The named executable as this tool installed it, or Nothing when it is not
+there. Callers that can do something better than a PATH lookup — passing
+elm-review an explicit `--compiler`, say — need to tell the two cases apart.
+-}
+bundledBinary : Node.Platform -> FileSystem.Permission -> Path -> String -> Task error (Maybe String)
+bundledBinary platform permission root name =
     let
         binDirectory =
             Path.join [ root, Path.fromPosixString "node_modules/.bin" ]
@@ -1908,24 +1928,24 @@ binary platform permission root name =
                 _ ->
                     [ Path.join [ binDirectory, Path.fromPosixString name ] ]
     in
-    firstExistingBinary platform permission candidates name
+    firstExistingBinary platform permission candidates
 
 
-firstExistingBinary : Node.Platform -> FileSystem.Permission -> Array Path -> String -> Task error String
-firstExistingBinary platform permission candidates fallback =
+firstExistingBinary : Node.Platform -> FileSystem.Permission -> Array Path -> Task error (Maybe String)
+firstExistingBinary platform permission candidates =
     when Array.popFirst candidates is
         Nothing ->
-            Task.succeed fallback
+            Task.succeed Nothing
 
         Just { first = candidate, rest } ->
             System.File.exists permission candidate
                 |> Task.andThen
                     (\exists ->
                         if exists then
-                            Task.succeed (System.File.pathToString platform candidate)
+                            Task.succeed (Just (System.File.pathToString platform candidate))
 
                         else
-                            firstExistingBinary platform permission rest fallback
+                            firstExistingBinary platform permission rest
                     )
 
 

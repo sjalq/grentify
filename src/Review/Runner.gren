@@ -28,6 +28,10 @@ type alias Options =
     , elmJson : Path
     , reviewConfig : Path
     , executable : String
+    , -- Absolute path to the Elm compiler elm-review must use, when we found
+      -- one bundled with this tool. `Nothing` leaves the choice to
+      -- elm-review's own lookup. See `compilerArguments`.
+      elmCompiler : Maybe String
     , elmHome : Maybe Path
     , files : Array String
     , offline : Bool
@@ -312,12 +316,15 @@ invokeReview platform childProcess options =
                 , "--debug"
                 ]
 
+        withCompiler =
+            Array.append baseArguments (compilerArguments options)
+
         arguments =
             if options.offline then
-                Array.pushLast "--offline" baseArguments
+                Array.pushLast "--offline" withCompiler
 
             else
-                baseArguments
+                withCompiler
 
         environment =
             when options.elmHome is
@@ -365,6 +372,33 @@ invokeReview platform childProcess options =
                         in
                         Task.fail enriched
             )
+
+
+{-| Pin the Elm compiler elm-review runs, instead of letting it search.
+
+elm-review resolves `elm` by walking `node_modules/.bin` upwards from ITS OWN
+working directory and then falling back to PATH. That working directory is the
+staged package tree — a fresh temp dir — so the walk finds nothing and the
+global `elm` wins. With any global Elm that is not 0.19.1 the extract phase
+dies on Elm's own ELM VERSION MISMATCH before a single module is parsed.
+
+This never showed up in development because `npm run …` puts this repo's
+`node_modules/.bin` on PATH, which is exactly the lookup that is missing when
+someone invokes `bin/elm-to-gren.cjs` directly from their own app. The
+compiler is now named explicitly, so which Elm we transpile against no longer
+depends on the caller's environment.
+
+`Nothing` (no bundled compiler found) keeps elm-review's own lookup rather
+than passing a bare name, which would resolve differently.
+-}
+compilerArguments : Options -> Array String
+compilerArguments options =
+    when options.elmCompiler is
+        Nothing ->
+            []
+
+        Just compiler ->
+            [ "--compiler", compiler ]
 
 
 {-| elm-review under --debug (D26) prints progress lines to stdout before the

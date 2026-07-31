@@ -1,0 +1,131 @@
+module Review.ProtocolTest exposing (tests)
+
+{-| What a failing elm-review run is allowed to look like on the way out.
+
+The extraction schema itself is covered by every e2e and ecosystem run — what
+is pinned here is the OTHER branch: a `type: "error"` report, which is the only
+thing the user gets to read when the tool never reached our rule at all. A
+message shape we cannot decode replaces the real diagnosis with a decoder
+complaint, so each shape elm-review emits is checked to survive the trip.
+-}
+
+import Array exposing (Array)
+import Port.Error as PortError
+import Review.Protocol as Protocol
+
+
+type alias TestResult =
+    { name : String
+    , passed : Bool
+    , details : String
+    }
+
+
+tests : Array TestResult
+tests =
+    [ plainToolErrorSurfaces
+    , styledToolErrorSurfaces
+    , mixedChunksKeepTheirSentence
+    , unknownChunkShapeStaysAnInvalidReport
+    ]
+
+
+{-| elm-review's own errors: `message` is one plain string.
+-}
+plainToolErrorSurfaces : TestResult
+plainToolErrorSurfaces =
+    """
+{"type":"error","title":"ELM NOT FOUND","message":["I could not find the executable for the elm compiler."]}
+"""
+        |> failureMessage
+        |> expectEqual
+            "a plain-string tool error reports its title and body"
+            (Ok "ELM_REVIEW_FAILED: ELM NOT FOUND\nI could not find the executable for the elm compiler.")
+
+
+{-| Errors elm-review forwards from the Elm compiler keep Elm's styled chunks.
+This is the exact report that reached a user as `Expecting a STRING`.
+-}
+styledToolErrorSurfaces : TestResult
+styledToolErrorSurfaces =
+    """
+{"type":"error","path":"elm.json","title":"ELM VERSION MISMATCH","message":["Your elm.json says this application needs a different version of Elm.\\n\\nIt requires ",{"bold":false,"underline":false,"color":"GREEN","string":"0.19.1"},", but you are using ",{"bold":false,"underline":false,"color":"RED","string":"0.19.2"}," right now."]}
+"""
+        |> failureMessage
+        |> expectEqual
+            "a styled tool error reports the compiler's own words, not a decoder complaint"
+            (Ok "ELM_REVIEW_FAILED: ELM VERSION MISMATCH\nYour elm.json says this application needs a different version of Elm.\n\nIt requires 0.19.1, but you are using 0.19.2 right now.")
+
+
+{-| The chunks are spans of one sentence, so they concatenate. Joining them on
+newlines would leave the reader a message broken at every colour change.
+-}
+mixedChunksKeepTheirSentence : TestResult
+mixedChunksKeepTheirSentence =
+    """
+{"type":"error","title":"T","message":["a ",{"string":"b"}," c"]}
+"""
+        |> failureMessage
+        |> expectEqual
+            "adjacent chunks concatenate rather than becoming separate lines"
+            (Ok "ELM_REVIEW_FAILED: T\na b c")
+
+
+{-| Tolerance has a floor: a chunk with no readable text is still a report we
+do not understand, and saying so beats inventing a message.
+-}
+unknownChunkShapeStaysAnInvalidReport : TestResult
+unknownChunkShapeStaysAnInvalidReport =
+    """
+{"type":"error","title":"T","message":[{"colour":"GREEN"}]}
+"""
+        |> failureCode
+        |> expectEqual
+            "a message chunk carrying no text is reported as an undecodable report"
+            (Ok "ELM_REVIEW_REPORT_INVALID")
+
+
+{-| `Protocol.decode` never succeeds on a `type: "error"` report; Ok here would
+itself be the failure, so the extraction case is folded into an Err.
+-}
+failureMessage : String -> Result String String
+failureMessage report =
+    when Protocol.decode report is
+        Ok _ ->
+            Err "Expected the tool error to fail decoding, but an extraction came back."
+
+        Err error ->
+            Ok (PortError.code error ++ ": " ++ PortError.message error)
+
+
+failureCode : String -> Result String String
+failureCode report =
+    when Protocol.decode report is
+        Ok _ ->
+            Err "Expected the tool error to fail decoding, but an extraction came back."
+
+        Err error ->
+            Ok (PortError.code error)
+
+
+expectEqual : String -> Result String String -> Result String String -> TestResult
+expectEqual name expected actual =
+    { name = name
+    , passed = expected == actual
+    , details =
+        if expected == actual then
+            ""
+
+        else
+            "Expected " ++ render expected ++ ", got " ++ render actual
+    }
+
+
+render : Result String String -> String
+render result =
+    when result is
+        Ok value ->
+            "Ok " ++ value
+
+        Err problem ->
+            "Err " ++ problem

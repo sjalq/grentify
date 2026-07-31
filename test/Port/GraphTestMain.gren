@@ -90,6 +90,7 @@ fixtureOptions platform workingDirectory fixture =
     , mappingOverlays = []
     , reviewConfig = inProject "review"
     , elmReviewExecutable = Path.toPosixString (inProject "node_modules/.bin/elm-review")
+    , elmExecutable = Just (Path.toPosixString (inProject "node_modules/.bin/elm"))
     , grenExecutable = Path.toPosixString (inProject "node_modules/.bin/gren")
     , formatExecutable = Path.toPosixString (inProject "tools/gren-format/app")
     , elmHome = Just (Path.append (Path.fromPosixString "elm-home") cacheDirectory)

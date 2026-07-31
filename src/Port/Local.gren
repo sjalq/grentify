@@ -38,6 +38,7 @@ type alias Options =
     , builtinMapping : Path
     , overlayMappings : Array Path
     , elmReviewExecutable : String
+    , elmExecutable : Maybe String
     , grenExecutable : String
     , formatExecutable : String
     , requestedPlatform : Cli.PlatformChoice
@@ -77,6 +78,7 @@ run options =
                                             , elmJson = elmJson
                                             , reviewConfig = options.reviewConfig
                                             , executable = options.elmReviewExecutable
+                                            , elmCompiler = options.elmExecutable
                                             , elmHome = Nothing
                                             , files = []
                                             , offline = options.offline

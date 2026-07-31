@@ -79,6 +79,7 @@ type alias Options =
     , mappingOverlays : Array Path
     , reviewConfig : Path
     , elmReviewExecutable : String
+    , elmExecutable : Maybe String
     , grenExecutable : String
     , formatExecutable : String
     , elmHome : Maybe Path
@@ -373,6 +374,7 @@ transformOne permissions options registry source =
         , elmJson = elmJson
         , reviewConfig = options.reviewConfig
         , executable = options.elmReviewExecutable
+        , elmCompiler = options.elmExecutable
         , elmHome = options.elmHome
         , files = [ "src" ]
         , offline = options.offline

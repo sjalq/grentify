@@ -154,12 +154,10 @@ decode source =
 toolErrorMessageDecoder : Decoder String
 toolErrorMessageDecoder =
     Decode.map2
-        (\title messages ->
+        (\title chunks ->
             let
                 body =
-                    messages
-                        |> Array.keepIf (String.isEmpty >> not)
-                        |> String.join "\n"
+                    String.trim (String.join "" chunks)
             in
             if String.isEmpty body then
                 title
@@ -168,7 +166,28 @@ toolErrorMessageDecoder =
                 title ++ "\n" ++ body
         )
         (Decode.field "title" Decode.string)
-        (Decode.field "message" (Decode.array Decode.string))
+        (Decode.field "message" (Decode.array messageChunkDecoder))
+
+
+{-| One piece of a tool error's message.
+
+elm-review writes its own errors as a single plain string, but an error it is
+forwarding from the Elm compiler keeps Elm's styled form: a run of plain
+strings interleaved with `{bold, underline, color, string}` objects. Reading
+only the plain form made every forwarded error decode-fail, so the report the
+user saw was a Json.Decode complaint about a colour object rather than the
+compiler's actual complaint — an ELM VERSION MISMATCH reduced to
+`Expecting a STRING`.
+
+The chunks are consecutive spans of one message, not lines, so they are
+concatenated: splitting on them would cut sentences in half.
+-}
+messageChunkDecoder : Decoder String
+messageChunkDecoder =
+    Decode.oneOf
+        [ Decode.string
+        , Decode.field "string" Decode.string
+        ]
 
 
 reviewErrorsSummaryDecoder : Decoder String

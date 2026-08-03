@@ -1,0 +1,20 @@
+{
+    "type": "application",
+    "platform": "browser",
+    "source-directories": [
+        "src"
+    ],
+    "gren-version": "0.6.6",
+    "dependencies": {
+        "direct": {
+            "gren-lang/browser": "6.0.2",
+            "gren-lang/core": "7.4.2",
+            "mdgriffith/elm-ui": "local:.elm-to-gren/packages/mdgriffith_elm-ui__2_0_0"
+        },
+        "indirect": {
+            "gren-lang/url": "6.0.0",
+            "aramiscd/gren-color": "1.0.1",
+            "mdgriffith/elm-bezier": "local:.elm-to-gren/packages/mdgriffith_elm-bezier__1_0_0"
+        }
+    }
+}

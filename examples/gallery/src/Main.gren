@@ -10,12 +10,12 @@ as the TodoMVC package panel).
 
 import Array exposing (Array)
 import Browser
-import Element exposing (..)
-import Element.Background as Background
-import Element.Border as Border
-import Element.Font as Font
-import Element.Input as Input
-import Element.Region as Region
+import Elm.Element exposing (..)
+import Elm.Element.Background as Background
+import Elm.Element.Border as Border
+import Elm.Element.Font as Font
+import Elm.Element.Input as Input
+import Elm.Element.Region as Region
 import Html
 import Html.Attributes as HA
 
@@ -46,6 +46,7 @@ type Tab
     = Todo
     | Syntax
     | Review
+    | Ui2
 
 
 type alias Package =
@@ -144,6 +145,7 @@ tabBar active =
         [ tabButton active Todo "TodoMVC"
         , tabButton active Syntax "elm-syntax"
         , tabButton active Review "elm-review"
+        , tabButton active Ui2 "elm-ui v2"
         ]
 
 
@@ -210,6 +212,9 @@ panelBlurb tab =
         Review ->
             "Review-style static analysis on the ported elm-syntax AST (NoDebug, NoExposingAll, unused/duplicate imports). Full jfmengels/elm-review not yet compiler-green under Gren."
 
+        Ui2 ->
+            "The unreleased elm-ui 2.0 rewrite (Ui.* modules), ported straight off the GitHub 2.0 branch together with elm-animator v2. Buttons-as-attributes, gradients, shadows, chooseOne."
+
 
 packagesFor : Tab -> Array Package
 packagesFor tab =
@@ -249,6 +254,14 @@ packagesFor tab =
             , { name = "gren-lang/browser + core", role = "sandbox host" }
             ]
 
+        Ui2 ->
+            [ { name = "mdgriffith/elm-ui @ 2.0 branch", role = "Ui, Ui.Font, Ui.Input, Ui.Gradient, Ui.Shadow" }
+            , { name = "mdgriffith/elm-animator @ v2 branch", role = "vendored beside elm-ui (undeclared upstream dep)" }
+            , { name = "mdgriffith/elm-bezier", role = "transitive easing curves" }
+            , { name = "avh4/elm-color → aramiscd/gren-color", role = "mapped color dependency" }
+            , { name = "gren-lang/browser + core", role = "sandbox host" }
+            ]
+
 
 packageChip : Package -> Element msg
 packageChip pkg =
@@ -280,6 +293,9 @@ demoFrame tab =
 
                 Review ->
                     "review/index.html"
+
+                Ui2 ->
+                    "ui2/index.html"
     in
     el
         [ width fill

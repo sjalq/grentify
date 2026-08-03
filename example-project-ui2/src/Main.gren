@@ -1,0 +1,316 @@
+module Main exposing (main)
+
+{-| Demo for the ported elm-ui 2.0 (unreleased GitHub `2.0` branch).
+
+Exercises the v2 API surface that differs from 1.x: fill-by-default sizing,
+`Ui.Input.button` as an attribute, the `Input.label` id pairing, gradients,
+and box shadows. Vendored via `scripts/add-elm-ui-v2.cjs`.
+-}
+
+import Browser
+import Math
+import Elm.Ui as Ui
+import Elm.Ui.Font as Font
+import Elm.Ui.Gradient as Gradient
+import Elm.Ui.Input as Input
+import Elm.Ui.Shadow as Shadow
+import Html
+
+
+
+-- MAIN
+
+
+main : Program {} Model Msg
+main =
+    Browser.sandbox
+        { init = init
+        , view = view
+        , update = update
+        }
+
+
+
+-- MODEL
+
+
+type alias Model =
+    { count : Int
+    , name : String
+    , subscribe : Bool
+    , brightness : Float
+    , flavour : Flavour
+    }
+
+
+type Flavour
+    = Vanilla
+    | Chocolate
+    | Hazelnut
+
+
+init : Model
+init =
+    { count = 0
+    , name = ""
+    , subscribe = True
+    , brightness = 70
+    , flavour = Chocolate
+    }
+
+
+
+-- UPDATE
+
+
+type Msg
+    = Increment
+    | Decrement
+    | NameChanged String
+    | SubscribeToggled Bool
+    | BrightnessChanged Float
+    | FlavourChosen Flavour
+
+
+update : Msg -> Model -> Model
+update msg model =
+    when msg is
+        Increment ->
+            { model | count = model.count + 1 }
+
+        Decrement ->
+            { model | count = model.count - 1 }
+
+        NameChanged name ->
+            { model | name = name }
+
+        SubscribeToggled subscribe ->
+            { model | subscribe = subscribe }
+
+        BrightnessChanged brightness ->
+            { model | brightness = brightness }
+
+        FlavourChosen flavour ->
+            { model | flavour = flavour }
+
+
+
+-- VIEW
+
+
+view : Model -> Html.Html Msg
+view model =
+    Ui.layout Ui.default
+        [ Ui.background palette.page
+        , Font.family
+            [ Font.typeface "Inter"
+            , Font.typeface "system-ui"
+            , Font.sansSerif
+            ]
+        , Font.color palette.ink
+        , Font.size 15
+        ]
+        (Ui.column
+            [ Ui.widthMax 720
+            , Ui.centerX
+            , Ui.padding 28
+            , Ui.spacing 20
+            ]
+            [ hero
+            , card "Counter · Input.button is an attribute in v2"
+                (counter model.count)
+            , card "Text input · Input.label pairs ids explicitly"
+                (nameField model.name)
+            , card "Checkbox + slider"
+                (Ui.column [ Ui.spacing 14 ]
+                    [ subscribeBox model.subscribe
+                    , brightnessSlider model.brightness
+                    ]
+                )
+            , card "chooseOne · radios over any layout"
+                (flavourPicker model.flavour)
+            , footer
+            ]
+        )
+
+
+hero : Ui.Element msg
+hero =
+    Ui.column
+        [ Ui.padding 24
+        , Ui.rounded 14
+        , Ui.backgroundGradient
+            [ Gradient.linear (Ui.turns 0.125)
+                [ Gradient.percent 0 palette.grapeDark
+                , Gradient.percent 100 palette.grape
+                ]
+            ]
+        , Font.color palette.white
+        , Ui.spacing 8
+        , Shadow.shadows
+            [ { x = 0, y = 10, size = -6, blur = 24, color = palette.shadow }
+            ]
+        ]
+        [ Ui.el [ Font.size 24, Font.bold ] (Ui.text "elm-ui 2.0 → Gren")
+        , Ui.el [ Font.size 14 ]
+            (Ui.text "The unreleased v2 rewrite (Ui.* modules + elm-animator v2), transpiled and compiler-verified by grentify.")
+        ]
+
+
+counter : Int -> Ui.Element Msg
+counter count =
+    Ui.row [ Ui.spacing 12, Ui.width Ui.shrink ]
+        [ chip (Input.button Decrement) "−"
+        , Ui.el
+            [ Font.size 20
+            , Font.bold
+            , Ui.width (Ui.px 60)
+            , Font.center
+            ]
+            (Ui.text (String.fromInt count))
+        , chip (Input.button Increment) "+"
+        ]
+
+
+chip : Ui.Attribute Msg -> String -> Ui.Element Msg
+chip onPress caption =
+    Ui.el
+        [ onPress
+        , Ui.width (Ui.px 44)
+        , Ui.paddingXY 0 10
+        , Ui.rounded 10
+        , Ui.background palette.grape
+        , Font.color palette.white
+        , Font.center
+        , Font.bold
+        , Ui.pointer
+        ]
+        (Ui.text caption)
+
+
+nameField : String -> Ui.Element Msg
+nameField name =
+    let
+        field =
+            Input.label "demo-name"
+                [ Font.size 13, Font.color palette.muted ]
+                (Ui.text "Your name")
+    in
+    Ui.column [ Ui.spacing 6 ]
+        [ field.element
+        , Input.text
+            [ Ui.padding 10
+            , Ui.rounded 8
+            , Ui.border 1
+            , Ui.borderColor palette.line
+            , Ui.background palette.white
+            ]
+            { onChange = NameChanged
+            , text = name
+            , placeholder = Just "Ada Lovelace"
+            , label = field.id
+            }
+        , Ui.el [ Font.size 13, Font.color palette.muted ]
+            (Ui.text
+                (if String.isEmpty name then
+                    "Type something…"
+
+                 else
+                    "Hello, " ++ name ++ "!"
+                )
+            )
+        ]
+
+
+subscribeBox : Bool -> Ui.Element Msg
+subscribeBox subscribe =
+    labelled "Subscribe to updates"
+        (Input.checkbox [ Ui.width Ui.shrink ]
+            { onChange = SubscribeToggled
+            , icon = Nothing
+            , checked = subscribe
+            , label = Input.labelHidden "Subscribe to updates"
+            }
+        )
+
+
+brightnessSlider : Float -> Ui.Element Msg
+brightnessSlider brightness =
+    let
+        pct =
+            String.fromInt (Math.round brightness) ++ "%"
+    in
+    Ui.column [ Ui.spacing 6 ]
+        [ Ui.el [ Font.size 13, Font.color palette.muted ]
+            (Ui.text ("Brightness · " ++ pct))
+        , Input.sliderHorizontal []
+            { label = Input.labelHidden "Brightness"
+            , onChange = BrightnessChanged
+            , min = 0
+            , max = 100
+            , value = brightness
+            , thumb = Nothing
+            , step = Just 1
+            }
+        ]
+
+
+labelled : String -> Ui.Element Msg -> Ui.Element Msg
+labelled caption control =
+    Ui.row [ Ui.spacing 8, Ui.width Ui.shrink ]
+        [ control
+        , Ui.text caption
+        ]
+
+
+flavourPicker : Flavour -> Ui.Element Msg
+flavourPicker flavour =
+    Input.chooseOne Ui.row
+        [ Ui.spacing 16, Ui.width Ui.shrink ]
+        { onChange = FlavourChosen
+        , options =
+            [ Input.option Vanilla (Ui.text "Vanilla")
+            , Input.option Chocolate (Ui.text "Chocolate")
+            , Input.option Hazelnut (Ui.text "Hazelnut")
+            ]
+        , selected = Just flavour
+        , label = Input.labelHidden "Flavour"
+        }
+
+
+card : String -> Ui.Element Msg -> Ui.Element Msg
+card title content =
+    Ui.column
+        [ Ui.padding 18
+        , Ui.spacing 12
+        , Ui.rounded 12
+        , Ui.background palette.white
+        , Ui.border 1
+        , Ui.borderColor palette.line
+        ]
+        [ Ui.el [ Font.size 13, Font.bold, Font.color palette.muted ]
+            (Ui.text title)
+        , content
+        ]
+
+
+footer : Ui.Element msg
+footer =
+    Ui.el [ Font.size 12, Font.color palette.muted, Ui.centerX ]
+        (Ui.text "mdgriffith/elm-ui @ 2.0 branch + mdgriffith/elm-animator @ v2 · ported by grentify")
+
+
+
+-- palette
+
+
+palette =
+    { page = Ui.rgb 245 246 248
+    , white = Ui.rgb 255 255 255
+    , ink = Ui.rgb 24 28 36
+    , muted = Ui.rgb 110 118 132
+    , line = Ui.rgb 226 228 234
+    , grape = Ui.rgb 123 97 255
+    , grapeDark = Ui.rgb 76 51 178
+    , shadow = Ui.rgba 30 20 80 0.35
+    }

@@ -19,6 +19,10 @@ example-project-review/.elm-to-gren/
 example-project-review/gren_packages/
 example-project-review/.gren/
 example-project-review/index.html
+example-project-ui2/.elm-to-gren/
+example-project-ui2/gren_packages/
+example-project-ui2/.gren/
+example-project-ui2/index.html
 examples/**/.elm-to-gren/
 examples/**/gren_packages/
 examples/**/.gren/

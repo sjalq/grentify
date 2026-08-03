@@ -12,12 +12,12 @@ under Gren; these rules mirror Review.Rule's report shape on the ported AST.
 
 import Array exposing (Array)
 import Browser
-import Element exposing (..)
-import Element.Background as Background
-import Element.Border as Border
-import Element.Font as Font
-import Element.Input as Input
-import Element.Region as Region
+import Elm.Element exposing (..)
+import Elm.Element.Background as Background
+import Elm.Element.Border as Border
+import Elm.Element.Font as Font
+import Elm.Element.Input as Input
+import Elm.Element.Region as Region
 import Elm.Parser as Parser
 import Elm.Processing as Processing
 import Elm.Syntax.Declaration as Declaration exposing (Declaration(..))

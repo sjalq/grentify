@@ -26,7 +26,7 @@ function run(cwd, args) {
 }
 
 const site = path.join(root, "site");
-for (const dir of ["todo", "syntax", "review"]) {
+for (const dir of ["todo", "syntax", "review", "ui2"]) {
   fs.mkdirSync(path.join(site, dir), { recursive: true });
 }
 
@@ -71,6 +71,11 @@ run(path.join(root, "example-project-review"), [
   "make",
   "Main",
   "--output=" + path.join(site, "review", "index.html"),
+]);
+run(path.join(root, "example-project-ui2"), [
+  "make",
+  "Main",
+  "--output=" + path.join(site, "ui2", "index.html"),
 ]);
 
 console.log("site ready:", site);

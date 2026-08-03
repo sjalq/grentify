@@ -2129,14 +2129,20 @@ encodeDiagnostic diagnostic =
 
 {-| Prefix a ported module with `Elm.`: its declared name, its file path, and
 the `module ...` header inside its source. Applied only to ported package
-modules; compatibility adapters keep their own names.
+modules; compatibility adapters keep their own names. A module already named
+`Elm.X` (elm-syntax's `Elm.Parser`, …) is left alone (D14) — the manifest's
+exposed-modules skip the prefix for those, so the sources must too.
 -}
 namespaceGeneratedModule : Mapping.GeneratedModule -> Mapping.GeneratedModule
 namespaceGeneratedModule generated =
-    { moduleName = "Elm." ++ generated.moduleName
-    , relativePath = namespaceModulePath generated.relativePath
-    , source = namespaceModuleDeclaration generated.moduleName generated.source
-    }
+    if String.startsWith "Elm." generated.moduleName then
+        generated
+
+    else
+        { moduleName = "Elm." ++ generated.moduleName
+        , relativePath = namespaceModulePath generated.relativePath
+        , source = namespaceModuleDeclaration generated.moduleName generated.source
+        }
 
 
 namespaceModulePath : String -> String
@@ -2254,15 +2260,21 @@ overlayPortedModules sources registry =
                         (\filename inner ->
                             when moduleNameFromSource source.root filename is
                                 Just name ->
-                                    Dict.set name
-                                        { source = name
-                                        , target = "Elm." ++ name
-                                        , values = Dict.empty
-                                        , types = Dict.empty
-                                        , recordAliases = Dict.empty
-                                        , constructorFields = Dict.empty
-                                        }
+                                    -- D14: a module already named `Elm.X` keeps its
+                                    -- name, so importers need no rewrite entry.
+                                    if String.startsWith "Elm." name then
                                         inner
+
+                                    else
+                                        Dict.set name
+                                            { source = name
+                                            , target = "Elm." ++ name
+                                            , values = Dict.empty
+                                            , types = Dict.empty
+                                            , recordAliases = Dict.empty
+                                            , constructorFields = Dict.empty
+                                            }
+                                            inner
 
                                 Nothing ->
                                     inner

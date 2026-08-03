@@ -116,29 +116,35 @@ view model =
             , Ui.padding 28
             , Ui.spacing 20
             ]
-            [ hero
+            [ hero model.brightness
             , card "Counter · Input.button is an attribute in v2"
                 (counter model.count)
             , card "Text input · Input.label pairs ids explicitly"
                 (nameField model.name)
-            , card "Checkbox + slider"
+            , card "Checkbox + slider · slider drives the hero's opacity"
                 (Ui.column [ Ui.spacing 14 ]
                     [ subscribeBox model.subscribe
                     , brightnessSlider model.brightness
                     ]
                 )
             , card "chooseOne · radios over any layout"
-                (flavourPicker model.flavour)
+                (Ui.column [ Ui.spacing 10 ]
+                    [ flavourPicker model.flavour
+                    , Ui.el [ Font.size 13, Font.color palette.muted ]
+                        (Ui.text ("Selected: " ++ flavourName model.flavour))
+                    ]
+                )
             , footer
             ]
         )
 
 
-hero : Ui.Element msg
-hero =
+hero : Float -> Ui.Element msg
+hero brightness =
     Ui.column
         [ Ui.padding 24
         , Ui.rounded 14
+        , Ui.opacity (0.25 + 0.75 * brightness / 100)
         , Ui.backgroundGradient
             [ Gradient.linear (Ui.turns 0.125)
                 [ Gradient.percent 0 palette.grapeDark
@@ -224,8 +230,14 @@ nameField name =
 
 subscribeBox : Bool -> Ui.Element Msg
 subscribeBox subscribe =
-    labelled "Subscribe to updates"
-        (Input.checkbox [ Ui.width Ui.shrink ]
+    labelled
+        (if subscribe then
+            "Subscribed · you're on the list"
+
+         else
+            "Subscribe to updates"
+        )
+        (Input.checkbox []
             { onChange = SubscribeToggled
             , icon = Nothing
             , checked = subscribe
@@ -261,6 +273,19 @@ labelled caption control =
         [ control
         , Ui.text caption
         ]
+
+
+flavourName : Flavour -> String
+flavourName flavour =
+    when flavour is
+        Vanilla ->
+            "Vanilla"
+
+        Chocolate ->
+            "Chocolate"
+
+        Hazelnut ->
+            "Hazelnut"
 
 
 flavourPicker : Flavour -> Ui.Element Msg
